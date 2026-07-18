@@ -151,6 +151,7 @@ def run_experiment(
             print("Trial run completed, stopping after 2 questions.")
             break
     
+    thug_env.flush_logging()
     return accum_success, tested_num, accum_reward
 
 #TODO: fix eval step default value
@@ -213,10 +214,18 @@ if __name__ == "__main__":
         "react_reflexion": ReActReflexionAgent,
     }
 
-    if args.agent in agent_map:
+    if args.agent == "baseline":
+        test_agent = BaselineAgent(
+            config_list=agent_config_list,
+            cache_seed=cache_seed,
+            temperature=temperature,
+            max_steps=max_steps,
+            submit_summary=True,
+        )
+    elif args.agent in agent_map:
         test_agent = agent_map[args.agent](
             config_list=agent_config_list,
-            cache_seed=cache_seed, 
+            cache_seed=cache_seed,
             temperature=temperature,
             max_steps=max_steps,
         )

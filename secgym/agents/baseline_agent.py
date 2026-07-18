@@ -211,43 +211,106 @@ class BaselineAgent:
             self._add_message(observation, role="user")
         else:
             self._add_message(observation, role="user")
+
+        final_step = (
+            self.step_count >= self.max_steps - 1
+            and self.submit_summary
+        )
+
+        if final_step:
+            final_prompt = (
+                "This is the final allowed step. No more database queries "
+                "or actions may be executed. Using only the evidence already "
+                "collected, submit your best final answer even if uncertain. "
+                "Return exactly one thought-action pair:\n"
+                "Thought: <brief conclusion>\n"
+                "Action: submit[<your best final answer>]\n"
+                "The Action must be submit[...]. Never use execute[...]."
+            )
+            self._add_message(final_prompt, role="user")
+
         response = self._call_llm(messages=self.messages)
         print(response)
 
-        if self.step_count >= self.max_steps-1 and self.submit_summary:
-            summary_prompt = "You have reached maximum number of steps. Please summarize your findings of key information, and sumbit them."
-            self._add_message(summary_prompt, role="system")
+        parsed_action, is_code, submit = sql_parser(response)
 
-        split_str = "\nAction:"
-        if "r1" in self.config_list[0]['model'] or "R1" in self.config_list[0]['model'] or "qwen3" in self.config_list[0]['model']:
-            split_str = "<answer>"
-
-        if "**Action:**" in response:
-            split_str = "\n**Action:**"
-        try:
-            thought, action = response.strip().split(split_str)
-            action = action.replace("<answer>", "").replace("</answer>", "")
+        if final_step:
             self._add_message(response.strip(), role="assistant")
-        except:
-            print("\nRetry Split Action:")
-            thought = response.strip()
-            action = self._call_llm(self.messages + [msging(f"{thought}\nAction:")])
-            print(action)
-            action = action.strip()
-            action = action.replace("<answer>", "").replace("</answer>", "")
-            if not "Thought" in thought:
-                thought = f"Thought: {thought}"
-            self._add_message(f"{thought}\nAction:{action}", role="assistant")
-        
-        print("*"*50)
 
+            if not (is_code and submit):
+                correction_prompt = (
+                    "Your previous response did not provide the required "
+                    "final submit action. No further SQL query or database "
+                    "action is allowed. Based only on the evidence already "
+                    "collected, return exactly:\n"
+                    "Thought: <brief conclusion>\n"
+                    "Action: submit[<your best final answer>]\n"
+                    "You must use submit[...]. Do not use execute[...], "
+                    "do not provide multiple actions, and do not continue "
+                    "investigating."
+                )
+                self._add_message(correction_prompt, role="user")
+
+                print("\nRetry Final Submit:")
+                correction_response = self._call_llm(
+                    messages=self.messages
+                )
+                print(correction_response)
+
+                corrected_action, corrected_is_code, corrected_submit = (
+                    sql_parser(correction_response)
+                )
+
+                self._add_message(
+                    correction_response.strip(),
+                    role="assistant",
+                )
+
+                if corrected_is_code and corrected_submit:
+                    parsed_action = corrected_action
+                    submit = True
+                else:
+                    # Stop safely at the step limit. Never return an
+                    # execute action after the final allowed step.
+                    parsed_action = (
+                        "No valid final answer was produced by the model."
+                    )
+                    submit = True
+
+            print("*" * 50)
+            self.step_count += 1
+            return parsed_action, submit
+
+        # Normal non-final step behavior.
+        if is_code:
+            self._add_message(response.strip(), role="assistant")
+        else:
+            print("\nRetry Parse Action:")
+            thought = response.strip()
+            retry_response = self._call_llm(
+                self.messages + [msging(f"{thought}\nAction:")]
+            )
+            print(retry_response)
+
+            parsed_action, is_code, submit = sql_parser(
+                retry_response
+            )
+
+            if not is_code:
+                parsed_action = retry_response.strip()
+
+            if "Thought" not in thought:
+                thought = f"Thought: {thought}"
+
+            self._add_message(
+                f"{thought}\nAction:{retry_response.strip()}",
+                role="assistant",
+            )
+
+        print("*" * 50)
         self.step_count += 1
-        # parse the action
-        parsed_action, is_code, submit = sql_parser(action)
-        
-        # submit = True if "submit" in thought.lower() else False
         return parsed_action, submit
-    
+
     def get_logging(self):
         return {
             "messages": self.messages,

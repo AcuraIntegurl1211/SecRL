@@ -16,24 +16,43 @@ def msging(msg: str, role: str="user"):
     return {"role": role, "content": msg}
 
 def sql_parser(action: str, code_block=False):
-    # remove ` in the str
+    """Extract the last complete execute[...] or submit[...] action."""
     action = action.replace("`", "")
-    if "submit[" in action:
-        pattern = r'submit\[(.*)\]'
-        submit = True
-    else:
-        if code_block:
-            pattern = r'```sql(.*?)```'
-        pattern = r'execute\[(.*)\]'
-        submit = False
 
-    matches = re.findall(pattern, action, re.DOTALL)
-    if len(matches) > 0:
-        action = matches[0]
-        if ";" in action:
-            return action[:action.index(";")], True, submit
-        return action, True, submit
-    return action, False, submit
+    matches = list(
+        re.finditer(
+            r"\b(submit|execute)\[(.*?)\]",
+            action,
+            flags=re.DOTALL | re.IGNORECASE,
+        )
+    )
+
+    if matches:
+        match = matches[-1]
+        action_type = match.group(1).lower()
+        parsed_action = match.group(2).strip()
+        submit = action_type == "submit"
+
+        # Preserve the original behavior of executing only the first
+        # SQL statement, but do not truncate submitted answers.
+        if not submit and ";" in parsed_action:
+            parsed_action = parsed_action.split(";", 1)[0].strip()
+
+        return parsed_action, True, submit
+
+    if code_block:
+        sql_blocks = re.findall(
+            r"```sql(.*?)```",
+            action,
+            flags=re.DOTALL | re.IGNORECASE,
+        )
+        if sql_blocks:
+            parsed_action = sql_blocks[-1].strip()
+            if ";" in parsed_action:
+                parsed_action = parsed_action.split(";", 1)[0].strip()
+            return parsed_action, True, False
+
+    return action.strip(), False, False
 
 def call_llm_foundry(
         client:ChatCompletionsClient, 
