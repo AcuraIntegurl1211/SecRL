@@ -15,17 +15,43 @@ from secgym.agents import BaselineAgent, PromptSauceAgent, MultiModelBaselineAge
 
 #config_list_4_turbo, config_list_35
 
+def resolve_question_indices(
+        num_questions,
+        num_test=None,
+        question_index=None,
+    ):
+    """Resolve zero-based question indexes for one experiment run."""
+    if question_index is not None:
+        if question_index < 0 or question_index >= num_questions:
+            raise ValueError(
+                f"question_index must be between 0 and "
+                f"{num_questions - 1}, got {question_index}"
+            )
+        return [question_index]
+
+    question_limit = (
+        num_questions
+        if num_test is None or num_test < 0
+        else min(num_test, num_questions)
+    )
+    return range(question_limit)
+
+
 def run_experiment(
         agent,
         thug_env: ExcytinEnv,
         save_agent_file: str,
         num_test: Union[int, None] = None,
+        question_index: Union[int, None] = None,
         num_trials: int = 1,
         overwrite: bool = False,
         trial_run: bool = False,
     ):
-    if num_test is None:
-        num_test = thug_env.num_questions
+    question_indices = resolve_question_indices(
+        num_questions=thug_env.num_questions,
+        num_test=num_test,
+        question_index=question_index,
+    )
     if trial_run:
         overwrite = True
 
@@ -45,7 +71,7 @@ def run_experiment(
             tested_question_keys = set([log["nodes"] for log in accum_logs])
             print(f"Loaded logs from {save_agent_file}")
         
-    for i in range(thug_env.num_questions):
+    for i in question_indices:
         #emptying the replay buffer for each question
         if agent.name == "ReactReflexionAgent" or agent.name == "PromptSauceReflexionAgent":
             agent.replay_buffer = []
@@ -54,10 +80,6 @@ def run_experiment(
         is_solved = False
         trials_dict = {}
         for tid in range(num_trials):
-            if i == num_test:
-                print(f"Tested {num_test} questions. Stopping...")
-                break
-            
             # reset environment and agent
             observation, _ = thug_env.reset(i) # first observation is question dict
             if agent.name == "ExpelAgent":
@@ -166,11 +188,18 @@ def get_args():
     #parser.add_argument("--step_checking", action="store_true", help="Evaluate each step")
     parser.add_argument("--agent", type=str, default="baseline", help="Agent to use for the experiment")
     parser.add_argument("--num_trials", type=int, default=1, help="Number of trials to run for each question if not solved")
+    parser.add_argument("--num_test", type=int, default=-1, help="Number of questions to run for each selected incident; -1 runs all questions")
+    parser.add_argument("--question_index", type=int, default=None, help="Run one question by zero-based index; cannot be combined with --num_test")
     parser.add_argument("--split", type=str, default="test", help="Split to use for the experiment")
     parser.add_argument("--full_db", action="store_true", help="Use full database for the experiment. Need to setup 'AlphineSkiHouse' database first.")
     parser.add_argument("--trial_run", action="store_true", help="Run the experiment in trial mode, will only run 2 questions from the first attack")
     parser.add_argument("--overwrite", action="store_true", help="Overwrite the saved agent file if it exists")
+    parser.add_argument("--attack", type=str, choices=list(ATTACKS), default=None, help="Run only the selected incident, for example incident_5")
     args = parser.parse_args()
+    if args.question_index is not None and args.num_test != -1:
+        parser.error(
+            "--question_index cannot be combined with --num_test"
+        )
     return args
 
 import autogen
@@ -260,9 +289,15 @@ if __name__ == "__main__":
         sub_dir = f"{agent_name}_{model}_c{cache_seed}_{layer}_level_t{temperature}_s{max_steps}_trial{num_trials}"
     if args.split != "test":
         sub_dir += f"_{args.split}"
+    if args.question_index is not None:
+        sub_dir += f"_q{args.question_index}"
+    elif args.num_test >= 0:
+        sub_dir += f"_n{args.num_test}"
     os.makedirs(f"{base_dir}/{sub_dir}", exist_ok=True)
 
-    for attack in ATTACKS:
+    selected_attacks = [args.attack] if args.attack else ATTACKS
+
+    for attack in selected_attacks:
         print(f"Running attack: {attack}")
         save_agent_file = f"{base_dir}/{sub_dir}/agent_{attack}.json" 
         save_env_file = f"{base_dir}/{sub_dir}/env_{attack}.json"
@@ -281,7 +316,8 @@ if __name__ == "__main__":
             agent=test_agent,
             thug_env=thug_env,
             save_agent_file=save_agent_file,
-            num_test=-1, # set to -1 to run all questions
+            num_test=args.num_test,
+            question_index=args.question_index,
             num_trials=num_trials,
             overwrite=args.overwrite,
             trial_run=args.trial_run,
