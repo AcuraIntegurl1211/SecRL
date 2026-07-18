@@ -135,12 +135,102 @@ Two paid single-question tests were run against Incident 5.
 
 The temporary single-question loop restriction was not retained in source.
 
+## Full Incident 5 experiment
+
+A complete Incident 5 experiment was run with:
+
+- Agent model: `deepseek-v4-flash`
+- Evaluator model: `deepseek-v4-pro`
+- Agent: `BaselineAgent`
+- Maximum steps per question: `15`
+- Trials per question: `1`
+- Layer: `alert`
+- Temperature: `0`
+- Total questions: `98`
+
+Validated results:
+
+| Metric | Result |
+|---|---:|
+| Fully correct questions | 46 |
+| Partially rewarded questions | 6 |
+| Zero-reward questions | 46 |
+| Full-success rate | 46/98 = 46.94% |
+| Total reward | 48.4 |
+| Average reward | 0.493878 |
+
+Flash Agent token usage:
+
+| Token category | Count |
+|---|---:|
+| Prompt tokens | 14,110,160 |
+| Completion tokens | 186,291 |
+| Total tokens | 14,296,451 |
+| Prompt cache-hit tokens | 11,143,552 |
+| Prompt cache-miss tokens | 2,966,608 |
+
+These totals cover the Flash Agent usage recorded in the Agent logs. They do
+not include the complete token usage of the Pro evaluator.
+
+### Result integrity repair
+
+The initial full run used cache seed `732`. An early implementation of
+`--num_test` placed its stopping condition inside the trial loop. As a result,
+the Agent log recorded node `134-147` twice and omitted node `161-55`.
+
+The audit found:
+
+- 98 Agent records but only 97 unique nodes
+- 97 environment records
+- Duplicate node: `134-147`
+- Missing node: `161-55`
+
+The missing question was run separately with cache seed `733` and
+`--question_index 10`. It submitted `mimikatz.exe` and received reward `0`.
+
+A repaired result set was generated offline by keeping the first `134-147`
+record from `c732`, removing its duplicate, inserting the `161-55` Agent and
+environment records from `c733`, restoring the original 98-question order, and
+recalculating rewards and token totals. All original `c732` and `c733` files
+were preserved unchanged.
+
+The repaired result directory is:
+
+```text
+experiments/final_results/BaselineAgent_deepseek-v4-flash_c732_alert_level_t0_s15_trial1_repaired_with_c733_q10
+```
+
+It contains:
+
+- `agent_incident_5.json`: 98 unique, ordered Agent records
+- `env_incident_5.json`: 98 unique, ordered environment records
+- `results.txt`: corrected aggregate metrics
+- `repair_manifest.json`: source hashes, repair operations, and validation data
+
+Because the repaired set combines 97 unique records from `c732` with one
+record from `c733`, it must be described as a repaired mixed-run result rather
+than as an unmodified single-seed run.
+
+The experiment-selection fix was committed as:
+
+```text
+3989b27 Add scoped experiment selection options
+```
+
+It adds:
+
+- `--attack` to select one incident
+- `--num_test` to limit the number of questions
+- `--question_index` to run one zero-based question index
+- `_nN` and `_qN` result-directory suffixes
+
 ## Important notes
 
 - AutoGen may display zero model cost when its local pricing table does not
   contain the selected model. External API requests may still be charged.
-- These two successful questions are smoke tests, not a complete benchmark.
-- The full benchmark has not been run.
+- The two earlier single-question runs are smoke tests rather than a benchmark.
+- A complete Incident 5 result has now been produced and integrity-checked.
+- The complete benchmark across all incidents has not been run.
 - Only Incident 5 is provisioned.
 - `ExcytinEnv.close()` stops the associated container and should not be called
   merely for inspection.
@@ -149,7 +239,9 @@ The temporary single-question loop restriction was not retained in source.
 
 ## Suggested next work
 
-- Add a supported single-question command-line option.
-- Add automated tests for parsing, final submission, and log flushing.
+- Add automated tests for parsing, final submission, log flushing, and scoped
+  experiment selection.
+- Add a reusable command for result-integrity auditing and repair.
+- Record evaluator token usage separately from Agent usage.
 - Provision more incident containers only when broader testing is required.
 - Estimate API cost before any larger experiment.
