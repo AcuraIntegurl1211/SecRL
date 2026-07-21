@@ -318,6 +318,30 @@ class CliTest(unittest.TestCase):
             )
             guard.assert_only_git_rev_parse()
 
+    def test_missing_output_parent_is_created_only_after_successful_mapping(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paths = make_fixture(root)
+            paths["output"] = root / "new-parent" / "output"
+
+            with ExternalActivityGuard() as guard:
+                self.assertEqual(main(argv(paths)), 0)
+            self.assertTrue(paths["output"].is_dir())
+            guard.assert_only_git_rev_parse()
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paths = make_fixture(root)
+            write_json(paths["agent"], [])
+            paths["output"] = root / "failed-parent" / "output"
+
+            stderr = io.StringIO()
+            with ExternalActivityGuard() as guard, redirect_stderr(stderr):
+                self.assertEqual(main(argv(paths)), 3)
+            self.assertFalse(paths["output"].parent.exists())
+            self.assertIn("agent", stderr.getvalue().lower())
+            guard.git_mock.assert_not_called()
+
     def test_unavailable_git_commit_is_recorded_as_null(self):
         with tempfile.TemporaryDirectory() as temporary:
             paths = make_fixture(temporary)

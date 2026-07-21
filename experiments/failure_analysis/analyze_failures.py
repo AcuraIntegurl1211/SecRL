@@ -103,7 +103,7 @@ def _validate_paths(args: argparse.Namespace) -> None:
         raise OutputCollisionError(
             f"output path already exists: {args.output_dir}"
         )
-    if not args.output_dir.parent.is_dir():
+    if args.output_dir.parent.exists() and not args.output_dir.parent.is_dir():
         raise InputError(
             f"output parent is not a directory: {args.output_dir.parent}"
         )
@@ -159,6 +159,13 @@ def run(args: argparse.Namespace) -> list[Path]:
     review_applied = args.review_csv is not None
     if args.review_csv is not None:
         apply_human_review(rows, args.review_csv, taxonomy)
+
+    try:
+        args.output_dir.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise InputError(
+            f"cannot create output parent {args.output_dir.parent}: {exc}"
+        ) from exc
 
     source_paths = {
         "agent": args.agent_json,
