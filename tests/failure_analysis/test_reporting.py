@@ -273,7 +273,7 @@ class ReportingTest(unittest.TestCase):
                 encoding="utf-8",
             )
             source_paths = {}
-            for name in ("agent", "env", "questions"):
+            for name in ("agent", "env", "question"):
                 path = root / f"{name}.json"
                 path.write_text(f'{{"source":"{name}"}}\n', encoding="utf-8")
                 source_paths[name] = path
@@ -370,16 +370,25 @@ class ReportingTest(unittest.TestCase):
                 },
             )
             self.assertEqual(manifest["record_count"], 2)
-            self.assertEqual(manifest["mapping_counts"]["mapped"], 2)
+            self.assertEqual(
+                manifest["mapping_counts"],
+                {"agent": 2, "env": 2, "question": 2},
+            )
             self.assertTrue(manifest["generated_at_utc"].endswith("Z"))
             self.assertNotIn("incident_5_analysis_manifest.json", manifest["outputs"])
+
+            expected_manifest_outputs = expected_names - {
+                "incident_5_analysis_manifest.json"
+            }
+            self.assertEqual(set(manifest["outputs"]), expected_manifest_outputs)
 
             for name, item in manifest["sources"].items():
                 self.assertEqual(Path(item["path"]), source_paths[name])
                 self.assertEqual(item["sha256"], sha256_file(source_paths[name]))
 
-            for item in manifest["outputs"].values():
-                path = output_dir / item["filename"]
+            for filename, item in manifest["outputs"].items():
+                self.assertEqual(item["filename"], filename)
+                path = output_dir / filename
                 self.assertEqual(item["sha256"], sha256_file(path))
 
     def test_existing_output_directory_or_target_file_is_refused(self):
@@ -389,7 +398,7 @@ class ReportingTest(unittest.TestCase):
             taxonomy_path.write_text(json.dumps(taxonomy()), encoding="utf-8")
             source = root / "source.json"
             source.write_text("{}", encoding="utf-8")
-            source_paths = {"agent": source, "env": source, "questions": source}
+            source_paths = {"agent": source, "env": source, "question": source}
 
             for make_target in (
                 lambda path: path.mkdir(),
@@ -417,7 +426,7 @@ class ReportingTest(unittest.TestCase):
             taxonomy_path.write_text(json.dumps(taxonomy()), encoding="utf-8")
             source = root / "source.json"
             source.write_text("{}", encoding="utf-8")
-            source_paths = {"agent": source, "env": source, "questions": source}
+            source_paths = {"agent": source, "env": source, "question": source}
             row = make_row()
             row["evidence"] = [object()]
             before = {path.name for path in root.iterdir()}

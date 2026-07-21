@@ -300,6 +300,22 @@ class CliTest(unittest.TestCase):
             )
             self.assertEqual(manifest["git_commit"], "abc123")
             self.assertFalse(manifest["review_applied"])
+            self.assertEqual(
+                set(manifest["sources"]),
+                {"agent", "env", "question"},
+            )
+            self.assertEqual(
+                Path(manifest["sources"]["agent"]["path"]),
+                paths["agent"],
+            )
+            self.assertEqual(
+                Path(manifest["sources"]["env"]["path"]),
+                paths["env"],
+            )
+            self.assertEqual(
+                Path(manifest["sources"]["question"]["path"]),
+                paths["questions"],
+            )
             guard.assert_only_git_rev_parse()
 
     def test_unavailable_git_commit_is_recorded_as_null(self):

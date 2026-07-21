@@ -475,11 +475,11 @@ def write_outputs(
             "review_csv": review_output,
         }
         output_manifest = {
-            name: {
+            path.name: {
                 "filename": path.name,
                 "sha256": _sha256_file(path),
             }
-            for name, path in sorted(output_files.items())
+            for path in sorted(output_files.values(), key=lambda item: item.name)
         }
         mapping_count = sum(
             row.get("mapping_status") == "complete" for row in rows
@@ -497,8 +497,9 @@ def write_outputs(
             "review_applied": review_applied,
             "record_count": len(rows),
             "mapping_counts": {
-                "mapped": mapping_count,
-                "total": len(rows),
+                "agent": mapping_count,
+                "env": mapping_count,
+                "question": mapping_count,
             },
             "sources": source_manifest,
             "outputs": output_manifest,

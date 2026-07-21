@@ -161,12 +161,12 @@ def run(args: argparse.Namespace) -> list[Path]:
         apply_human_review(rows, args.review_csv, taxonomy)
 
     source_paths = {
-        "agent_json": args.agent_json,
-        "env_json": args.env_json,
-        "question_json": args.question_json,
+        "agent": args.agent_json,
+        "env": args.env_json,
+        "question": args.question_json,
     }
     if args.review_csv is not None:
-        source_paths["review_csv"] = args.review_csv
+        source_paths["review"] = args.review_csv
 
     return write_outputs(
         rows,
