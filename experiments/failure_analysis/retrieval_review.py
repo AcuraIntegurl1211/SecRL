@@ -30,6 +30,46 @@ _TAXONOMY_FIELDS = (
     "confidence",
     "decision_statuses",
 )
+_FROZEN_TAXONOMY = {
+    "primary_subtypes": (
+        "SOURCE_SELECTION",
+        "ENTITY_RESOLUTION",
+        "TEMPORAL_SCOPE",
+        "PREDICATE_FILTER",
+        "RELATIONAL_PATH",
+        "PROJECTION",
+        "AGGREGATION_RANKING",
+        "SEARCH_COVERAGE",
+        "RESULT_SELECTION",
+        "INDETERMINATE",
+    ),
+    "auxiliary_tags": (
+        "EMPTY_RESULT",
+        "PARTIAL_EVIDENCE",
+        "NOISY_RESULT",
+        "WRONG_TABLE",
+        "WRONG_COLUMN",
+        "WRONG_ENTITY",
+        "WRONG_TIME",
+        "OVER_FILTER",
+        "UNDER_FILTER",
+        "MISSING_JOIN",
+        "WRONG_JOIN",
+        "MISSING_ORDER",
+        "WRONG_ORDER",
+        "WRONG_LIMIT",
+        "REPEATED_QUERY",
+        "NO_ADAPTATION",
+        "STEP_LIMIT",
+        "SQL_ERROR_PRESENT",
+        "GOLD_IN_RESULT",
+        "GOLD_NOT_IN_RESULT",
+    ),
+    "outcomes": ("EMPTY", "PARTIAL", "NOISY", "WRONG_ROW", "MIXED", "UNOBSERVED"),
+    "boundary_flags": ("NONE", "SQL_EXEC_POSSIBLE", "REASONING_POSSIBLE", "DATA_GOLD_POSSIBLE"),
+    "confidence": ("high", "medium", "low", "indeterminate"),
+    "decision_statuses": ("reviewed", "needs_review"),
+}
 _EVIDENCE_FIELDS = tuple(field.name for field in fields(RetrievalEvidenceBundle))
 _DECISION_FIELDS = tuple(field.name for field in fields(RetrievalDecision))
 _REVIEW_FIELDS = _EVIDENCE_FIELDS + _DECISION_FIELDS
@@ -42,19 +82,11 @@ def _error(message: str) -> ReviewError:
     return ReviewError(message)
 
 
-def load_overlay_taxonomy(path: Path) -> dict[str, object]:
-    """Load and structurally validate the fixed SQL retrieval taxonomy."""
-    try:
-        with path.open("r", encoding="utf-8") as handle:
-            value = json.load(handle)
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        raise _error(f"cannot load overlay taxonomy {path}: {exc}") from exc
-
+def _validate_taxonomy(value: object) -> dict[str, object]:
     if type(value) is not dict:
         raise _error("overlay taxonomy must be a JSON object")
     if value.get("version") != TAXONOMY_VERSION:
         raise _error("overlay taxonomy has an unsupported version")
-
     for field in _TAXONOMY_FIELDS:
         items = value.get(field)
         if type(items) is not list or not items:
@@ -63,7 +95,20 @@ def load_overlay_taxonomy(path: Path) -> dict[str, object]:
             raise _error(f"overlay taxonomy field {field} must contain strings")
         if len(set(items)) != len(items):
             raise _error(f"overlay taxonomy field {field} contains duplicates")
+        if items != list(_FROZEN_TAXONOMY[field]):
+            raise _error(f"overlay taxonomy field {field} does not match frozen v1")
     return value
+
+
+def load_overlay_taxonomy(path: Path) -> dict[str, object]:
+    """Load and structurally validate the fixed SQL retrieval taxonomy."""
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            value = json.load(handle)
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise _error(f"cannot load overlay taxonomy {path}: {exc}") from exc
+
+    return _validate_taxonomy(value)
 
 
 def _incident_number(value: object) -> int:
@@ -295,6 +340,8 @@ def _parse_decision(row: dict[str, str], taxonomy: dict[str, object], bundle: Re
         raise _error("unknown decision_status")
     if confidence == "indeterminate" and primary != "INDETERMINATE":
         raise _error("indeterminate confidence requires INDETERMINATE primary")
+    if primary == "INDETERMINATE" and confidence not in {"low", "medium", "indeterminate"}:
+        raise _error("INDETERMINATE primary cannot have high confidence")
 
     first_cell = row["first_divergence_step"]
     first = None if first_cell == "" else _parse_nonnegative_int(first_cell, "first_divergence_step")
@@ -372,17 +419,8 @@ def apply_completed_review(
     taxonomy: dict[str, object],
 ) -> list[dict[str, object]]:
     """Validate an exact review CSV and overlay only its decision fields."""
-    if type(taxonomy) is not dict:
-        raise _error("taxonomy must be a dictionary")
     # Validate caller-provided taxonomies as well as those loaded from disk.
-    if taxonomy.get("version") != TAXONOMY_VERSION:
-        raise _error("overlay taxonomy has an unsupported version")
-    for field in _TAXONOMY_FIELDS:
-        values = taxonomy.get(field)
-        if type(values) is not list or not values or any(type(item) is not str or not item for item in values):
-            raise _error(f"invalid taxonomy field {field}")
-        if len(set(values)) != len(values):
-            raise _error(f"invalid taxonomy field {field}")
+    taxonomy = _validate_taxonomy(taxonomy)
 
     if type(bundles) is not list:
         raise _error("bundles must be a list")

@@ -287,6 +287,36 @@ class RetrievalReviewTest(unittest.TestCase):
                 with self.assertRaises(ReviewError):
                     apply_completed_review([bundle], path, taxonomy)
 
+    def test_taxonomy_lists_are_frozen_in_content_and_order(self):
+        canonical = json.loads(TAXONOMY_PATH.read_text(encoding="utf-8"))
+        list_fields = (
+            "primary_subtypes",
+            "auxiliary_tags",
+            "outcomes",
+            "boundary_flags",
+            "confidence",
+            "decision_statuses",
+        )
+        for field in list_fields:
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "taxonomy.json"
+                modified = json.loads(json.dumps(canonical))
+                modified[field] = list(reversed(modified[field]))
+                path.write_text(json.dumps(modified), encoding="utf-8")
+                with self.assertRaises(ReviewError):
+                    load_overlay_taxonomy(path)
+
+        bundle = _bundle()
+        with tempfile.TemporaryDirectory() as directory:
+            review_path = Path(directory) / "review.csv"
+            _write_csv(review_path, [bundle])
+            for field in list_fields:
+                with self.subTest(caller_field=field):
+                    modified = json.loads(json.dumps(canonical))
+                    modified[field] = list(reversed(modified[field]))
+                    with self.assertRaises(ReviewError):
+                        apply_completed_review([bundle], review_path, modified)
+
     def test_indeterminate_decision_requires_rationale_and_selection_is_sorted_deduplicated(self):
         bundle = _bundle()
         taxonomy = load_overlay_taxonomy(TAXONOMY_PATH)
@@ -317,6 +347,26 @@ class RetrievalReviewTest(unittest.TestCase):
         self.assertEqual([(row["incident"], row["question_index"]) for row in selected], [("incident_1", 8), ("incident_2", 1)])
         with self.assertRaises(ReviewError):
             select_low_confidence_rows([{**rows[0], "question_index": "bad"}])
+
+    def test_indeterminate_primary_rejects_high_confidence(self):
+        bundle = _bundle()
+        taxonomy = load_overlay_taxonomy(TAXONOMY_PATH)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "review.csv"
+            _write_csv(
+                path,
+                [bundle],
+                retrieval_primary_subtype="INDETERMINATE",
+                confidence="high",
+                decision_status="reviewed",
+                first_divergence_step="",
+                relevant_sql_steps=[],
+                sql_evidence="",
+                observation_evidence="",
+                rationale="Evidence remains ambiguous.",
+            )
+            with self.assertRaises(ReviewError):
+                apply_completed_review([bundle], path, taxonomy)
 
 
 if __name__ == "__main__":
