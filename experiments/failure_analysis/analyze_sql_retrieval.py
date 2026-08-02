@@ -15,6 +15,7 @@ import re
 import subprocess
 import sys
 from dataclasses import fields
+from collections.abc import Mapping
 from pathlib import Path
 
 if __package__ in (None, ""):
@@ -132,7 +133,7 @@ def _manifest_incidents(manifest_paths: list[Path], source_specs: dict[str, Sour
         if type(incident) is not str or not _INCIDENT_RE.fullmatch(incident):
             raise InputError(f"invalid manifest incident: {path}")
         if incident in result:
-            raise InputError(f"duplicate manifest incident: {incident}")
+            raise MappingError(f"duplicate manifest incident: {incident}")
         result[incident] = path
     if set(result) != set(EXPECTED_COUNTS):
         raise MappingError("manifest incidents do not match the frozen eight-incident set")
@@ -333,10 +334,16 @@ def _load_evidence_bundles(path: Path) -> list[RetrievalEvidenceBundle]:
 
 
 def _strict_equal(left: object, right: object) -> bool:
+    # MappingProxyType is used by immutable evidence bundles.  Compare any
+    # Mapping recursively instead of relying on Python's bool==int equality.
+    if isinstance(left, Mapping) or isinstance(right, Mapping):
+        if not isinstance(left, Mapping) or not isinstance(right, Mapping):
+            return False
+        if len(left) != len(right) or set(left) != set(right):
+            return False
+        return all(_strict_equal(left[key], right[key]) for key in left)  # type: ignore[index]
     if type(left) is not type(right):
         return False
-    if isinstance(left, dict):
-        return set(left) == set(right) and all(_strict_equal(left[key], right[key]) for key in left)  # type: ignore[index]
     if isinstance(left, (list, tuple)):
         return len(left) == len(right) and all(_strict_equal(a, b) for a, b in zip(left, right))  # type: ignore[arg-type]
     return left == right
@@ -406,7 +413,11 @@ def _load_inputs(args: argparse.Namespace) -> tuple[Path, dict[str, Path], dict[
         # structurally valid, however, a missing/hash-changed source is a
         # mapping failure under the frozen provenance contract.
         message = str(exc)
-        if "SHA-256 mismatch" in message or "source path is not a file" in message:
+        if (
+            "SHA-256 mismatch" in message
+            or "source path is not a file" in message
+            or "duplicate source manifest incident" in message
+        ):
             raise MappingError(message) from exc
         raise
     manifest_by_incident = _manifest_incidents(manifest_paths, source_specs)
@@ -458,6 +469,16 @@ def _run_finalize(args: argparse.Namespace) -> list[Path]:
     return write_retrieval_outputs(rows, queue, args.output_dir, input_paths, input_hashes, _git_commit())
 
 
+def prepare(args: argparse.Namespace) -> list[Path]:
+    """Run the validated offline preparation stage."""
+    return _run_prepare(args)
+
+
+def finalize(args: argparse.Namespace) -> list[Path]:
+    """Run the validated offline finalization stage."""
+    return _run_finalize(args)
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Offline SQL retrieval subtype preparation/finalization")
     subparsers = parser.add_subparsers(dest="mode", required=True)
@@ -485,11 +506,11 @@ def run(args: argparse.Namespace) -> list[Path]:
     if args.mode == "prepare":
         if len(args.manifest) != EXPECTED_MANIFEST_COUNT:
             raise InputError("exactly eight --manifest paths are required")
-        return _run_prepare(args)
+        return prepare(args)
     if args.mode == "finalize":
         if len(args.manifest) != EXPECTED_MANIFEST_COUNT:
             raise InputError("exactly eight --manifest paths are required")
-        return _run_finalize(args)
+        return finalize(args)
     raise InputError(f"unknown CLI mode: {args.mode!r}")
 
 

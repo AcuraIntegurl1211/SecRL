@@ -5,7 +5,7 @@ import io
 import json
 import tempfile
 import unittest
-from dataclasses import fields
+from dataclasses import fields, replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -90,6 +90,11 @@ class SqlRetrievalCliTest(unittest.TestCase):
         with self.assertRaises(MappingError):
             _compare_evidence_bundles([_bundle()], [_bundle(1)])
 
+        fresh = replace(_bundle(), golden_answer={"nested": {"value": True}})
+        evidence = replace(_bundle(), golden_answer={"nested": {"value": 1}})
+        with self.assertRaises(MappingError):
+            _compare_evidence_bundles([fresh], [evidence])
+
     def test_finalize_provenance_uses_frozen_36_key_names(self):
         from experiments.failure_analysis.analyze_sql_retrieval import (
             EXPECTED_COUNTS,
@@ -128,6 +133,18 @@ class SqlRetrievalCliTest(unittest.TestCase):
             self.assertEqual(set(hashes), set(_INPUT_KEYS))
             self.assertIn("manifest_incident_5", paths)
             self.assertIn("agent_incident_322", paths)
+
+    def test_duplicate_manifest_identity_is_mapping_error(self):
+        from experiments.failure_analysis.analyze_sql_retrieval import (
+            EXPECTED_COUNTS,
+            _manifest_incidents,
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "manifest.json"
+            path.write_text(json.dumps({"incident": "incident_5"}), encoding="utf-8")
+            with self.assertRaises(MappingError):
+                _manifest_incidents([path] * 8, {incident: object() for incident in EXPECTED_COUNTS})
 
     def test_main_maps_only_analysis_errors(self):
         from experiments.failure_analysis.analyze_sql_retrieval import main
