@@ -390,6 +390,32 @@ class RetrievalReviewTest(unittest.TestCase):
                 with self.assertRaisesRegex(ReviewError, field):
                     apply_completed_review([bundle], path, taxonomy)
 
+    def test_oversized_json_numbers_raise_review_error(self):
+        bundle = _bundle()
+        taxonomy = load_overlay_taxonomy(TAXONOMY_PATH)
+        oversized = "9" * 5000
+        cases = (
+            ("auxiliary_tags", f"[{oversized}]"),
+            ("relevant_sql_steps", f"[{oversized}]"),
+            ("golden_answer", f'{{"answer":{oversized}}}'),
+            (
+                "query_steps",
+                f'[{"{"}"step":{oversized},"sql":"SELECT service FROM events LIMIT 1","observation":"example-service","query_success":true}}]',
+            ),
+        )
+        for field, value in cases:
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "review.csv"
+                row = _bundle_cells(bundle)
+                row.update(_decision_cells())
+                row[field] = value
+                with path.open("w", encoding="utf-8", newline="") as handle:
+                    writer = csv.DictWriter(handle, fieldnames=REVIEW_FIELDS)
+                    writer.writeheader()
+                    writer.writerow(row)
+                with self.assertRaisesRegex(ReviewError, field):
+                    apply_completed_review([bundle], path, taxonomy)
+
 
 if __name__ == "__main__":
     unittest.main()

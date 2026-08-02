@@ -105,7 +105,7 @@ def load_overlay_taxonomy(path: Path) -> dict[str, object]:
     try:
         with path.open("r", encoding="utf-8") as handle:
             value = json.load(handle)
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+    except (OSError, UnicodeError, ValueError, OverflowError) as exc:
         raise _error(f"cannot load overlay taxonomy {path}: {exc}") from exc
 
     return _validate_taxonomy(value)
@@ -252,7 +252,7 @@ def _parse_json_cell(cell: str, expected: object, field: str) -> object:
         raise _error(f"{field} cannot be empty")
     try:
         parsed = json.loads(cell)
-    except (TypeError, json.JSONDecodeError) as exc:
+    except (TypeError, ValueError, OverflowError) as exc:
         raise _error(f"invalid JSON in {field}") from exc
     if parsed is None and expected is not None:
         raise _error(f"{field} cannot be null")
@@ -323,7 +323,7 @@ def _parse_decision(row: dict[str, str], taxonomy: dict[str, object], bundle: Re
 
     try:
         auxiliary = json.loads(row["auxiliary_tags"])
-    except json.JSONDecodeError as exc:
+    except (ValueError, OverflowError) as exc:
         raise _error("auxiliary_tags must be a JSON list") from exc
     if type(auxiliary) is not list or any(type(item) is not str for item in auxiliary):
         raise _error("auxiliary_tags must be a JSON list of strings")
@@ -353,7 +353,7 @@ def _parse_decision(row: dict[str, str], taxonomy: dict[str, object], bundle: Re
     first = None if first_cell == "" else _parse_nonnegative_int(first_cell, "first_divergence_step")
     try:
         relevant = json.loads(row["relevant_sql_steps"])
-    except json.JSONDecodeError as exc:
+    except (ValueError, OverflowError) as exc:
         raise _error("relevant_sql_steps must be a JSON list") from exc
     if type(relevant) is not list:
         raise _error("relevant_sql_steps must be a JSON list")
