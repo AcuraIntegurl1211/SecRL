@@ -173,6 +173,35 @@ class RetrievalReportingTest(unittest.TestCase):
             with self.assertRaises(InputError):
                 write_retrieval_outputs([row], [], root / "query-steps", paths, hashes, None)
 
+    def test_reopens_large_csv_fields_with_bounded_limit_and_restores(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            paths, hashes = _inputs(root)
+            row = _row(0)
+            large_evidence = "e" * 131073
+            row["sql_evidence"] = large_evidence
+            previous_csv_limit = csv.field_size_limit()
+            csv.field_size_limit(131072)
+            try:
+                with mock.patch.object(
+                    retrieval_reporting.csv,
+                    "field_size_limit",
+                    wraps=csv.field_size_limit,
+                ) as field_size_limit:
+                    write_retrieval_outputs(
+                        [row], [], root / "large", paths, hashes, None
+                    )
+                bumped_limits = [
+                    call.args[0]
+                    for call in field_size_limit.call_args_list
+                    if call.args and call.args[0] > 131072
+                ]
+                self.assertTrue(bumped_limits)
+                self.assertLessEqual(max(bumped_limits), len(large_evidence) + 10000)
+                self.assertEqual(csv.field_size_limit(), 131072)
+            finally:
+                csv.field_size_limit(previous_csv_limit)
+
     def test_provenance_key_set_is_frozen_and_dangling_target_collides(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

@@ -538,7 +538,13 @@ def _validate_csv_file(
     expected_rows: list[dict[str, object]],
     fields: tuple[str, ...],
 ) -> None:
+    previous_csv_limit: int | None = None
     try:
+        previous_csv_limit = csv.field_size_limit()
+        # A rendered review field can legitimately be larger than csv's
+        # process-wide default.  Bound the temporary parser limit by this
+        # staged file's size, and restore the caller's setting below.
+        csv.field_size_limit(max(previous_csv_limit, path.stat().st_size))
         with path.open("r", encoding="utf-8", newline="") as handle:
             reader = csv.DictReader(handle)
             if reader.fieldnames != list(fields):
@@ -548,6 +554,12 @@ def _validate_csv_file(
         raise
     except (OSError, UnicodeError, csv.Error, TypeError, ValueError, OverflowError, RecursionError) as exc:
         raise _input_error(f"cannot reopen CSV output {path}: {exc}", exc) from exc
+    finally:
+        if previous_csv_limit is not None:
+            try:
+                csv.field_size_limit(previous_csv_limit)
+            except (OverflowError, TypeError, ValueError) as exc:
+                raise _input_error(f"cannot restore CSV field limit: {exc}", exc) from exc
     if len(parsed) != len(expected_rows):
         raise _input_error(f"CSV record count mismatch for {path}")
     for position, (raw, expected) in enumerate(zip(parsed, expected_rows)):
