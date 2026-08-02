@@ -4,7 +4,7 @@ import csv
 import json
 import tempfile
 import unittest
-from dataclasses import fields, replace
+from dataclasses import fields as dataclass_fields, replace
 from pathlib import Path
 
 from experiments.failure_analysis.models import ReviewError
@@ -23,8 +23,43 @@ from experiments.failure_analysis.retrieval_review import (
 
 ROOT = Path(__file__).resolve().parents[2]
 TAXONOMY_PATH = ROOT / "experiments/failure_analysis/sql_retrieval_taxonomy_v1.json"
-EVIDENCE_FIELDS = [field.name for field in fields(RetrievalEvidenceBundle)]
-DECISION_FIELDS = [field.name for field in fields(RetrievalDecision)]
+EVIDENCE_FIELDS = (
+    "incident",
+    "question_index",
+    "question_fingerprint_sha256",
+    "question_text_fingerprint_sha256",
+    "question",
+    "context",
+    "golden_answer",
+    "golden_solution",
+    "submitted_answer",
+    "trajectory_steps",
+    "submitted",
+    "submitted_at_step_limit",
+    "reward_official",
+    "reviewed_primary_original",
+    "review_notes_original",
+    "agent_source_index",
+    "env_source_index",
+    "agent_source_sha256",
+    "env_source_sha256",
+    "question_source_sha256",
+    "query_steps",
+)
+DECISION_FIELDS = (
+    "retrieval_primary_subtype",
+    "auxiliary_tags",
+    "retrieval_outcome",
+    "boundary_flag",
+    "confidence",
+    "decision_status",
+    "first_divergence_step",
+    "relevant_sql_steps",
+    "sql_evidence",
+    "observation_evidence",
+    "gold_evidence_basis",
+    "rationale",
+)
 REVIEW_FIELDS = EVIDENCE_FIELDS + DECISION_FIELDS
 
 
@@ -98,6 +133,16 @@ def _write_csv(path: Path, bundles: list[RetrievalEvidenceBundle], **overrides: 
 
 
 class RetrievalReviewTest(unittest.TestCase):
+    def test_dataclass_fields_match_frozen_review_contract(self):
+        self.assertEqual(
+            tuple(field.name for field in dataclass_fields(RetrievalEvidenceBundle)),
+            EVIDENCE_FIELDS,
+        )
+        self.assertEqual(
+            tuple(field.name for field in dataclass_fields(RetrievalDecision)),
+            DECISION_FIELDS,
+        )
+
     def test_load_overlay_taxonomy_validates_and_returns_taxonomy(self):
         taxonomy = load_overlay_taxonomy(TAXONOMY_PATH)
         self.assertEqual(taxonomy["version"], "sql_retrieval_taxonomy_v1")
@@ -198,8 +243,8 @@ class RetrievalReviewTest(unittest.TestCase):
             root = Path(directory)
             for label, header in (
                 ("missing", REVIEW_FIELDS[:-1]),
-                ("extra", REVIEW_FIELDS + ["extra"]),
-                ("duplicate", REVIEW_FIELDS[:-1] + [REVIEW_FIELDS[-2]]),
+                ("extra", REVIEW_FIELDS + ("extra",)),
+                ("duplicate", REVIEW_FIELDS[:-1] + (REVIEW_FIELDS[-2],)),
             ):
                 with self.subTest(header=label):
                     path = root / f"{label}.csv"
