@@ -700,13 +700,14 @@ def write_retrieval_outputs(
         if not _strict_equal(reopened_manifest, manifest):
             raise _input_error("manifest changed during serialization")
 
-        # Reserve the destination immediately before publication.  This closes
-        # the check/rename race: Path.rename can replace an empty directory, so
-        # only an empty directory created by this call may be replaced below.
+        # Reserve the destination immediately before publication.  Publish by
+        # no-replace hard links through the reservation's directory fd; this
+        # avoids directory-rename replacement races while keeping publication
+        # limited to this call's own inode.
         try:
             output_dir.mkdir()
             reserved_target = True
-            reservation_stat = output_dir.stat()
+            reservation_stat = output_dir.lstat()
         except FileExistsError as exc:
             raise OutputCollisionError(
                 f"output path appeared during report generation: {output_dir}"
@@ -714,13 +715,57 @@ def write_retrieval_outputs(
         except OSError as exc:
             raise _input_error(f"cannot reserve output path: {exc}", exc) from exc
         try:
-            temp_dir.rename(output_dir)
+            directory_fd = os.open(
+                os.fspath(output_dir),
+                os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+            )
         except OSError as exc:
-            if _path_lexists(output_dir):
-                raise OutputCollisionError(
-                    f"output path appeared during report publication: {output_dir}"
-                ) from exc
-            raise _input_error(f"cannot publish output directory: {exc}", exc) from exc
+            raise _input_error(f"cannot open reserved output path: {exc}", exc) from exc
+        try:
+            for name in _OUTPUT_NAMES:
+                if reservation_stat is None or not os.path.samestat(
+                    reservation_stat, output_dir.lstat()
+                ):
+                    raise OutputCollisionError(
+                        f"output path changed during publication: {output_dir}"
+                    )
+                source = staged_paths[name] if name != "analysis_manifest.json" else manifest_path
+                try:
+                    os.link(
+                        os.fspath(source),
+                        name,
+                        dst_dir_fd=directory_fd,
+                        follow_symlinks=False,
+                    )
+                except FileExistsError as exc:
+                    raise OutputCollisionError(
+                        f"output path appeared during publication: {output_dir}"
+                    ) from exc
+                except OSError as exc:
+                    try:
+                        changed = reservation_stat is None or not os.path.samestat(
+                            reservation_stat, output_dir.lstat()
+                        )
+                    except OSError:
+                        changed = True
+                    if changed:
+                        raise OutputCollisionError(
+                            f"output path changed during publication: {output_dir}"
+                        ) from exc
+                    raise _input_error(f"cannot publish output file {name}: {exc}", exc) from exc
+                if not os.path.samestat(reservation_stat, output_dir.lstat()):
+                    raise OutputCollisionError(
+                        f"output path changed during publication: {output_dir}"
+                    )
+        finally:
+            os.close(directory_fd)
+        if reservation_stat is None or not os.path.samestat(
+            reservation_stat, output_dir.lstat()
+        ):
+            raise OutputCollisionError(
+                f"output path changed after publication: {output_dir}"
+            )
+        shutil.rmtree(temp_dir)
         moved = True
         return [output_dir / name for name in _OUTPUT_NAMES]
     finally:
@@ -728,11 +773,10 @@ def write_retrieval_outputs(
             shutil.rmtree(temp_dir)
         if not moved and reserved_target and reservation_stat is not None and output_dir.is_dir():
             try:
-                # Remove only our still-empty reservation; never remove a
-                # collided/user-populated path.  The inode check protects a
-                # user path that replaced our reservation during cleanup.
+                # Remove only our reservation; the inode check protects a
+                # user path that replaced it during cleanup.
                 if os.path.samestat(reservation_stat, output_dir.stat()):
-                    output_dir.rmdir()
+                    shutil.rmtree(output_dir)
             except OSError:
                 pass
 

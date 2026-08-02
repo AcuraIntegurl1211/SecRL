@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
+import os
 import tempfile
 import unittest
 from copy import deepcopy
@@ -197,22 +198,47 @@ class RetrievalReportingTest(unittest.TestCase):
                 write_retrieval_outputs([row], [], target, paths, hashes, None)
             self.assertTrue(target.is_symlink())
 
-    def test_target_race_during_rename_preserves_sentinel(self) -> None:
+    def test_target_race_during_link_preserves_sentinel(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             paths, hashes = _inputs(root)
             target = root / "raced"
-            original_rename = Path.rename
+            original_link = os.link
 
-            def race(source: Path, destination: Path) -> Path:
-                (destination / "sentinel").write_text("user", encoding="utf-8")
-                return original_rename(source, destination)
+            def race(source: str, destination: str, **kwargs: object) -> None:
+                target.rmdir()
+                target.mkdir()
+                (target / "sentinel").write_text("user", encoding="utf-8")
+                original_link(source, destination, **kwargs)
 
-            with mock.patch.object(Path, "rename", race):
+            with mock.patch.object(os, "link", race):
                 with self.assertRaises(OutputCollisionError):
                     write_retrieval_outputs([_row(0)], [], target, paths, hashes, None)
             self.assertEqual((target / "sentinel").read_text(), "user")
             self.assertEqual([p.name for p in root.iterdir() if p.name.startswith(".raced.")], [])
+
+    def test_target_replaced_between_reservation_and_link_is_not_overwritten(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            paths, hashes = _inputs(root)
+            target = root / "replaced"
+            original_link = os.link
+            replaced = False
+
+            def replace_then_link(source: str, destination: str, **kwargs: object) -> None:
+                nonlocal replaced
+                if not replaced:
+                    target.rmdir()
+                    target.mkdir()
+                    replaced = True
+                original_link(source, destination, **kwargs)
+
+            with mock.patch.object(os, "link", replace_then_link):
+                with self.assertRaises(OutputCollisionError):
+                    write_retrieval_outputs([_row(0)], [], target, paths, hashes, None)
+            self.assertTrue(target.is_dir())
+            self.assertEqual(list(target.iterdir()), [])
+            self.assertEqual([p.name for p in root.iterdir() if p.name.startswith(".replaced.")], [])
 
     def test_review_queue_must_match_policy_and_serialization_failure_cleans_temp(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
