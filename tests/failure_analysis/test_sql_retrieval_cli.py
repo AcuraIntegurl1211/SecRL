@@ -207,6 +207,38 @@ class SqlRetrievalCliTest(unittest.TestCase):
                 with self.assertRaises(MappingError):
                     _build_fresh(argparse.Namespace(taxonomy=taxonomy))
 
+    def test_stale_input_snapshot_blocks_before_aggregate_rows_are_loaded(self):
+        from experiments.failure_analysis.analyze_sql_retrieval import _build_fresh
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            aggregate = root / "aggregate.csv"
+            aggregate.write_text("bytes", encoding="utf-8")
+            taxonomy = root / "taxonomy.json"
+            taxonomy.write_text("{}", encoding="utf-8")
+            args = argparse.Namespace(taxonomy=taxonomy)
+            old_paths = {"aggregate_csv": aggregate.resolve()}
+            old_hashes = {"aggregate_csv": "a" * 64}
+            new_paths = {"aggregate_csv": aggregate.resolve()}
+            new_hashes = {"aggregate_csv": "b" * 64}
+
+            def loaded(namespace):
+                namespace._retrieval_build_snapshot = (old_paths, old_hashes)
+                return aggregate, {}, {}, {}
+
+            with patch(
+                "experiments.failure_analysis.analyze_sql_retrieval._load_inputs",
+                side_effect=loaded,
+            ), patch(
+                "experiments.failure_analysis.analyze_sql_retrieval._build_input_provenance",
+                return_value=(new_paths, new_hashes),
+            ), patch(
+                "experiments.failure_analysis.analyze_sql_retrieval.load_reviewed_rows",
+            ) as load_rows:
+                with self.assertRaises(MappingError):
+                    _build_fresh(args)
+            load_rows.assert_not_called()
+
     def test_final_provenance_hash_drift_is_mapping_error(self):
         from experiments.failure_analysis.analyze_sql_retrieval import _run_finalize
 
