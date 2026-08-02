@@ -117,13 +117,19 @@ def _incident_number(value: object) -> int:
     match = _INCIDENT_RE.fullmatch(value)
     if match is None:
         raise _error(f"invalid incident identity: {value!r}")
-    return int(match.group(1))
+    try:
+        return int(match.group(1))
+    except (ValueError, OverflowError) as exc:
+        raise _error("incident identity is too large") from exc
 
 
 def _parse_nonnegative_int(cell: str, field: str) -> int:
     if type(cell) is not str or _CANONICAL_NONNEGATIVE_RE.fullmatch(cell) is None:
         raise _error(f"{field} must be a canonical non-negative integer")
-    return int(cell)
+    try:
+        return int(cell)
+    except (ValueError, OverflowError) as exc:
+        raise _error(f"{field} is too large") from exc
 
 
 def _parse_positive_int(cell: object, field: str) -> int:

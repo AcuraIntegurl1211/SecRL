@@ -368,6 +368,28 @@ class RetrievalReviewTest(unittest.TestCase):
             with self.assertRaises(ReviewError):
                 apply_completed_review([bundle], path, taxonomy)
 
+    def test_oversized_canonical_decimal_cells_raise_review_error(self):
+        bundle = _bundle()
+        taxonomy = load_overlay_taxonomy(TAXONOMY_PATH)
+        oversized = "9" * 5000
+        for field, value in (
+            ("incident", "incident_" + oversized),
+            ("question_index", oversized),
+            ("first_divergence_step", oversized),
+            ("trajectory_steps", oversized),
+        ):
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "review.csv"
+                row = _bundle_cells(bundle)
+                row.update(_decision_cells())
+                row[field] = value
+                with path.open("w", encoding="utf-8", newline="") as handle:
+                    writer = csv.DictWriter(handle, fieldnames=REVIEW_FIELDS)
+                    writer.writeheader()
+                    writer.writerow(row)
+                with self.assertRaisesRegex(ReviewError, field):
+                    apply_completed_review([bundle], path, taxonomy)
+
 
 if __name__ == "__main__":
     unittest.main()
