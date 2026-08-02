@@ -8,6 +8,7 @@ from dataclasses import fields as dataclass_fields, replace
 from pathlib import Path
 
 from experiments.failure_analysis.models import ReviewError
+from experiments.failure_analysis.retrieval_extract import write_preparation_files
 from experiments.failure_analysis.retrieval_models import (
     QueryStep,
     RetrievalDecision,
@@ -183,6 +184,28 @@ class RetrievalReviewTest(unittest.TestCase):
         self.assertEqual(row["relevant_sql_steps"], [1])
         self.assertEqual(row["schema_version"], "sql_retrieval_subtyping_v1")
         self.assertEqual(row["overlay_taxonomy_version"], "sql_retrieval_taxonomy_v1")
+
+    def test_apply_completed_review_accepts_preparation_template_primitive_gold_and_large_cells(self):
+        bundle = replace(
+            _bundle(),
+            golden_answer="syncretic.7z.lockbit",
+            golden_solution="SELECT the matching artifact",
+            question="q" * 131073,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            evidence = root / "evidence.jsonl"
+            review = root / "review.csv"
+            previous_csv_limit = csv.field_size_limit()
+            write_preparation_files([bundle], evidence, review)
+
+            merged = apply_completed_review(
+                [bundle], review, load_overlay_taxonomy(TAXONOMY_PATH)
+            )
+
+        self.assertEqual(csv.field_size_limit(), previous_csv_limit)
+        self.assertEqual(merged[0]["golden_answer"], "syncretic.7z.lockbit")
+        self.assertEqual(merged[0]["golden_solution"], "SELECT the matching artifact")
 
     def test_apply_completed_review_sorts_by_numeric_incident_and_question(self):
         bundles = [_bundle("incident_10", 0), _bundle("incident_2", 4)]

@@ -635,7 +635,15 @@ def _render_preparation_payloads(
         )
         writer.writeheader()
         for row in review_rows:
-            writer.writerow({key: _csv_value(row.get(key)) for key in _REVIEW_FIELDS})
+            serialized: dict[str, object] = {}
+            for key in _REVIEW_FIELDS:
+                value = row.get(key)
+                if key in ("golden_answer", "golden_solution"):
+                    # Review validation parses these immutable cells as JSON;
+                    # encode primitive values too (e.g. a bare answer string).
+                    value = _json_text(value)
+                serialized[key] = _csv_value(value)
+            writer.writerow(serialized)
         return evidence_text.encode("utf-8", "strict"), review_buffer.getvalue().encode(
             "utf-8", "strict"
         )

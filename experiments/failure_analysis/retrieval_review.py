@@ -470,7 +470,12 @@ def apply_completed_review(
             raise _error(f"duplicate bundle identity: {identity}")
         expected[identity] = bundle
 
+    previous_csv_limit: int | None = None
     try:
+        previous_csv_limit = csv.field_size_limit()
+        # Real review rows can carry very large question/context/query cells;
+        # raise the parser bound only for this bounded input file.
+        csv.field_size_limit(max(previous_csv_limit, review_path.stat().st_size))
         with review_path.open("r", encoding="utf-8", newline="") as handle:
             reader = csv.reader(handle)
             header = next(reader, None)
@@ -485,6 +490,12 @@ def apply_completed_review(
                 rows.append(dict(zip(header, values)))
     except (OSError, UnicodeError, ValueError, TypeError, AttributeError, csv.Error) as exc:
         raise _error(f"cannot read review path {review_path}: {exc}") from exc
+    finally:
+        if previous_csv_limit is not None:
+            try:
+                csv.field_size_limit(previous_csv_limit)
+            except (OverflowError, TypeError, ValueError) as exc:
+                raise _error(f"cannot restore CSV field limit: {exc}") from exc
 
     seen: set[tuple[str, int, str]] = set()
     parsed: list[tuple[RetrievalEvidenceBundle, RetrievalDecision]] = []
