@@ -240,6 +240,29 @@ class RetrievalReportingTest(unittest.TestCase):
             self.assertEqual(list(target.iterdir()), [])
             self.assertEqual([p.name for p in root.iterdir() if p.name.startswith(".replaced.")], [])
 
+    def test_link_collision_preserves_unknown_user_file(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            paths, hashes = _inputs(root)
+            target = root / "occupied"
+            original_link = os.link
+            occupied = False
+
+            def occupy_then_link(source: str, destination: str, **kwargs: object) -> None:
+                nonlocal occupied
+                if not occupied:
+                    (target / "sql_retrieval_subtypes.csv").write_text("user", encoding="utf-8")
+                    occupied = True
+                original_link(source, destination, **kwargs)
+
+            with mock.patch.object(os, "link", occupy_then_link):
+                with self.assertRaises(OutputCollisionError):
+                    write_retrieval_outputs([_row(0)], [], target, paths, hashes, None)
+            self.assertEqual(
+                (target / "sql_retrieval_subtypes.csv").read_text(),
+                "user",
+            )
+
     def test_review_queue_must_match_policy_and_serialization_failure_cleans_temp(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

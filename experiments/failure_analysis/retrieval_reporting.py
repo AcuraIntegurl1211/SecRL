@@ -639,6 +639,7 @@ def write_retrieval_outputs(
     moved = False
     reserved_target = False
     reservation_stat: os.stat_result | None = None
+    published_stats: dict[str, os.stat_result] = {}
     try:
         try:
             temp_dir = Path(tempfile.mkdtemp(prefix=f".{output_dir.name}.", dir=parent))
@@ -757,6 +758,14 @@ def write_retrieval_outputs(
                     raise OutputCollisionError(
                         f"output path changed during publication: {output_dir}"
                     )
+                try:
+                    published_stats[name] = os.stat(
+                        output_dir / name, follow_symlinks=False
+                    )
+                except OSError as exc:
+                    raise _input_error(
+                        f"cannot verify published output file {name}: {exc}", exc
+                    ) from exc
         finally:
             os.close(directory_fd)
         if reservation_stat is None or not os.path.samestat(
@@ -773,10 +782,22 @@ def write_retrieval_outputs(
             shutil.rmtree(temp_dir)
         if not moved and reserved_target and reservation_stat is not None and output_dir.is_dir():
             try:
-                # Remove only our reservation; the inode check protects a
-                # user path that replaced it during cleanup.
+                # Remove only files this call linked, and only when their
+                # inodes still match. Unknown/user files remain untouched.
                 if os.path.samestat(reservation_stat, output_dir.stat()):
-                    shutil.rmtree(output_dir)
+                    for name, file_stat in published_stats.items():
+                        try:
+                            current_stat = os.stat(
+                                output_dir / name, follow_symlinks=False
+                            )
+                            if os.path.samestat(file_stat, current_stat):
+                                (output_dir / name).unlink()
+                        except OSError:
+                            pass
+                    try:
+                        output_dir.rmdir()
+                    except OSError:
+                        pass
             except OSError:
                 pass
 
