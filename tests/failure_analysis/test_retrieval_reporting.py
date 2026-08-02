@@ -3,7 +3,6 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
-import os
 import tempfile
 import unittest
 from copy import deepcopy
@@ -12,6 +11,7 @@ from unittest import mock
 
 from experiments.failure_analysis.models import InputError, OutputCollisionError
 from experiments.failure_analysis.retrieval_review import select_low_confidence_rows
+import experiments.failure_analysis.retrieval_reporting as retrieval_reporting
 from experiments.failure_analysis.retrieval_reporting import write_retrieval_outputs
 
 
@@ -198,64 +198,49 @@ class RetrievalReportingTest(unittest.TestCase):
                 write_retrieval_outputs([row], [], target, paths, hashes, None)
             self.assertTrue(target.is_symlink())
 
-    def test_target_race_during_link_preserves_sentinel(self) -> None:
+    def test_atomic_publish_collision_preserves_sentinel(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             paths, hashes = _inputs(root)
             target = root / "raced"
-            original_link = os.link
-
-            def race(source: str, destination: str, **kwargs: object) -> None:
-                target.rmdir()
+            def race(source: Path, destination: Path) -> None:
                 target.mkdir()
                 (target / "sentinel").write_text("user", encoding="utf-8")
-                original_link(source, destination, **kwargs)
+                raise FileExistsError(17, "target appeared", str(target))
 
-            with mock.patch.object(os, "link", race):
+            with mock.patch.object(retrieval_reporting, "_atomic_rename_noreplace", race):
                 with self.assertRaises(OutputCollisionError):
                     write_retrieval_outputs([_row(0)], [], target, paths, hashes, None)
             self.assertEqual((target / "sentinel").read_text(), "user")
             self.assertEqual([p.name for p in root.iterdir() if p.name.startswith(".raced.")], [])
 
-    def test_target_replaced_between_reservation_and_link_is_not_overwritten(self) -> None:
+    def test_atomic_publish_collision_preserves_empty_target(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             paths, hashes = _inputs(root)
             target = root / "replaced"
-            original_link = os.link
-            replaced = False
+            def replace_then_publish(source: Path, destination: Path) -> None:
+                target.mkdir()
+                raise FileExistsError(17, "target appeared", str(target))
 
-            def replace_then_link(source: str, destination: str, **kwargs: object) -> None:
-                nonlocal replaced
-                if not replaced:
-                    target.rmdir()
-                    target.mkdir()
-                    replaced = True
-                original_link(source, destination, **kwargs)
-
-            with mock.patch.object(os, "link", replace_then_link):
+            with mock.patch.object(retrieval_reporting, "_atomic_rename_noreplace", replace_then_publish):
                 with self.assertRaises(OutputCollisionError):
                     write_retrieval_outputs([_row(0)], [], target, paths, hashes, None)
             self.assertTrue(target.is_dir())
             self.assertEqual(list(target.iterdir()), [])
             self.assertEqual([p.name for p in root.iterdir() if p.name.startswith(".replaced.")], [])
 
-    def test_link_collision_preserves_unknown_user_file(self) -> None:
+    def test_atomic_publish_collision_preserves_unknown_user_file(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             paths, hashes = _inputs(root)
             target = root / "occupied"
-            original_link = os.link
-            occupied = False
+            def occupy_then_publish(source: Path, destination: Path) -> None:
+                target.mkdir()
+                (target / "sql_retrieval_subtypes.csv").write_text("user", encoding="utf-8")
+                raise FileExistsError(17, "target appeared", str(target))
 
-            def occupy_then_link(source: str, destination: str, **kwargs: object) -> None:
-                nonlocal occupied
-                if not occupied:
-                    (target / "sql_retrieval_subtypes.csv").write_text("user", encoding="utf-8")
-                    occupied = True
-                original_link(source, destination, **kwargs)
-
-            with mock.patch.object(os, "link", occupy_then_link):
+            with mock.patch.object(retrieval_reporting, "_atomic_rename_noreplace", occupy_then_publish):
                 with self.assertRaises(OutputCollisionError):
                     write_retrieval_outputs([_row(0)], [], target, paths, hashes, None)
             self.assertEqual(

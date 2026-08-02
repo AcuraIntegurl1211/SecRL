@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import ctypes
 import hashlib
 import io
 import json
@@ -84,6 +85,9 @@ _INPUT_KEYS = frozenset(
         ),
     }
 )
+_AT_FDCWD = -2
+_RENAMEATX_RENAME_EXCL = 0x00000004
+_RENAMEAT2_RENAME_NOREPLACE = 0x00000001
 
 
 def _input_error(message: str, exc: BaseException | None = None) -> InputError:
@@ -586,6 +590,73 @@ def _path_lexists(path: Path) -> bool:
         raise _input_error(f"cannot inspect output path {path}: {exc}", exc) from exc
 
 
+def _atomic_rename_noreplace(source: Path, destination: Path) -> None:
+    """Atomically publish a directory without replacing an existing path."""
+    libc = ctypes.CDLL(None, use_errno=True)
+    renameatx_np = getattr(libc, "renameatx_np", None)
+    if renameatx_np is not None:
+        renameatx_np.argtypes = [
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_uint,
+        ]
+        renameatx_np.restype = ctypes.c_int
+        result = renameatx_np(
+            _AT_FDCWD,
+            os.fsencode(source),
+            _AT_FDCWD,
+            os.fsencode(destination),
+            _RENAMEATX_RENAME_EXCL,
+        )
+        if result == 0:
+            return
+        error_number = ctypes.get_errno()
+        raise OSError(error_number, os.strerror(error_number), os.fspath(destination))
+
+    renameat2 = getattr(libc, "renameat2", None)
+    if renameat2 is not None:
+        renameat2.argtypes = [
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_uint,
+        ]
+        renameat2.restype = ctypes.c_int
+        result = renameat2(
+            _AT_FDCWD,
+            os.fsencode(source),
+            _AT_FDCWD,
+            os.fsencode(destination),
+            _RENAMEAT2_RENAME_NOREPLACE,
+        )
+        if result == 0:
+            return
+        error_number = ctypes.get_errno()
+        raise OSError(error_number, os.strerror(error_number), os.fspath(destination))
+
+    # Portable fallback: reserve an empty destination, then replace only that
+    # reservation.  The reservation is removed by the caller on failure.
+    try:
+        destination.mkdir()
+    except FileExistsError:
+        raise
+    reservation_stat = destination.lstat()
+    try:
+        if not os.path.samestat(reservation_stat, destination.lstat()):
+            raise FileExistsError(17, "destination changed", os.fspath(destination))
+        source.rename(destination)
+    except OSError:
+        try:
+            if os.path.samestat(reservation_stat, destination.lstat()):
+                destination.rmdir()
+        except OSError:
+            pass
+        raise
+
+
 def write_retrieval_outputs(
     rows: list[dict[str, object]],
     review_queue: list[dict[str, object]],
@@ -637,9 +708,6 @@ def write_retrieval_outputs(
 
     temp_dir: Path | None = None
     moved = False
-    reserved_target = False
-    reservation_stat: os.stat_result | None = None
-    published_stats: dict[str, os.stat_result] = {}
     try:
         try:
             temp_dir = Path(tempfile.mkdtemp(prefix=f".{output_dir.name}.", dir=parent))
@@ -701,105 +769,23 @@ def write_retrieval_outputs(
         if not _strict_equal(reopened_manifest, manifest):
             raise _input_error("manifest changed during serialization")
 
-        # Reserve the destination immediately before publication.  Publish by
-        # no-replace hard links through the reservation's directory fd; this
-        # avoids directory-rename replacement races while keeping publication
-        # limited to this call's own inode.
         try:
-            output_dir.mkdir()
-            reserved_target = True
-            reservation_stat = output_dir.lstat()
+            _atomic_rename_noreplace(temp_dir, output_dir)
         except FileExistsError as exc:
             raise OutputCollisionError(
-                f"output path appeared during report generation: {output_dir}"
+                f"output path appeared during report publication: {output_dir}"
             ) from exc
         except OSError as exc:
-            raise _input_error(f"cannot reserve output path: {exc}", exc) from exc
-        try:
-            directory_fd = os.open(
-                os.fspath(output_dir),
-                os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
-            )
-        except OSError as exc:
-            raise _input_error(f"cannot open reserved output path: {exc}", exc) from exc
-        try:
-            for name in _OUTPUT_NAMES:
-                if reservation_stat is None or not os.path.samestat(
-                    reservation_stat, output_dir.lstat()
-                ):
-                    raise OutputCollisionError(
-                        f"output path changed during publication: {output_dir}"
-                    )
-                source = staged_paths[name] if name != "analysis_manifest.json" else manifest_path
-                try:
-                    os.link(
-                        os.fspath(source),
-                        name,
-                        dst_dir_fd=directory_fd,
-                        follow_symlinks=False,
-                    )
-                except FileExistsError as exc:
-                    raise OutputCollisionError(
-                        f"output path appeared during publication: {output_dir}"
-                    ) from exc
-                except OSError as exc:
-                    try:
-                        changed = reservation_stat is None or not os.path.samestat(
-                            reservation_stat, output_dir.lstat()
-                        )
-                    except OSError:
-                        changed = True
-                    if changed:
-                        raise OutputCollisionError(
-                            f"output path changed during publication: {output_dir}"
-                        ) from exc
-                    raise _input_error(f"cannot publish output file {name}: {exc}", exc) from exc
-                if not os.path.samestat(reservation_stat, output_dir.lstat()):
-                    raise OutputCollisionError(
-                        f"output path changed during publication: {output_dir}"
-                    )
-                try:
-                    published_stats[name] = os.stat(
-                        output_dir / name, follow_symlinks=False
-                    )
-                except OSError as exc:
-                    raise _input_error(
-                        f"cannot verify published output file {name}: {exc}", exc
-                    ) from exc
-        finally:
-            os.close(directory_fd)
-        if reservation_stat is None or not os.path.samestat(
-            reservation_stat, output_dir.lstat()
-        ):
-            raise OutputCollisionError(
-                f"output path changed after publication: {output_dir}"
-            )
-        shutil.rmtree(temp_dir)
+            if _path_lexists(output_dir):
+                raise OutputCollisionError(
+                    f"output path appeared during report publication: {output_dir}"
+                ) from exc
+            raise _input_error(f"cannot publish output directory: {exc}", exc) from exc
         moved = True
         return [output_dir / name for name in _OUTPUT_NAMES]
     finally:
         if not moved and temp_dir is not None and temp_dir.exists():
             shutil.rmtree(temp_dir)
-        if not moved and reserved_target and reservation_stat is not None and output_dir.is_dir():
-            try:
-                # Remove only files this call linked, and only when their
-                # inodes still match. Unknown/user files remain untouched.
-                if os.path.samestat(reservation_stat, output_dir.stat()):
-                    for name, file_stat in published_stats.items():
-                        try:
-                            current_stat = os.stat(
-                                output_dir / name, follow_symlinks=False
-                            )
-                            if os.path.samestat(file_stat, current_stat):
-                                (output_dir / name).unlink()
-                        except OSError:
-                            pass
-                    try:
-                        output_dir.rmdir()
-                    except OSError:
-                        pass
-            except OSError:
-                pass
 
 
 __all__ = ["write_retrieval_outputs"]
