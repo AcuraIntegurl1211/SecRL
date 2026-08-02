@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import ctypes
+import errno
 import hashlib
 import io
 import json
@@ -776,7 +777,7 @@ def write_retrieval_outputs(
                 f"output path appeared during report publication: {output_dir}"
             ) from exc
         except OSError as exc:
-            if _path_lexists(output_dir):
+            if exc.errno == errno.EEXIST or _path_lexists(output_dir):
                 raise OutputCollisionError(
                     f"output path appeared during report publication: {output_dir}"
                 ) from exc
