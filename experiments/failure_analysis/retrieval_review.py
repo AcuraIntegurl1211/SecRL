@@ -94,6 +94,8 @@ def _reject_duplicate_json_keys(pairs: list[tuple[str, object]]) -> dict[str, ob
 def _validate_taxonomy(value: object) -> dict[str, object]:
     if type(value) is not dict:
         raise _error("overlay taxonomy must be a JSON object")
+    if set(value) != {"version", *_TAXONOMY_FIELDS}:
+        raise _error("overlay taxonomy has unexpected top-level fields")
     if value.get("version") != TAXONOMY_VERSION:
         raise _error("overlay taxonomy has an unsupported version")
     for field in _TAXONOMY_FIELDS:
@@ -567,7 +569,7 @@ def _validate_queue_decision(row: dict[str, object]) -> None:
     if len(set(auxiliary)) != len(auxiliary) or any(item not in _KNOWN_AUXILIARY for item in auxiliary):
         raise _error("invalid row auxiliary_tags")
     first = row["first_divergence_step"]
-    if first is not None and (type(first) is not int or first < 0):
+    if first is not None and (type(first) is not int or first <= 0):
         raise _error("invalid row first_divergence_step")
     relevant = row["relevant_sql_steps"]
     if type(relevant) is not list or any(type(item) is not int or item <= 0 for item in relevant):

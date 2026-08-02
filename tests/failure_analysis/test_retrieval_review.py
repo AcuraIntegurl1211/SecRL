@@ -317,6 +317,16 @@ class RetrievalReviewTest(unittest.TestCase):
                     with self.assertRaises(ReviewError):
                         apply_completed_review([bundle], review_path, modified)
 
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "taxonomy-extra.json"
+            modified = json.loads(json.dumps(canonical))
+            modified["metadata"] = {"owner": "review"}
+            path.write_text(json.dumps(modified), encoding="utf-8")
+            with self.assertRaises(ReviewError):
+                load_overlay_taxonomy(path)
+            with self.assertRaises(ReviewError):
+                apply_completed_review([bundle], review_path, modified)
+
     def test_indeterminate_decision_requires_rationale_and_selection_is_sorted_deduplicated(self):
         bundle = _bundle()
         taxonomy = load_overlay_taxonomy(TAXONOMY_PATH)
@@ -373,6 +383,7 @@ class RetrievalReviewTest(unittest.TestCase):
             {**base, "confidence": "indeterminate"},
             {**base, "retrieval_primary_subtype": "INDETERMINATE", "confidence": "high"},
             {key: value for key, value in base.items() if key != "rationale"},
+            {**base, "first_divergence_step": 0},
             {**base, "first_divergence_step": "1"},
             {**base, "relevant_sql_steps": ["1"]},
             {**base, "sql_evidence": None},
