@@ -82,6 +82,15 @@ def _error(message: str) -> ReviewError:
     return ReviewError(message)
 
 
+def _reject_duplicate_json_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate JSON object key: {key}")
+        result[key] = value
+    return result
+
+
 def _validate_taxonomy(value: object) -> dict[str, object]:
     if type(value) is not dict:
         raise _error("overlay taxonomy must be a JSON object")
@@ -102,11 +111,21 @@ def _validate_taxonomy(value: object) -> dict[str, object]:
 
 def load_overlay_taxonomy(path: Path) -> dict[str, object]:
     """Load and structurally validate the fixed SQL retrieval taxonomy."""
+    if not isinstance(path, Path):
+        raise _error(f"invalid taxonomy path: {path!r}")
     try:
         with path.open("r", encoding="utf-8") as handle:
-            value = json.load(handle)
-    except (OSError, UnicodeError, ValueError, OverflowError) as exc:
-        raise _error(f"cannot load overlay taxonomy {path}: {exc}") from exc
+            value = json.load(handle, object_pairs_hook=_reject_duplicate_json_keys)
+    except (
+        OSError,
+        UnicodeError,
+        ValueError,
+        OverflowError,
+        RecursionError,
+        TypeError,
+        AttributeError,
+    ) as exc:
+        raise _error(f"cannot load taxonomy path {path}: {exc}") from exc
 
     return _validate_taxonomy(value)
 
@@ -251,8 +270,8 @@ def _parse_json_cell(cell: str, expected: object, field: str) -> object:
     if cell == "":
         raise _error(f"{field} cannot be empty")
     try:
-        parsed = json.loads(cell)
-    except (TypeError, ValueError, OverflowError) as exc:
+        parsed = json.loads(cell, object_pairs_hook=_reject_duplicate_json_keys)
+    except (TypeError, ValueError, OverflowError, RecursionError) as exc:
         raise _error(f"invalid JSON in {field}") from exc
     if parsed is None and expected is not None:
         raise _error(f"{field} cannot be null")
@@ -322,8 +341,10 @@ def _parse_decision(row: dict[str, str], taxonomy: dict[str, object], bundle: Re
         raise _error("unknown retrieval_primary_subtype")
 
     try:
-        auxiliary = json.loads(row["auxiliary_tags"])
-    except (ValueError, OverflowError) as exc:
+        auxiliary = json.loads(
+            row["auxiliary_tags"], object_pairs_hook=_reject_duplicate_json_keys
+        )
+    except (ValueError, OverflowError, RecursionError) as exc:
         raise _error("auxiliary_tags must be a JSON list") from exc
     if type(auxiliary) is not list or any(type(item) is not str for item in auxiliary):
         raise _error("auxiliary_tags must be a JSON list of strings")
@@ -352,8 +373,10 @@ def _parse_decision(row: dict[str, str], taxonomy: dict[str, object], bundle: Re
     first_cell = row["first_divergence_step"]
     first = None if first_cell == "" else _parse_nonnegative_int(first_cell, "first_divergence_step")
     try:
-        relevant = json.loads(row["relevant_sql_steps"])
-    except (ValueError, OverflowError) as exc:
+        relevant = json.loads(
+            row["relevant_sql_steps"], object_pairs_hook=_reject_duplicate_json_keys
+        )
+    except (ValueError, OverflowError, RecursionError) as exc:
         raise _error("relevant_sql_steps must be a JSON list") from exc
     if type(relevant) is not list:
         raise _error("relevant_sql_steps must be a JSON list")
@@ -425,14 +448,21 @@ def apply_completed_review(
     taxonomy: dict[str, object],
 ) -> list[dict[str, object]]:
     """Validate an exact review CSV and overlay only its decision fields."""
+    if not isinstance(review_path, Path):
+        raise _error(f"invalid review path: {review_path!r}")
     # Validate caller-provided taxonomies as well as those loaded from disk.
     taxonomy = _validate_taxonomy(taxonomy)
 
     if type(bundles) is not list:
         raise _error("bundles must be a list")
     expected: dict[tuple[str, int, str], RetrievalEvidenceBundle] = {}
+    bundle_question_keys: set[tuple[str, int]] = set()
     for bundle in bundles:
         _validate_bundle(bundle)
+        question_key = (bundle.incident, bundle.question_index)
+        if question_key in bundle_question_keys:
+            raise _error(f"duplicate bundle incident/question_index: {question_key}")
+        bundle_question_keys.add(question_key)
         identity = (bundle.incident, bundle.question_index, bundle.question_fingerprint_sha256)
         if identity in expected:
             raise _error(f"duplicate bundle identity: {identity}")
@@ -451,8 +481,8 @@ def apply_completed_review(
                 if len(values) != len(header):
                     raise _error(f"invalid review CSV row {row_number}")
                 rows.append(dict(zip(header, values)))
-    except (OSError, UnicodeError, csv.Error) as exc:
-        raise _error(f"cannot read review CSV {review_path}: {exc}") from exc
+    except (OSError, UnicodeError, ValueError, TypeError, AttributeError, csv.Error) as exc:
+        raise _error(f"cannot read review path {review_path}: {exc}") from exc
 
     seen: set[tuple[str, int, str]] = set()
     parsed: list[tuple[RetrievalEvidenceBundle, RetrievalDecision]] = []
@@ -490,21 +520,67 @@ def apply_completed_review(
     return merged
 
 
-_KNOWN_PRIMARY = {
-    "SOURCE_SELECTION",
-    "ENTITY_RESOLUTION",
-    "TEMPORAL_SCOPE",
-    "PREDICATE_FILTER",
-    "RELATIONAL_PATH",
-    "PROJECTION",
-    "AGGREGATION_RANKING",
-    "SEARCH_COVERAGE",
-    "RESULT_SELECTION",
-    "INDETERMINATE",
-}
-_KNOWN_BOUNDARY = {"NONE", "SQL_EXEC_POSSIBLE", "REASONING_POSSIBLE", "DATA_GOLD_POSSIBLE"}
-_KNOWN_CONFIDENCE = {"high", "medium", "low", "indeterminate"}
-_KNOWN_STATUS = {"reviewed", "needs_review"}
+_KNOWN_PRIMARY = set(_FROZEN_TAXONOMY["primary_subtypes"])
+_KNOWN_AUXILIARY = set(_FROZEN_TAXONOMY["auxiliary_tags"])
+_KNOWN_OUTCOME = set(_FROZEN_TAXONOMY["outcomes"])
+_KNOWN_BOUNDARY = set(_FROZEN_TAXONOMY["boundary_flags"])
+_KNOWN_CONFIDENCE = set(_FROZEN_TAXONOMY["confidence"])
+_KNOWN_STATUS = set(_FROZEN_TAXONOMY["decision_statuses"])
+_QUEUE_DECISION_FIELDS = (
+    "retrieval_primary_subtype",
+    "auxiliary_tags",
+    "retrieval_outcome",
+    "boundary_flag",
+    "confidence",
+    "decision_status",
+    "first_divergence_step",
+    "relevant_sql_steps",
+    "sql_evidence",
+    "observation_evidence",
+    "gold_evidence_basis",
+    "rationale",
+)
+
+
+def _validate_queue_decision(row: dict[str, object]) -> None:
+    missing = [field for field in _QUEUE_DECISION_FIELDS if field not in row]
+    if missing:
+        raise _error(f"queue row missing decision fields: {','.join(missing)}")
+    primary = row["retrieval_primary_subtype"]
+    outcome = row["retrieval_outcome"]
+    boundary = row["boundary_flag"]
+    confidence = row["confidence"]
+    status = row["decision_status"]
+    if type(primary) is not str or primary not in _KNOWN_PRIMARY:
+        raise _error("invalid row retrieval_primary_subtype")
+    if type(outcome) is not str or outcome not in _KNOWN_OUTCOME:
+        raise _error("invalid row retrieval_outcome")
+    if type(boundary) is not str or boundary not in _KNOWN_BOUNDARY:
+        raise _error("invalid row boundary_flag")
+    if type(confidence) is not str or confidence not in _KNOWN_CONFIDENCE:
+        raise _error("invalid row confidence")
+    if type(status) is not str or status not in _KNOWN_STATUS:
+        raise _error("invalid row decision_status")
+    auxiliary = row["auxiliary_tags"]
+    if type(auxiliary) is not list or any(type(item) is not str for item in auxiliary):
+        raise _error("invalid row auxiliary_tags")
+    if len(set(auxiliary)) != len(auxiliary) or any(item not in _KNOWN_AUXILIARY for item in auxiliary):
+        raise _error("invalid row auxiliary_tags")
+    first = row["first_divergence_step"]
+    if first is not None and (type(first) is not int or first < 0):
+        raise _error("invalid row first_divergence_step")
+    relevant = row["relevant_sql_steps"]
+    if type(relevant) is not list or any(type(item) is not int or item <= 0 for item in relevant):
+        raise _error("invalid row relevant_sql_steps")
+    if len(set(relevant)) != len(relevant):
+        raise _error("invalid row relevant_sql_steps")
+    for field in ("sql_evidence", "observation_evidence", "gold_evidence_basis", "rationale"):
+        if type(row[field]) is not str:
+            raise _error(f"invalid row {field}")
+    if confidence == "indeterminate" and primary != "INDETERMINATE":
+        raise _error("indeterminate confidence requires INDETERMINATE primary")
+    if primary == "INDETERMINATE" and confidence not in {"low", "medium", "indeterminate"}:
+        raise _error("INDETERMINATE primary cannot have high confidence")
 
 
 def select_low_confidence_rows(rows: list[dict[str, object]]) -> list[dict[str, object]]:
@@ -512,6 +588,8 @@ def select_low_confidence_rows(rows: list[dict[str, object]]) -> list[dict[str, 
     if type(rows) is not list:
         raise _error("rows must be a list")
     selected: dict[tuple[str, int, str], dict[str, object]] = {}
+    seen_identities: set[tuple[str, int, str]] = set()
+    seen_question_keys: set[tuple[str, int]] = set()
     for row in rows:
         if type(row) is not dict:
             raise _error("rows must contain dictionaries")
@@ -523,26 +601,26 @@ def select_low_confidence_rows(rows: list[dict[str, object]]) -> list[dict[str, 
         fingerprint = row.get("question_fingerprint_sha256")
         if type(fingerprint) is not str or _FINGERPRINT_RE.fullmatch(fingerprint) is None:
             raise _error("invalid row question_fingerprint_sha256")
-        primary = row.get("retrieval_primary_subtype")
-        confidence = row.get("confidence")
-        status = row.get("decision_status")
-        boundary = row.get("boundary_flag")
-        if type(primary) is not str or primary not in _KNOWN_PRIMARY:
-            raise _error("invalid row retrieval_primary_subtype")
-        if type(confidence) is not str or confidence not in _KNOWN_CONFIDENCE:
-            raise _error("invalid row confidence")
-        if type(status) is not str or status not in _KNOWN_STATUS:
-            raise _error("invalid row decision_status")
-        if type(boundary) is not str or boundary not in _KNOWN_BOUNDARY:
-            raise _error("invalid row boundary_flag")
+        identity = (incident, question_index, fingerprint)
+        question_key = (incident, question_index)
+        if question_key in seen_question_keys:
+            raise _error(f"duplicate queue incident/question_index: {question_key}")
+        seen_question_keys.add(question_key)
+        if identity in seen_identities:
+            raise _error(f"duplicate queue identity: {identity}")
+        seen_identities.add(identity)
+        _validate_queue_decision(row)
+        primary = row["retrieval_primary_subtype"]
+        confidence = row["confidence"]
+        status = row["decision_status"]
+        boundary = row["boundary_flag"]
         if (
             confidence in {"low", "indeterminate"}
             or primary == "INDETERMINATE"
             or status == "needs_review"
             or boundary != "NONE"
         ):
-            identity = (incident, question_index, fingerprint)
-            selected.setdefault(identity, row)
+            selected[identity] = row
     return [
         selected[identity]
         for identity in sorted(

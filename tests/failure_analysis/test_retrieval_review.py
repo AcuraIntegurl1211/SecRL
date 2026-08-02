@@ -338,15 +338,155 @@ class RetrievalReviewTest(unittest.TestCase):
                 apply_completed_review([bundle], path, taxonomy)
 
         rows = [
-            {"incident": "incident_10", "question_index": 3, "question_fingerprint_sha256": "a" * 64, "confidence": "high", "retrieval_primary_subtype": "TEMPORAL_SCOPE", "decision_status": "reviewed", "boundary_flag": "NONE"},
-            {"incident": "incident_2", "question_index": 1, "question_fingerprint_sha256": "b" * 64, "confidence": "low", "retrieval_primary_subtype": "TEMPORAL_SCOPE", "decision_status": "reviewed", "boundary_flag": "NONE"},
-            {"incident": "incident_2", "question_index": 1, "question_fingerprint_sha256": "b" * 64, "confidence": "indeterminate", "retrieval_primary_subtype": "INDETERMINATE", "decision_status": "needs_review", "boundary_flag": "NONE"},
-            {"incident": "incident_1", "question_index": 8, "question_fingerprint_sha256": "c" * 64, "confidence": "high", "retrieval_primary_subtype": "TEMPORAL_SCOPE", "decision_status": "reviewed", "boundary_flag": "SQL_EXEC_POSSIBLE"},
+            {"incident": "incident_10", "question_index": 3, "question_fingerprint_sha256": "a" * 64, "confidence": "high", "retrieval_primary_subtype": "TEMPORAL_SCOPE", "decision_status": "reviewed", "boundary_flag": "NONE", "retrieval_outcome": "UNOBSERVED", "auxiliary_tags": [], "first_divergence_step": None, "relevant_sql_steps": [], "sql_evidence": "", "observation_evidence": "", "gold_evidence_basis": "", "rationale": "queue row"},
+            {"incident": "incident_2", "question_index": 1, "question_fingerprint_sha256": "b" * 64, "confidence": "low", "retrieval_primary_subtype": "TEMPORAL_SCOPE", "decision_status": "reviewed", "boundary_flag": "NONE", "retrieval_outcome": "UNOBSERVED", "auxiliary_tags": [], "first_divergence_step": None, "relevant_sql_steps": [], "sql_evidence": "", "observation_evidence": "", "gold_evidence_basis": "", "rationale": "queue row"},
+            {"incident": "incident_1", "question_index": 8, "question_fingerprint_sha256": "c" * 64, "confidence": "high", "retrieval_primary_subtype": "TEMPORAL_SCOPE", "decision_status": "reviewed", "boundary_flag": "SQL_EXEC_POSSIBLE", "retrieval_outcome": "UNOBSERVED", "auxiliary_tags": [], "first_divergence_step": None, "relevant_sql_steps": [], "sql_evidence": "", "observation_evidence": "", "gold_evidence_basis": "", "rationale": "queue row"},
         ]
         selected = select_low_confidence_rows(rows)
         self.assertEqual([(row["incident"], row["question_index"]) for row in selected], [("incident_1", 8), ("incident_2", 1)])
         with self.assertRaises(ReviewError):
             select_low_confidence_rows([{**rows[0], "question_index": "bad"}])
+
+    def test_queue_validates_all_decision_fields_and_consistency(self):
+        base = {
+            "incident": "incident_1",
+            "question_index": 0,
+            "question_fingerprint_sha256": "a" * 64,
+            "retrieval_primary_subtype": "TEMPORAL_SCOPE",
+            "retrieval_outcome": "UNOBSERVED",
+            "auxiliary_tags": [],
+            "confidence": "low",
+            "decision_status": "needs_review",
+            "boundary_flag": "NONE",
+            "first_divergence_step": None,
+            "relevant_sql_steps": [],
+            "sql_evidence": "",
+            "observation_evidence": "",
+            "gold_evidence_basis": "",
+            "rationale": "queue row",
+        }
+        invalid_rows = (
+            {**base, "retrieval_outcome": "BOGUS"},
+            {**base, "auxiliary_tags": "WRONG_TIME"},
+            {**base, "auxiliary_tags": ["WRONG_TIME", "WRONG_TIME"]},
+            {**base, "auxiliary_tags": ["BOGUS"]},
+            {**base, "confidence": "indeterminate"},
+            {**base, "retrieval_primary_subtype": "INDETERMINATE", "confidence": "high"},
+            {key: value for key, value in base.items() if key != "rationale"},
+            {**base, "first_divergence_step": "1"},
+            {**base, "relevant_sql_steps": ["1"]},
+            {**base, "sql_evidence": None},
+        )
+        for row in invalid_rows:
+            with self.subTest(row=row), self.assertRaises(ReviewError):
+                select_low_confidence_rows([row])
+
+    def test_queue_rejects_duplicate_stable_identity_rows(self):
+        row = {
+            "incident": "incident_1",
+            "question_index": 0,
+            "question_fingerprint_sha256": "a" * 64,
+            "retrieval_primary_subtype": "TEMPORAL_SCOPE",
+            "retrieval_outcome": "UNOBSERVED",
+            "auxiliary_tags": [],
+            "confidence": "low",
+            "decision_status": "needs_review",
+            "boundary_flag": "NONE",
+            "first_divergence_step": None,
+            "relevant_sql_steps": [],
+            "sql_evidence": "",
+            "observation_evidence": "",
+            "gold_evidence_basis": "",
+            "rationale": "queue row",
+        }
+        with self.assertRaises(ReviewError):
+            select_low_confidence_rows([row, {**row, "confidence": "medium"}])
+
+    def test_path_arguments_never_leak_path_type_errors(self):
+        bundle = _bundle()
+        taxonomy = load_overlay_taxonomy(TAXONOMY_PATH)
+        bad_paths = (None, object(), "not-a-path", Path("\x00"))
+        for bad_path in bad_paths:
+            with self.subTest(path=repr(bad_path)):
+                with self.assertRaisesRegex(ReviewError, "path"):
+                    load_overlay_taxonomy(bad_path)  # type: ignore[arg-type]
+                with self.assertRaisesRegex(ReviewError, "path"):
+                    apply_completed_review([bundle], bad_path, taxonomy)  # type: ignore[arg-type]
+
+    def test_deeply_nested_json_raises_review_error(self):
+        bundle = _bundle()
+        taxonomy = load_overlay_taxonomy(TAXONOMY_PATH)
+        deep = "[" * 10000 + "0" + "]" * 10000
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            taxonomy_path = root / "deep-taxonomy.json"
+            taxonomy_text = TAXONOMY_PATH.read_text(encoding="utf-8").rstrip()
+            taxonomy_path.write_text(taxonomy_text[:-1] + ',"deep":' + deep + "}", encoding="utf-8")
+            with self.assertRaisesRegex(ReviewError, "taxonomy"):
+                load_overlay_taxonomy(taxonomy_path)
+
+            for field, value in (
+                ("golden_answer", deep),
+                ("auxiliary_tags", deep),
+                ("relevant_sql_steps", deep),
+                ("query_steps", deep),
+            ):
+                with self.subTest(field=field):
+                    path = root / f"deep-{field}.csv"
+                    row = _bundle_cells(bundle)
+                    row.update(_decision_cells())
+                    row[field] = value
+                    with path.open("w", encoding="utf-8", newline="") as handle:
+                        writer = csv.DictWriter(handle, fieldnames=REVIEW_FIELDS)
+                        writer.writeheader()
+                        writer.writerow(row)
+                    with self.assertRaisesRegex(ReviewError, field):
+                        apply_completed_review([bundle], path, taxonomy)
+
+    def test_duplicate_json_object_keys_raise_review_error(self):
+        bundle = _bundle()
+        taxonomy = load_overlay_taxonomy(TAXONOMY_PATH)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "duplicate-golden.csv"
+            row = _bundle_cells(bundle)
+            row.update(_decision_cells())
+            row["golden_answer"] = '{"answer":"example-service","answer":"example-service"}'
+            with path.open("w", encoding="utf-8", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=REVIEW_FIELDS)
+                writer.writeheader()
+                writer.writerow(row)
+            with self.assertRaisesRegex(ReviewError, "golden_answer"):
+                apply_completed_review([bundle], path, taxonomy)
+
+    def test_duplicate_incident_question_index_rejected_even_with_different_fingerprints(self):
+        first = _bundle("incident_2", 0)
+        second = replace(first, question_fingerprint_sha256="d" * 64)
+        taxonomy = load_overlay_taxonomy(TAXONOMY_PATH)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "duplicate-index.csv"
+            _write_csv(path, [first, second])
+            with self.assertRaises(ReviewError):
+                apply_completed_review([first, second], path, taxonomy)
+
+        row = {
+            "incident": "incident_2",
+            "question_index": 0,
+            "question_fingerprint_sha256": "a" * 64,
+            "retrieval_primary_subtype": "TEMPORAL_SCOPE",
+            "retrieval_outcome": "UNOBSERVED",
+            "auxiliary_tags": [],
+            "confidence": "low",
+            "decision_status": "needs_review",
+            "boundary_flag": "NONE",
+            "first_divergence_step": None,
+            "relevant_sql_steps": [],
+            "sql_evidence": "",
+            "observation_evidence": "",
+            "gold_evidence_basis": "",
+            "rationale": "queue row",
+        }
+        with self.assertRaises(ReviewError):
+            select_low_confidence_rows([row, {**row, "question_fingerprint_sha256": "b" * 64}])
 
     def test_indeterminate_primary_rejects_high_confidence(self):
         bundle = _bundle()
