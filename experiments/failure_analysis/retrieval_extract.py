@@ -671,12 +671,24 @@ def _validate_output_bundles(
 def _written_identities(
     evidence_jsonl: Path, review_template: Path,
 ) -> tuple[list[tuple[str, int, str]], list[tuple[str, int, str]]]:
+    previous_csv_limit: int | None = None
     try:
         written_evidence = evidence_jsonl.read_text(encoding="utf-8").splitlines()
+        previous_csv_limit = csv.field_size_limit()
+        # The template is generated from the validated bundle and may contain a
+        # single large evidence field.  Raise the parser limit only for this
+        # bounded file, then restore the process-wide setting immediately.
+        csv.field_size_limit(max(previous_csv_limit, review_template.stat().st_size))
         with review_template.open("r", encoding="utf-8", newline="") as handle:
             written_review = list(csv.DictReader(handle))
-    except (OSError, csv.Error) as exc:
+    except (OSError, csv.Error, OverflowError, TypeError, ValueError) as exc:
         raise InputError(f"cannot validate preparation files: {exc}") from exc
+    finally:
+        if previous_csv_limit is not None:
+            try:
+                csv.field_size_limit(previous_csv_limit)
+            except (OverflowError, TypeError, ValueError) as exc:
+                raise InputError(f"cannot restore CSV field limit: {exc}") from exc
     try:
         evidence_identities = [
             (row["incident"], row["question_index"], row["question_fingerprint_sha256"])

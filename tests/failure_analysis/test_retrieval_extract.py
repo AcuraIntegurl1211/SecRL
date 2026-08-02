@@ -525,6 +525,32 @@ class RetrievalExtractTest(unittest.TestCase):
                 write_preparation_files([object()], invalid_parent / "evidence.jsonl", invalid_parent / "review.csv")
             self.assertFalse(invalid_parent.exists())
 
+    def test_write_preparation_files_accepts_review_fields_over_default_csv_limit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            bundle_type = __import__(
+                "experiments.failure_analysis.retrieval_models",
+                fromlist=["RetrievalEvidenceBundle"],
+            ).RetrievalEvidenceBundle
+            # The review template carries the question verbatim in one CSV cell;
+            # this exceeds csv.field_size_limit()'s default 131072-byte bound.
+            bundle = replace(
+                bundle_type.fixture_for_test(),
+                incident="incident_1",
+                question="q" * 131073,
+            )
+            evidence = root / "evidence.jsonl"
+            review = root / "review.csv"
+            previous_csv_limit = csv.field_size_limit()
+
+            write_preparation_files([bundle], evidence, review)
+
+            self.assertTrue(evidence.is_file())
+            self.assertTrue(review.is_file())
+            review_text = review.read_text(encoding="utf-8")
+            self.assertIn("q" * 131073, review_text)
+            self.assertEqual(csv.field_size_limit(), previous_csv_limit)
+
     def test_write_preparation_files_is_pair_safe_and_validates_bundle_contract(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
