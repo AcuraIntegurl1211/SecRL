@@ -26,6 +26,7 @@ from experiments.failure_analysis.models import (  # noqa: E402
     InputError,
     MappingError,
     OutputCollisionError,
+    ReviewError,
 )
 from experiments.failure_analysis.identity import sha256_file  # noqa: E402
 from experiments.failure_analysis.retrieval_extract import (  # noqa: E402
@@ -126,7 +127,7 @@ def _canonical_provenance_paths(paths: dict[str, Path]) -> dict[str, Path]:
         try:
             canonical[key] = _canonical_file(path, f"provenance {key}")
         except InputError as exc:
-            if key.startswith(("manifest_", "agent_", "env_", "question_")):
+            if key == "taxonomy" or key.startswith(("manifest_", "agent_", "env_", "question_")):
                 raise MappingError(str(exc)) from exc
             raise
     return canonical
@@ -490,6 +491,7 @@ def _load_inputs(args: argparse.Namespace) -> tuple[Path, dict[str, Path], dict[
             or "source path is not a file" in message
             or "duplicate source manifest incident" in message
             or "cannot read input path" in message
+            or ("invalid source manifest" in message and ("Errno" in message or "No such file" in message))
         ):
             raise MappingError(message) from exc
         raise
@@ -497,7 +499,12 @@ def _load_inputs(args: argparse.Namespace) -> tuple[Path, dict[str, Path], dict[
         manifest_by_incident = _manifest_incidents(manifest_paths, source_specs)
     except InputError as exc:
         raise MappingError(str(exc)) from exc
-    taxonomy = load_overlay_taxonomy(taxonomy_path)
+    try:
+        taxonomy = load_overlay_taxonomy(taxonomy_path)
+    except ReviewError as exc:
+        if not _lexists(taxonomy_path):
+            raise MappingError(f"taxonomy disappeared during load: {taxonomy_path}") from exc
+        raise
     for path, expected in manifest_hashes_before.items():
         actual = _mapping_hash(path, f"manifest {path}")
         if actual != expected:

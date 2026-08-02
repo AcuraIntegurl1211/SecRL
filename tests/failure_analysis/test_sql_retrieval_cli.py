@@ -239,6 +239,35 @@ class SqlRetrievalCliTest(unittest.TestCase):
                     _build_fresh(args)
             load_rows.assert_not_called()
 
+    def test_missing_taxonomy_in_provenance_is_mapping_error(self):
+        from experiments.failure_analysis.analyze_sql_retrieval import _canonical_provenance_paths
+
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaises(MappingError):
+                _canonical_provenance_paths({"taxonomy": Path(directory) / "gone.json"})
+
+    def test_missing_manifest_source_read_is_mapping_error(self):
+        from experiments.failure_analysis.analyze_sql_retrieval import _load_inputs
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            aggregate = root / "aggregate.csv"
+            taxonomy = root / "taxonomy.json"
+            aggregate.write_text("bytes", encoding="utf-8")
+            taxonomy.write_text("{}", encoding="utf-8")
+            args = argparse.Namespace(
+                aggregate_csv=aggregate,
+                taxonomy=taxonomy,
+                source_repo_root=root,
+                manifest=[aggregate] * 8,
+            )
+            with patch(
+                "experiments.failure_analysis.analyze_sql_retrieval.load_source_specs",
+                side_effect=InputError("invalid source manifest /gone.json: [Errno 2] No such file or directory"),
+            ):
+                with self.assertRaises(MappingError):
+                    _load_inputs(args)
+
     def test_final_provenance_hash_drift_is_mapping_error(self):
         from experiments.failure_analysis.analyze_sql_retrieval import _run_finalize
 
