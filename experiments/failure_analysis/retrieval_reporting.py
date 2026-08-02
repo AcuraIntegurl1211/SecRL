@@ -363,7 +363,7 @@ def _validate_provenance(
         try:
             canonical = path.resolve()
             is_regular = path.is_file() and stat.S_ISREG(path.stat().st_mode)
-        except (OSError, ValueError, TypeError) as exc:
+        except (OSError, ValueError, TypeError, RuntimeError) as exc:
             raise _input_error(f"cannot inspect input path {path}: {exc}", exc) from exc
         if not path.is_absolute() or path != canonical:
             raise _input_error(f"input path {key!r} must be canonical absolute: {path}")
@@ -712,7 +712,7 @@ def write_retrieval_outputs(
     try:
         try:
             temp_dir = Path(tempfile.mkdtemp(prefix=f".{output_dir.name}.", dir=parent))
-        except OSError as exc:
+        except (OSError, TypeError, ValueError, RuntimeError, UnicodeError) as exc:
             raise _input_error(f"cannot create temporary output directory: {exc}", exc) from exc
 
         staged_paths: dict[str, Path] = {}
@@ -786,7 +786,10 @@ def write_retrieval_outputs(
         return [output_dir / name for name in _OUTPUT_NAMES]
     finally:
         if not moved and temp_dir is not None and temp_dir.exists():
-            shutil.rmtree(temp_dir)
+            try:
+                shutil.rmtree(temp_dir)
+            except (OSError, TypeError, ValueError, RuntimeError):
+                pass
 
 
 __all__ = ["write_retrieval_outputs"]

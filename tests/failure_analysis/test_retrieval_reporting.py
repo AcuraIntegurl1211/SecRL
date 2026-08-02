@@ -198,6 +198,26 @@ class RetrievalReportingTest(unittest.TestCase):
                 write_retrieval_outputs([row], [], target, paths, hashes, None)
             self.assertTrue(target.is_symlink())
 
+    def test_symlink_loop_in_input_provenance_is_input_error(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            paths, hashes = _inputs(root)
+            first = root / "loop-a"
+            second = root / "loop-b"
+            first.symlink_to(second)
+            second.symlink_to(first)
+            paths["taxonomy"] = first
+            hashes["taxonomy"] = "0" * 64
+            with self.assertRaises(InputError):
+                write_retrieval_outputs([_row(0)], [], root / "loop-output", paths, hashes, None)
+
+    def test_nul_output_path_is_input_error(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            paths, hashes = _inputs(root)
+            with self.assertRaises(InputError):
+                write_retrieval_outputs([_row(0)], [], Path(f"{root}/bad\x00output"), paths, hashes, None)
+
     def test_atomic_publish_collision_preserves_sentinel(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -268,6 +288,13 @@ class RetrievalReportingTest(unittest.TestCase):
                 with self.assertRaises(InputError):
                     write_retrieval_outputs(rows, [], root / "write-failed", paths, hashes, None)
             self.assertFalse((root / "write-failed").exists())
+
+            with (
+                mock.patch("experiments.failure_analysis.retrieval_reporting._write_text", side_effect=fail_write),
+                mock.patch("experiments.failure_analysis.retrieval_reporting.shutil.rmtree", side_effect=OSError("cleanup failed")),
+            ):
+                with self.assertRaises(InputError):
+                    write_retrieval_outputs(rows, [], root / "cleanup-failed", paths, hashes, None)
 
 
 if __name__ == "__main__":
