@@ -493,7 +493,10 @@ def _load_inputs(args: argparse.Namespace) -> tuple[Path, dict[str, Path], dict[
         ):
             raise MappingError(message) from exc
         raise
-    manifest_by_incident = _manifest_incidents(manifest_paths, source_specs)
+    try:
+        manifest_by_incident = _manifest_incidents(manifest_paths, source_specs)
+    except InputError as exc:
+        raise MappingError(str(exc)) from exc
     taxonomy = load_overlay_taxonomy(taxonomy_path)
     for path, expected in manifest_hashes_before.items():
         actual = _mapping_hash(path, f"manifest {path}")
@@ -501,6 +504,12 @@ def _load_inputs(args: argparse.Namespace) -> tuple[Path, dict[str, Path], dict[
             raise MappingError(f"manifest changed during load: {path}")
     if _mapping_hash(taxonomy_path, "taxonomy") != taxonomy_hash_before:
         raise MappingError(f"taxonomy changed during load: {taxonomy_path}")
+    # Keep the four-value return contract stable for tests/callers while
+    # retaining a private snapshot for the immediate fresh-build gate.
+    snapshot_paths, snapshot_hashes = _build_input_provenance(
+        aggregate, taxonomy_path, manifest_by_incident, source_specs
+    )
+    setattr(args, "_retrieval_build_snapshot", (snapshot_paths, snapshot_hashes))
     return aggregate, manifest_by_incident, source_specs, taxonomy
 
 
@@ -520,6 +529,11 @@ def _build_fresh_with_hashes(
     build_paths, build_hashes = _build_input_provenance(
         aggregate, taxonomy_path, manifest_paths, source_specs
     )
+    snapshot = getattr(args, "_retrieval_build_snapshot", None)
+    if snapshot is not None:
+        snapshot_paths, snapshot_hashes = snapshot
+        if snapshot_paths != build_paths or snapshot_hashes != build_hashes:
+            raise MappingError("retrieval inputs changed after input load")
     rows = load_reviewed_rows(aggregate)
     try:
         bundles = build_evidence_bundles(rows, source_specs, EXPECTED_COUNTS)
