@@ -179,6 +179,119 @@ class SqlRetrievalCliTest(unittest.TestCase):
             self.assertEqual(result, [work_dir / "evidence_bundles.jsonl", work_dir / "review_template.csv"])
             self.assertFalse(work_dir.exists())
 
+    def test_source_extraction_input_error_is_mapping_error(self):
+        from experiments.failure_analysis.analyze_sql_retrieval import _build_fresh
+
+        with tempfile.TemporaryDirectory() as directory:
+            aggregate = Path(directory) / "aggregate.csv"
+            aggregate.write_text("bytes", encoding="utf-8")
+            taxonomy = Path(directory) / "taxonomy.json"
+            taxonomy.write_text("{}", encoding="utf-8")
+            with patch(
+                "experiments.failure_analysis.analyze_sql_retrieval._load_inputs",
+                return_value=(aggregate, {}, {}, {}),
+            ), patch(
+                "experiments.failure_analysis.analyze_sql_retrieval._build_input_provenance",
+                return_value=({}, {}),
+            ), patch(
+                "experiments.failure_analysis.analyze_sql_retrieval.load_reviewed_rows",
+                return_value=[],
+            ), patch(
+                "experiments.failure_analysis.analyze_sql_retrieval.build_evidence_bundles",
+                side_effect=InputError("source SHA-256 mismatch for env.json"),
+            ):
+                with self.assertRaises(MappingError):
+                    _build_fresh(argparse.Namespace(taxonomy=taxonomy))
+
+    def test_final_provenance_hash_drift_is_mapping_error(self):
+        from experiments.failure_analysis.analyze_sql_retrieval import _run_finalize
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            evidence_path = root / "evidence.jsonl"
+            review_path = root / "review.csv"
+            evidence_path.write_text("{}\n", encoding="utf-8")
+            review_path.write_text("header\n", encoding="utf-8")
+            taxonomy_path = root / "taxonomy.json"
+            taxonomy_path.write_text("{}\n", encoding="utf-8")
+            output = root / "nested" / "report"
+            args = argparse.Namespace(
+                output_dir=output,
+                evidence_jsonl=evidence_path,
+                completed_review_csv=review_path,
+                taxonomy=taxonomy_path,
+            )
+            fresh = [_bundle()]
+            with patch(
+                "experiments.failure_analysis.analyze_sql_retrieval._build_fresh_with_hashes",
+                return_value=(root / "aggregate.csv", {}, {}, {}, fresh, {}, {}),
+            ), patch(
+                "experiments.failure_analysis.analyze_sql_retrieval._load_evidence_bundles",
+                return_value=fresh,
+            ), patch(
+                "experiments.failure_analysis.analyze_sql_retrieval._compare_evidence_bundles",
+            ), patch(
+                "experiments.failure_analysis.analyze_sql_retrieval.apply_completed_review",
+                return_value=[{"incident": "incident_5", "question_index": 0, "question_fingerprint_sha256": "0" * 64}],
+            ), patch(
+                "experiments.failure_analysis.analyze_sql_retrieval.select_low_confidence_rows",
+                return_value=[],
+            ), patch(
+                "experiments.failure_analysis.analyze_sql_retrieval._source_provenance",
+                return_value=({}, {}),
+            ), patch(
+                "experiments.failure_analysis.analyze_sql_retrieval.write_retrieval_outputs",
+                side_effect=InputError("input SHA-256 mismatch for source.json"),
+            ):
+                with self.assertRaises(MappingError):
+                    _run_finalize(args)
+
+    def test_post_build_aggregate_hash_drift_blocks_publication(self):
+        from experiments.failure_analysis.analyze_sql_retrieval import _run_finalize
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            aggregate = root / "aggregate.csv"
+            aggregate.write_text("aggregate", encoding="utf-8")
+            evidence_path = root / "evidence.jsonl"
+            review_path = root / "review.csv"
+            taxonomy_path = root / "taxonomy.json"
+            evidence_path.write_text("{}\n", encoding="utf-8")
+            review_path.write_text("header\n", encoding="utf-8")
+            taxonomy_path.write_text("{}\n", encoding="utf-8")
+            args = argparse.Namespace(
+                output_dir=root / "report",
+                evidence_jsonl=evidence_path,
+                completed_review_csv=review_path,
+                taxonomy=taxonomy_path,
+            )
+            fresh = [_bundle()]
+            build_paths = {"aggregate_csv": aggregate.resolve()}
+            build_hashes = {"aggregate_csv": "a" * 64}
+            with patch(
+                "experiments.failure_analysis.analyze_sql_retrieval._build_fresh_with_hashes",
+                return_value=(aggregate, {}, {}, {}, fresh, build_paths, build_hashes),
+            ), patch(
+                "experiments.failure_analysis.analyze_sql_retrieval._load_evidence_bundles",
+                return_value=fresh,
+            ), patch(
+                "experiments.failure_analysis.analyze_sql_retrieval._compare_evidence_bundles",
+            ), patch(
+                "experiments.failure_analysis.analyze_sql_retrieval.apply_completed_review",
+                return_value=[{"incident": "incident_5", "question_index": 0, "question_fingerprint_sha256": "0" * 64}],
+            ), patch(
+                "experiments.failure_analysis.analyze_sql_retrieval.select_low_confidence_rows",
+                return_value=[],
+            ), patch(
+                "experiments.failure_analysis.analyze_sql_retrieval._source_provenance",
+                return_value=({"aggregate_csv": aggregate.resolve()}, {"aggregate_csv": "b" * 64}),
+            ), patch(
+                "experiments.failure_analysis.analyze_sql_retrieval.write_retrieval_outputs",
+            ) as write:
+                with self.assertRaises(MappingError):
+                    _run_finalize(args)
+            write.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

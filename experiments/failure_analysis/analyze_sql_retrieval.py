@@ -174,8 +174,49 @@ def _source_provenance(
     if len(paths) != 4 + EXPECTED_MANIFEST_COUNT + EXPECTED_SOURCE_COUNT:
         raise MappingError("finalization provenance must contain exactly 36 inputs")
     canonical_paths = {key: _canonical_file(value, f"provenance {key}") for key, value in paths.items()}
-    hashes = {key: _hash(value, key) for key, value in canonical_paths.items()}
+    try:
+        hashes = {key: _hash(value, key) for key, value in canonical_paths.items()}
+    except InputError as exc:
+        raise MappingError(str(exc)) from exc
     return canonical_paths, hashes
+
+
+def _build_input_provenance(
+    aggregate: Path,
+    taxonomy: Path,
+    manifest_paths: dict[str, Path],
+    source_specs: dict[str, SourceSpec],
+) -> tuple[dict[str, Path], dict[str, str]]:
+    """Snapshot every input used to reconstruct fresh bundles.
+
+    The snapshot is taken before aggregate rows are loaded and source JSON is
+    mapped.  Finalization compares it with a second snapshot immediately
+    before publication so a post-build input race cannot be paired with stale
+    evidence bundles.
+    """
+    paths: dict[str, Path] = {
+        "aggregate_csv": aggregate,
+        "taxonomy": taxonomy,
+    }
+    for incident in EXPECTED_COUNTS:
+        paths[f"manifest_{incident}"] = manifest_paths[incident]
+        spec = source_specs[incident]
+        paths[f"agent_{incident}"] = spec.agent_path
+        paths[f"env_{incident}"] = spec.env_path
+        paths[f"question_{incident}"] = spec.question_path
+    canonical = {key: _canonical_file(path, f"build provenance {key}") for key, path in paths.items()}
+    try:
+        hashes = {key: _hash(path, key) for key, path in canonical.items()}
+    except InputError as exc:
+        raise MappingError(str(exc)) from exc
+    for incident in EXPECTED_COUNTS:
+        spec = source_specs[incident]
+        for kind in ("agent", "env", "question"):
+            key = f"{kind}_{incident}"
+            expected = getattr(spec, f"{kind}_sha256")
+            if hashes[key] != expected:
+                raise MappingError(f"source SHA-256 mismatch for {canonical[key]}")
+    return canonical, hashes
 
 
 def _reject_duplicate_json_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
@@ -425,14 +466,48 @@ def _load_inputs(args: argparse.Namespace) -> tuple[Path, dict[str, Path], dict[
     return aggregate, manifest_by_incident, source_specs, taxonomy
 
 
-def _build_fresh(args: argparse.Namespace) -> tuple[Path, dict[str, Path], dict[str, SourceSpec], dict[str, object], list[RetrievalEvidenceBundle]]:
+def _build_fresh_with_hashes(
+    args: argparse.Namespace,
+) -> tuple[
+    Path,
+    dict[str, Path],
+    dict[str, SourceSpec],
+    dict[str, object],
+    list[RetrievalEvidenceBundle],
+    dict[str, Path],
+    dict[str, str],
+]:
     aggregate, manifest_paths, source_specs, taxonomy = _load_inputs(args)
-    _hash(aggregate, "aggregate CSV")
+    taxonomy_path = _canonical_file(args.taxonomy, "taxonomy")
+    build_paths, build_hashes = _build_input_provenance(
+        aggregate, taxonomy_path, manifest_paths, source_specs
+    )
     rows = load_reviewed_rows(aggregate)
-    bundles = build_evidence_bundles(rows, source_specs, EXPECTED_COUNTS)
+    try:
+        bundles = build_evidence_bundles(rows, source_specs, EXPECTED_COUNTS)
+    except InputError as exc:
+        # Once the aggregate rows have passed their own parser, InputError
+        # from extraction means a manifest-addressed source was unreadable,
+        # hash-drifted, or otherwise failed source mapping.
+        raise MappingError(str(exc)) from exc
     if len(bundles) != sum(EXPECTED_COUNTS.values()):
         raise MappingError("fresh extraction did not produce exactly 233 bundles")
-    return aggregate, manifest_paths, source_specs, taxonomy, bundles
+    return (
+        aggregate,
+        manifest_paths,
+        source_specs,
+        taxonomy,
+        bundles,
+        build_paths,
+        build_hashes,
+    )
+
+
+def _build_fresh(
+    args: argparse.Namespace,
+) -> tuple[Path, dict[str, Path], dict[str, SourceSpec], dict[str, object], list[RetrievalEvidenceBundle]]:
+    result = _build_fresh_with_hashes(args)
+    return result[:5]
 
 
 def _run_prepare(args: argparse.Namespace) -> list[Path]:
@@ -446,7 +521,15 @@ def _run_prepare(args: argparse.Namespace) -> list[Path]:
 
 def _run_finalize(args: argparse.Namespace) -> list[Path]:
     _new_destination(args.output_dir, "output-dir")
-    aggregate, manifest_paths, source_specs, taxonomy, fresh = _build_fresh(args)
+    (
+        aggregate,
+        manifest_paths,
+        source_specs,
+        taxonomy,
+        fresh,
+        build_paths,
+        build_hashes,
+    ) = _build_fresh_with_hashes(args)
     evidence_path = _canonical_file(args.evidence_jsonl, "evidence JSONL")
     review_path = _canonical_file(args.completed_review_csv, "completed review CSV")
     evidence = _load_evidence_bundles(evidence_path)
@@ -461,12 +544,28 @@ def _run_finalize(args: argparse.Namespace) -> list[Path]:
         manifest_paths,
         source_specs,
     )
+    for key, expected_hash in build_hashes.items():
+        if input_paths.get(key) != build_paths[key] or input_hashes.get(key) != expected_hash:
+            raise MappingError(f"input changed after fresh extraction: {key}")
     parent = args.output_dir.parent
     try:
         parent.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
         raise InputError(f"cannot create output parent {parent}: {exc}") from exc
-    return write_retrieval_outputs(rows, queue, args.output_dir, input_paths, input_hashes, _git_commit())
+    try:
+        return write_retrieval_outputs(
+            rows,
+            queue,
+            args.output_dir,
+            input_paths,
+            input_hashes,
+            _git_commit(),
+        )
+    except InputError as exc:
+        message = str(exc)
+        if "input SHA-256 mismatch" in message or "cannot read input path" in message:
+            raise MappingError(message) from exc
+        raise
 
 
 def prepare(args: argparse.Namespace) -> list[Path]:
