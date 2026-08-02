@@ -551,6 +551,8 @@ def _validate_bundle(bundle: RetrievalEvidenceBundle) -> None:
     for field in ("submitted", "submitted_at_step_limit"):
         if type(getattr(bundle, field)) is not bool:
             raise InputError(f"invalid bundle {field}")
+    if bundle.submitted and bundle.trajectory_steps <= 0:
+        raise InputError("invalid bundle submitted requires trajectory_steps>0")
     if bundle.submitted_at_step_limit and not bundle.submitted:
         raise InputError(
             "invalid bundle submitted_at_step_limit requires submitted"
@@ -582,6 +584,10 @@ def _validate_bundle(bundle: RetrievalEvidenceBundle) -> None:
             raise InputError("invalid bundle query step")
         if type(query_step.step) is not int or query_step.step <= previous_step:
             raise InputError("invalid bundle query step")
+        if query_step.step > bundle.trajectory_steps:
+            raise InputError(
+                "invalid bundle query step exceeds trajectory_steps"
+            )
         if not isinstance(query_step.sql, str) or not isinstance(
             query_step.observation, str
         ):

@@ -615,6 +615,47 @@ class RetrievalExtractTest(unittest.TestCase):
                     )
                 self.assertFalse(output_dir.exists())
 
+    def test_write_preparation_files_rejects_inconsistent_trajectory_contract_before_parent_creation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            bundle_type = __import__(
+                "experiments.failure_analysis.retrieval_models",
+                fromlist=["RetrievalEvidenceBundle"],
+            ).RetrievalEvidenceBundle
+            bundle = replace(bundle_type.fixture_for_test(), incident="incident_1")
+            invalid_bundles = (
+                (
+                    "submitted-without-steps",
+                    replace(
+                        bundle,
+                        trajectory_steps=0,
+                        submitted=True,
+                        submitted_at_step_limit=False,
+                    ),
+                    "trajectory_steps",
+                ),
+                (
+                    "query-step-out-of-range",
+                    replace(
+                        bundle,
+                        trajectory_steps=1,
+                        query_steps=(QueryStep(2, "SELECT 1", "[]", True),),
+                    ),
+                    "query step",
+                ),
+            )
+            for label, invalid_bundle, expected_field in invalid_bundles:
+                output_dir = root / label
+                with self.subTest(label=label):
+                    with self.assertRaises(InputError) as raised:
+                        write_preparation_files(
+                            [invalid_bundle],
+                            output_dir / "evidence.jsonl",
+                            output_dir / "review.csv",
+                        )
+                    self.assertIn(expected_field, str(raised.exception))
+                    self.assertFalse(output_dir.exists())
+
     def test_write_preparation_files_rejects_unencodable_values_before_parent_creation(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
