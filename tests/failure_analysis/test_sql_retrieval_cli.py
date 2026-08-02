@@ -134,6 +134,10 @@ class SqlRetrievalCliTest(unittest.TestCase):
             self.assertIn("manifest_incident_5", paths)
             self.assertIn("agent_incident_322", paths)
 
+            specs["incident_5"].agent_path.unlink()
+            with self.assertRaises(MappingError):
+                _source_provenance(aggregate, review, taxonomy, evidence, manifests, specs)
+
     def test_duplicate_manifest_identity_is_mapping_error(self):
         from experiments.failure_analysis.analyze_sql_retrieval import (
             EXPECTED_COUNTS,

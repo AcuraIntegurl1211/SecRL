@@ -113,6 +113,18 @@ def _hash(path: Path, label: str) -> str:
         raise InputError(f"cannot hash {label} {path}: {exc}") from exc
 
 
+def _canonical_provenance_paths(paths: dict[str, Path]) -> dict[str, Path]:
+    canonical: dict[str, Path] = {}
+    for key, path in paths.items():
+        try:
+            canonical[key] = _canonical_file(path, f"provenance {key}")
+        except InputError as exc:
+            if key.startswith(("manifest_", "agent_", "env_", "question_")):
+                raise MappingError(str(exc)) from exc
+            raise
+    return canonical
+
+
 def _manifest_incidents(manifest_paths: list[Path], source_specs: dict[str, SourceSpec]) -> dict[str, Path]:
     if len(manifest_paths) != EXPECTED_MANIFEST_COUNT:
         raise InputError("exactly eight --manifest paths are required")
@@ -173,7 +185,7 @@ def _source_provenance(
         raise MappingError("incomplete finalization provenance set")
     if len(paths) != 4 + EXPECTED_MANIFEST_COUNT + EXPECTED_SOURCE_COUNT:
         raise MappingError("finalization provenance must contain exactly 36 inputs")
-    canonical_paths = {key: _canonical_file(value, f"provenance {key}") for key, value in paths.items()}
+    canonical_paths = _canonical_provenance_paths(paths)
     try:
         hashes = {key: _hash(value, key) for key, value in canonical_paths.items()}
     except InputError as exc:
@@ -204,7 +216,7 @@ def _build_input_provenance(
         paths[f"agent_{incident}"] = spec.agent_path
         paths[f"env_{incident}"] = spec.env_path
         paths[f"question_{incident}"] = spec.question_path
-    canonical = {key: _canonical_file(path, f"build provenance {key}") for key, path in paths.items()}
+    canonical = _canonical_provenance_paths(paths)
     try:
         hashes = {key: _hash(path, key) for key, path in canonical.items()}
     except InputError as exc:
