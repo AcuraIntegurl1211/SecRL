@@ -7,6 +7,7 @@ import hashlib
 import io
 import json
 import math
+import os
 import re
 import shutil
 import stat
@@ -16,7 +17,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from .models import InputError, OutputCollisionError
+from .models import InputError, OutputCollisionError, ReviewError
 from .retrieval_models import OVERLAY_SCHEMA_VERSION
 from .retrieval_review import TAXONOMY_VERSION, select_low_confidence_rows
 
@@ -30,10 +31,28 @@ _OUTPUT_NAMES = (
     "low_confidence_review_queue.csv",
     "analysis_manifest.json",
 )
-_IDENTITY_FIELDS = (
+_BUNDLE_FIELDS = (
     "incident",
     "question_index",
     "question_fingerprint_sha256",
+    "question_text_fingerprint_sha256",
+    "question",
+    "context",
+    "golden_answer",
+    "golden_solution",
+    "submitted_answer",
+    "trajectory_steps",
+    "submitted",
+    "submitted_at_step_limit",
+    "reward_official",
+    "reviewed_primary_original",
+    "review_notes_original",
+    "agent_source_index",
+    "env_source_index",
+    "agent_source_sha256",
+    "env_source_sha256",
+    "question_source_sha256",
+    "query_steps",
 )
 _DECISION_FIELDS = (
     "retrieval_primary_subtype",
@@ -48,6 +67,22 @@ _DECISION_FIELDS = (
     "observation_evidence",
     "gold_evidence_basis",
     "rationale",
+)
+_ROW_FIELDS = (*_BUNDLE_FIELDS, *_DECISION_FIELDS, "schema_version", "overlay_taxonomy_version")
+_INCIDENT_NUMBERS = (5, 38, 34, 39, 55, 134, 166, 322)
+_INPUT_KEYS = frozenset(
+    {
+        "aggregate_csv",
+        "completed_review_csv",
+        "taxonomy",
+        "evidence_jsonl",
+        *(f"manifest_incident_{incident}" for incident in _INCIDENT_NUMBERS),
+        *(
+            f"{kind}_incident_{incident}"
+            for incident in _INCIDENT_NUMBERS
+            for kind in ("agent", "env", "question")
+        ),
+    }
 )
 
 
@@ -135,6 +170,68 @@ def _canonical_json(value: object) -> str:
     )
 
 
+def _validate_bundle_payload(row: dict[str, object], position: int, label: str) -> None:
+    prefix = f"{label} row {position}"
+    for field in (
+        "question_text_fingerprint_sha256",
+        "agent_source_sha256",
+        "env_source_sha256",
+        "question_source_sha256",
+    ):
+        value = row[field]
+        if type(value) is not str or _FINGERPRINT_RE.fullmatch(value) is None:
+            raise _input_error(f"{prefix} {field} must be lower-case SHA-256")
+    for field in (
+        "question",
+        "context",
+        "submitted_answer",
+        "reviewed_primary_original",
+        "review_notes_original",
+    ):
+        if type(row[field]) is not str:
+            raise _input_error(f"{prefix} {field} must be an exact string")
+    for field in ("question_index", "agent_source_index", "env_source_index", "trajectory_steps"):
+        value = row[field]
+        if type(value) is not int or value < 0:
+            raise _input_error(f"{prefix} {field} must be a non-negative exact int")
+    for field in ("submitted", "submitted_at_step_limit"):
+        if type(row[field]) is not bool:
+            raise _input_error(f"{prefix} {field} must be an exact bool")
+    if row["submitted"] and row["trajectory_steps"] <= 0:
+        raise _input_error(f"{prefix} submitted requires trajectory_steps>0")
+    if row["submitted_at_step_limit"] and (
+        not row["submitted"] or row["trajectory_steps"] <= 0
+    ):
+        raise _input_error(f"{prefix} submitted_at_step_limit requires submitted and steps")
+    reward = row["reward_official"]
+    if type(reward) is not float or not math.isfinite(reward):
+        raise _input_error(f"{prefix} reward_official must be a finite float")
+    _normalize_json(row["golden_answer"], f"{prefix} golden_answer")
+    _normalize_json(row["golden_solution"], f"{prefix} golden_solution")
+    query_steps = row["query_steps"]
+    if type(query_steps) is not list:
+        raise _input_error(f"{prefix} query_steps must be a list")
+    previous_step = 0
+    for step_position, query_step in enumerate(query_steps):
+        if type(query_step) is not dict or set(query_step) != {
+            "step",
+            "sql",
+            "observation",
+            "query_success",
+        }:
+            raise _input_error(f"{prefix} query_steps[{step_position}] has an invalid schema")
+        step = query_step["step"]
+        if type(step) is not int or step <= previous_step or step > row["trajectory_steps"]:
+            raise _input_error(f"{prefix} query_steps step is not positive, increasing, and in range")
+        if type(query_step["sql"]) is not str or type(query_step["observation"]) is not str:
+            raise _input_error(f"{prefix} query_steps text fields must be exact strings")
+        success = query_step["query_success"]
+        if success is not None and type(success) is not bool:
+            raise _input_error(f"{prefix} query_steps query_success must be None or bool")
+        previous_step = step
+        _normalize_json(query_step, f"{prefix} query_steps[{step_position}]")
+
+
 def _validate_row_list(
     rows: object,
     label: str,
@@ -149,8 +246,6 @@ def _validate_row_list(
         return [], (), []
 
     validated: list[dict[str, object]] = []
-    first_fields: tuple[str, ...] | None = None
-    key_set: set[str] | None = None
     identities: list[tuple[str, int, str]] = []
     seen_identities: set[tuple[str, int, str]] = set()
     seen_question_keys: set[tuple[str, int]] = set()
@@ -159,13 +254,10 @@ def _validate_row_list(
             raise _input_error(f"{label} row {position} must be a dictionary")
         if any(type(key) is not str for key in row):
             raise _input_error(f"{label} row {position} has a non-string field")
-        fields = tuple(row)
-        current_set = set(fields)
-        if first_fields is None:
-            first_fields = fields
-            key_set = current_set
-        elif current_set != key_set:
-            raise _input_error(f"{label} rows have inconsistent key sets")
+        if tuple(row) != _ROW_FIELDS:
+            raise _input_error(
+                f"{label} row {position} fields must exactly match frozen schema"
+            )
         if row.get("schema_version") != OVERLAY_SCHEMA_VERSION:
             raise _input_error(f"{label} row {position} has an invalid schema_version")
         if row.get("overlay_taxonomy_version") != TAXONOMY_VERSION:
@@ -180,6 +272,7 @@ def _validate_row_list(
             raise _input_error(f"duplicate {label} incident/question_index: {question_key}")
         seen_identities.add(identity)
         seen_question_keys.add(question_key)
+        _validate_bundle_payload(row, position, label)
         for field, value in row.items():
             _normalize_json(value, f"{label} row {position} field {field}")
         identities.append(identity)
@@ -189,10 +282,9 @@ def _validate_row_list(
     # also enforces taxonomy membership and decision cross-field invariants.
     try:
         select_low_confidence_rows(validated)
-    except Exception as exc:
+    except ReviewError as exc:
         raise _input_error(f"invalid {label} decision fields: {exc}", exc) from exc
-    assert first_fields is not None
-    return validated, first_fields, identities
+    return validated, _ROW_FIELDS, identities
 
 
 def _validate_review_queue(
@@ -205,13 +297,13 @@ def _validate_review_queue(
         "review_queue",
         require_nonempty=False,
     )
-    if queue and set(queue[0]) != set(row_fields):
+    if queue and tuple(queue[0]) != _ROW_FIELDS:
         raise _input_error("review_queue rows do not have the same schema as rows")
-    if any(set(item) != set(row_fields) for item in queue):
+    if any(tuple(item) != _ROW_FIELDS for item in queue):
         raise _input_error("review_queue rows do not have the same schema as rows")
     try:
         expected = select_low_confidence_rows(rows)
-    except Exception as exc:
+    except ReviewError as exc:
         raise _input_error(f"cannot compute low-confidence queue: {exc}", exc) from exc
     if len(queue) != len(expected):
         raise _input_error("review_queue does not exactly match low-confidence policy")
@@ -238,7 +330,7 @@ def _sha256_file(path: Path) -> str:
         with path.open("rb") as handle:
             for chunk in iter(lambda: handle.read(1024 * 1024), b""):
                 digest.update(chunk)
-    except OSError as exc:
+    except (OSError, ValueError, TypeError) as exc:
         raise _input_error(f"cannot read input path {path}: {exc}", exc) from exc
     return digest.hexdigest()
 
@@ -249,8 +341,12 @@ def _validate_provenance(
 ) -> dict[str, dict[str, str]]:
     if not isinstance(input_paths, dict) or not isinstance(input_hashes, dict):
         raise _input_error("input_paths and input_hashes must be dictionaries")
-    if set(input_paths) != set(input_hashes):
-        raise _input_error("input_paths and input_hashes keys must match exactly")
+    if (
+        set(input_paths) != _INPUT_KEYS
+        or set(input_hashes) != _INPUT_KEYS
+        or set(input_paths) != set(input_hashes)
+    ):
+        raise _input_error("input provenance keys must exactly match the frozen set")
     if any(type(key) is not str or not key for key in input_paths):
         raise _input_error("input provenance keys must be non-empty strings")
     manifest: dict[str, dict[str, str]] = {}
@@ -262,7 +358,7 @@ def _validate_provenance(
         try:
             canonical = path.resolve()
             is_regular = path.is_file() and stat.S_ISREG(path.stat().st_mode)
-        except OSError as exc:
+        except (OSError, ValueError, TypeError) as exc:
             raise _input_error(f"cannot inspect input path {path}: {exc}", exc) from exc
         if not path.is_absolute() or path != canonical:
             raise _input_error(f"input path {key!r} must be canonical absolute: {path}")
@@ -410,7 +506,10 @@ def _parse_csv_cell(cell: str, expected: object, field: str) -> object:
     elif type(expected) is int:
         if re.fullmatch(r"-?(?:0|[1-9][0-9]*)\Z", cell) is None:
             raise _input_error(f"CSV field {field} is not an exact integer")
-        parsed = int(cell)
+        try:
+            parsed = int(cell)
+        except (ValueError, OverflowError) as exc:
+            raise _input_error(f"CSV field {field} is not an exact integer", exc) from exc
     elif type(expected) is float:
         try:
             parsed = float(cell)
@@ -440,7 +539,9 @@ def _validate_csv_file(
             if reader.fieldnames != list(fields):
                 raise _input_error("CSV header changed stable field order")
             parsed = list(reader)
-    except (OSError, UnicodeError, csv.Error) as exc:
+    except InputError:
+        raise
+    except (OSError, UnicodeError, csv.Error, TypeError, ValueError, OverflowError, RecursionError) as exc:
         raise _input_error(f"cannot reopen CSV output {path}: {exc}", exc) from exc
     if len(parsed) != len(expected_rows):
         raise _input_error(f"CSV record count mismatch for {path}")
@@ -461,7 +562,7 @@ def _validate_jsonl_file(path: Path, expected_rows: list[dict[str, object]]) -> 
                 if not line[:-1]:
                     raise _input_error(f"JSONL line {line_number} is blank")
                 parsed.append(_parse_json_object(line[:-1]))
-    except (OSError, UnicodeError, ValueError, OverflowError, RecursionError) as exc:
+    except (OSError, UnicodeError, TypeError, ValueError, OverflowError, RecursionError) as exc:
         raise _input_error(f"cannot reopen JSONL output {path}: {exc}", exc) from exc
     if len(parsed) != len(expected_rows):
         raise _input_error(f"JSONL record count mismatch for {path}")
@@ -478,6 +579,13 @@ def _write_text(path: Path, text: str) -> None:
     path.write_text(text, encoding="utf-8", newline="\n")
 
 
+def _path_lexists(path: Path) -> bool:
+    try:
+        return os.path.lexists(os.fspath(path))
+    except (OSError, TypeError, ValueError) as exc:
+        raise _input_error(f"cannot inspect output path {path}: {exc}", exc) from exc
+
+
 def write_retrieval_outputs(
     rows: list[dict[str, object]],
     review_queue: list[dict[str, object]],
@@ -489,34 +597,48 @@ def write_retrieval_outputs(
     """Validate, render and atomically publish the five retrieval reports."""
     if not isinstance(output_dir, Path):
         raise _input_error("output_dir must be a Path")
+    if _path_lexists(output_dir):
+        raise OutputCollisionError(f"output path already exists: {output_dir}")
+    if git_commit is not None and type(git_commit) is not str:
+        raise _input_error("git_commit must be None or an exact string")
+    parent = output_dir.parent
     try:
-        if output_dir.exists():
-            raise OutputCollisionError(f"output path already exists: {output_dir}")
-        parent = output_dir.parent
         if not parent.exists() or not parent.is_dir():
             raise _input_error(f"output parent is not an existing directory: {parent}")
     except OSError as exc:
-        raise _input_error(f"cannot inspect output path {output_dir}: {exc}", exc) from exc
+        raise _input_error(f"cannot inspect output parent {parent}: {exc}", exc) from exc
 
-    validated_rows, row_fields, _ = _validate_row_list(
-        rows, "rows", require_nonempty=True
-    )
-    queue = _validate_review_queue(validated_rows, review_queue, row_fields)
-    input_manifest = _validate_provenance(input_paths, input_hashes)
+    try:
+        validated_rows, row_fields, _ = _validate_row_list(
+            rows, "rows", require_nonempty=True
+        )
+        queue = _validate_review_queue(validated_rows, review_queue, row_fields)
+        input_manifest = _validate_provenance(input_paths, input_hashes)
+    except InputError:
+        raise
+    except (KeyError, TypeError, ValueError, UnicodeError, OverflowError, RecursionError) as exc:
+        raise _input_error(f"invalid retrieval inputs: {exc}", exc) from exc
 
     # Sorting is performed on a new list so callers' rows and nested values are
     # never mutated.  Stable field order comes from the first caller row.
     sorted_rows = sorted(validated_rows, key=lambda row: _sort_key(_identity(row)))
     sorted_queue = sorted(queue, key=lambda row: _sort_key(_identity(row)))
-    payloads = {
-        "sql_retrieval_subtypes.csv": _render_csv(sorted_rows, row_fields),
-        "sql_retrieval_subtypes.jsonl": _render_jsonl(sorted_rows),
-        "sql_retrieval_subtypes_summary.md": _render_summary(sorted_rows, len(sorted_queue)),
-        "low_confidence_review_queue.csv": _render_csv(sorted_queue, row_fields),
-    }
+    try:
+        payloads = {
+            "sql_retrieval_subtypes.csv": _render_csv(sorted_rows, row_fields),
+            "sql_retrieval_subtypes.jsonl": _render_jsonl(sorted_rows),
+            "sql_retrieval_subtypes_summary.md": _render_summary(sorted_rows, len(sorted_queue)),
+            "low_confidence_review_queue.csv": _render_csv(sorted_queue, row_fields),
+        }
+    except InputError:
+        raise
+    except (KeyError, TypeError, ValueError, UnicodeError, OverflowError, RecursionError) as exc:
+        raise _input_error(f"cannot render retrieval outputs: {exc}", exc) from exc
 
     temp_dir: Path | None = None
     moved = False
+    reserved_target = False
+    reservation_stat: os.stat_result | None = None
     try:
         try:
             temp_dir = Path(tempfile.mkdtemp(prefix=f".{output_dir.name}.", dir=parent))
@@ -524,19 +646,27 @@ def write_retrieval_outputs(
             raise _input_error(f"cannot create temporary output directory: {exc}", exc) from exc
 
         staged_paths: dict[str, Path] = {}
-        for name in _OUTPUT_NAMES[:-1]:
-            staged_path = temp_dir / name
-            _write_text(staged_path, payloads[name])
-            staged_paths[name] = staged_path
+        try:
+            for name in _OUTPUT_NAMES[:-1]:
+                staged_path = temp_dir / name
+                _write_text(staged_path, payloads[name])
+                staged_paths[name] = staged_path
+        except (OSError, TypeError, ValueError, UnicodeError, OverflowError, RecursionError) as exc:
+            raise _input_error(f"cannot write staged output: {exc}", exc) from exc
 
         _validate_csv_file(staged_paths["sql_retrieval_subtypes.csv"], sorted_rows, row_fields)
         _validate_jsonl_file(staged_paths["sql_retrieval_subtypes.jsonl"], sorted_rows)
         _validate_csv_file(staged_paths["low_confidence_review_queue.csv"], sorted_queue, row_fields)
 
-        output_hashes = {
-            name: _sha256_file(staged_paths[name])
-            for name in sorted(staged_paths)
-        }
+        try:
+            output_hashes = {
+                name: _sha256_file(staged_paths[name])
+                for name in sorted(staged_paths)
+            }
+        except InputError:
+            raise
+        except (OSError, TypeError, ValueError, UnicodeError, OverflowError, RecursionError) as exc:
+            raise _input_error(f"cannot hash staged output: {exc}", exc) from exc
         manifest = {
             "schema_version": OVERLAY_SCHEMA_VERSION,
             "overlay_taxonomy_version": TAXONOMY_VERSION,
@@ -548,35 +678,63 @@ def write_retrieval_outputs(
             "counts": _count_rows(sorted_rows, len(sorted_queue)),
         }
         manifest_path = temp_dir / "analysis_manifest.json"
-        _write_text(
-            manifest_path,
-            json.dumps(
-                manifest,
-                ensure_ascii=False,
-                sort_keys=True,
-                indent=2,
-                allow_nan=False,
+        try:
+            manifest_text = (
+                json.dumps(
+                    manifest,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    indent=2,
+                    allow_nan=False,
+                )
+                + "\n"
             )
-            + "\n",
-        )
+            _write_text(manifest_path, manifest_text)
+        except (OSError, TypeError, ValueError, UnicodeError, OverflowError, RecursionError) as exc:
+            raise _input_error(f"cannot serialize or write manifest: {exc}", exc) from exc
         try:
             with manifest_path.open("r", encoding="utf-8") as handle:
                 reopened_manifest = json.load(handle)
-        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        except (OSError, UnicodeError, json.JSONDecodeError, TypeError, ValueError, OverflowError, RecursionError) as exc:
             raise _input_error(f"cannot reopen manifest: {exc}", exc) from exc
         if not _strict_equal(reopened_manifest, manifest):
             raise _input_error("manifest changed during serialization")
 
-        if output_dir.exists():
+        # Reserve the destination immediately before publication.  This closes
+        # the check/rename race: Path.rename can replace an empty directory, so
+        # only an empty directory created by this call may be replaced below.
+        try:
+            output_dir.mkdir()
+            reserved_target = True
+            reservation_stat = output_dir.stat()
+        except FileExistsError as exc:
             raise OutputCollisionError(
                 f"output path appeared during report generation: {output_dir}"
-            )
-        temp_dir.rename(output_dir)
+            ) from exc
+        except OSError as exc:
+            raise _input_error(f"cannot reserve output path: {exc}", exc) from exc
+        try:
+            temp_dir.rename(output_dir)
+        except OSError as exc:
+            if _path_lexists(output_dir):
+                raise OutputCollisionError(
+                    f"output path appeared during report publication: {output_dir}"
+                ) from exc
+            raise _input_error(f"cannot publish output directory: {exc}", exc) from exc
         moved = True
         return [output_dir / name for name in _OUTPUT_NAMES]
     finally:
         if not moved and temp_dir is not None and temp_dir.exists():
             shutil.rmtree(temp_dir)
+        if not moved and reserved_target and reservation_stat is not None and output_dir.is_dir():
+            try:
+                # Remove only our still-empty reservation; never remove a
+                # collided/user-populated path.  The inode check protects a
+                # user path that replaced our reservation during cleanup.
+                if os.path.samestat(reservation_stat, output_dir.stat()):
+                    output_dir.rmdir()
+            except OSError:
+                pass
 
 
 __all__ = ["write_retrieval_outputs"]

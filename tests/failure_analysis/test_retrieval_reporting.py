@@ -21,7 +21,7 @@ def _row(index: int, *, confidence: str = "high", boundary: str = "NONE") -> dic
         "question_fingerprint_sha256": f"{index + 1:064x}",
         "question_text_fingerprint_sha256": f"{index + 101:064x}",
         "question": f"Question {index}",
-        "context": {"b": 2, "a": 1},
+        "context": "Context",
         "golden_answer": ["gold", index],
         "golden_solution": {"sql": "SELECT 1"},
         "submitted_answer": "answer",
@@ -55,9 +55,20 @@ def _row(index: int, *, confidence: str = "high", boundary: str = "NONE") -> dic
 
 
 def _inputs(root: Path) -> tuple[dict[str, Path], dict[str, str]]:
+    incidents = (5, 38, 34, 39, 55, 134, 166, 322)
+    names = ["aggregate_csv", "completed_review_csv", "taxonomy", "evidence_jsonl"]
+    names.extend(f"manifest_incident_{incident}" for incident in incidents)
+    for incident in incidents:
+        names.extend(
+            [
+                f"agent_incident_{incident}",
+                f"env_incident_{incident}",
+                f"question_incident_{incident}",
+            ]
+        )
     paths: dict[str, Path] = {}
     hashes: dict[str, str] = {}
-    for name in ("aggregate", "manifest_incident_2", "taxonomy", "evidence_jsonl"):
+    for name in names:
         path = root / f"{name}.json"
         path.write_text(name, encoding="utf-8")
         paths[name] = path.resolve()
@@ -98,7 +109,7 @@ class RetrievalReportingTest(unittest.TestCase):
             self.assertEqual(manifest["record_count"], 2)
             self.assertEqual(manifest["output_count"], 5)
             self.assertEqual(manifest["git_commit"], "abc123")
-            self.assertEqual(manifest["input_manifest"]["aggregate"]["path"], str(paths["aggregate"]))
+            self.assertEqual(manifest["input_manifest"]["aggregate_csv"]["path"], str(paths["aggregate_csv"]))
             for name, digest in manifest["output_hashes"].items():
                 self.assertEqual(digest, hashlib.sha256((output_dir / name).read_bytes()).hexdigest())
 
@@ -130,6 +141,79 @@ class RetrievalReportingTest(unittest.TestCase):
                 write_retrieval_outputs(rows, [], target, paths, hashes, None)
             self.assertEqual((target / "sentinel").read_text(), "keep")
 
+    def test_rejects_frozen_schema_missing_or_reordered_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            paths, hashes = _inputs(root)
+            row = _row(0)
+            missing = dict(row)
+            missing.pop("context")
+            with self.assertRaises(InputError):
+                write_retrieval_outputs([missing], [], root / "missing", paths, hashes, None)
+            reordered = {key: row[key] for key in reversed(tuple(row))}
+            with self.assertRaises(InputError):
+                write_retrieval_outputs([reordered], [], root / "reordered", paths, hashes, None)
+
+    def test_rejects_bool_numeric_fields_and_invalid_query_steps(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            paths, hashes = _inputs(root)
+            for field, value in (
+                ("reward_official", True),
+                ("agent_source_index", True),
+                ("trajectory_steps", True),
+            ):
+                row = _row(0)
+                row[field] = value
+                with self.subTest(field=field), self.assertRaises(InputError):
+                    write_retrieval_outputs([row], [], root / field, paths, hashes, None)
+            row = _row(0)
+            row["query_steps"] = [{"step": 0, "sql": "SELECT 1", "observation": "1", "query_success": True}]
+            with self.assertRaises(InputError):
+                write_retrieval_outputs([row], [], root / "query-steps", paths, hashes, None)
+
+    def test_provenance_key_set_is_frozen_and_dangling_target_collides(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            paths, hashes = _inputs(root)
+            row = _row(0)
+            missing_paths = dict(paths)
+            missing_hashes = dict(hashes)
+            missing_paths.pop("taxonomy")
+            missing_hashes.pop("taxonomy")
+            with self.assertRaises(InputError):
+                write_retrieval_outputs([row], [], root / "missing-provenance", missing_paths, missing_hashes, None)
+            extra_paths = dict(paths)
+            extra_hashes = dict(hashes)
+            extra = root / "extra.json"
+            extra.write_text("extra", encoding="utf-8")
+            extra_paths["extra"] = extra.resolve()
+            extra_hashes["extra"] = hashlib.sha256(extra.read_bytes()).hexdigest()
+            with self.assertRaises(InputError):
+                write_retrieval_outputs([row], [], root / "extra-provenance", extra_paths, extra_hashes, None)
+            target = root / "dangling"
+            target.symlink_to(root / "missing-target")
+            with self.assertRaises(OutputCollisionError):
+                write_retrieval_outputs([row], [], target, paths, hashes, None)
+            self.assertTrue(target.is_symlink())
+
+    def test_target_race_during_rename_preserves_sentinel(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            paths, hashes = _inputs(root)
+            target = root / "raced"
+            original_rename = Path.rename
+
+            def race(source: Path, destination: Path) -> Path:
+                (destination / "sentinel").write_text("user", encoding="utf-8")
+                return original_rename(source, destination)
+
+            with mock.patch.object(Path, "rename", race):
+                with self.assertRaises(OutputCollisionError):
+                    write_retrieval_outputs([_row(0)], [], target, paths, hashes, None)
+            self.assertEqual((target / "sentinel").read_text(), "user")
+            self.assertEqual([p.name for p in root.iterdir() if p.name.startswith(".raced.")], [])
+
     def test_review_queue_must_match_policy_and_serialization_failure_cleans_temp(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -138,10 +222,18 @@ class RetrievalReportingTest(unittest.TestCase):
             with self.assertRaises(InputError):
                 write_retrieval_outputs(rows, [_row(0, confidence="low")], root / "bad-queue", paths, hashes, None)
             with mock.patch("experiments.failure_analysis.retrieval_reporting.json.dumps", side_effect=TypeError("boom")):
-                with self.assertRaises(TypeError):
+                with self.assertRaises(InputError):
                     write_retrieval_outputs(rows, [], root / "failed", paths, hashes, None)
             self.assertFalse((root / "failed").exists())
             self.assertEqual([p.name for p in root.iterdir() if p.name.startswith(".failed.")], [])
+
+            def fail_write(*args: object, **kwargs: object) -> None:
+                raise OSError("write failed")
+
+            with mock.patch("experiments.failure_analysis.retrieval_reporting._write_text", side_effect=fail_write):
+                with self.assertRaises(InputError):
+                    write_retrieval_outputs(rows, [], root / "write-failed", paths, hashes, None)
+            self.assertFalse((root / "write-failed").exists())
 
 
 if __name__ == "__main__":
