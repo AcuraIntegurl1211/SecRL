@@ -58,6 +58,9 @@ class RetrievalEvidenceBundle:
     golden_answer: object
     golden_solution: object
     submitted_answer: str
+    trajectory_steps: int
+    submitted: bool
+    submitted_at_step_limit: bool
     reward_official: float
     reviewed_primary_original: str
     review_notes_original: str
@@ -92,6 +95,9 @@ class RetrievalEvidenceBundle:
             golden_answer={'answer': 'example-service'},
             golden_solution={'solution': 'Inspect the service event table.'},
             submitted_answer='example-service',
+            trajectory_steps=2,
+            submitted=True,
+            submitted_at_step_limit=False,
             reward_official=1.0,
             reviewed_primary_original='SQL_RETRIEVAL',
             review_notes_original='',

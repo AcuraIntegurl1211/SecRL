@@ -51,12 +51,26 @@ class RetrievalModelsTest(unittest.TestCase):
     def test_overlay_schema_and_evidence_bundle_are_immutable(self):
         bundle = RetrievalEvidenceBundle.fixture_for_test()
         self.assertEqual(OVERLAY_SCHEMA_VERSION, 'sql_retrieval_subtyping_v1')
+        self.assertEqual(bundle.trajectory_steps, 2)
+        self.assertTrue(bundle.submitted)
+        self.assertFalse(bundle.submitted_at_step_limit)
         self.assertIsInstance(bundle.query_steps, tuple)
         self.assertIsInstance(bundle.query_steps[0], QueryStep)
         with self.assertRaises(FrozenInstanceError):
             bundle.incident = 'other'
         with self.assertRaises(FrozenInstanceError):
+            bundle.submitted = False
+        with self.assertRaises(FrozenInstanceError):
             bundle.query_steps[0].sql = 'SELECT 2'
+
+        replaced = replace(
+            bundle,
+            trajectory_steps=3,
+            submitted_at_step_limit=True,
+        )
+        self.assertEqual(replaced.trajectory_steps, 3)
+        self.assertTrue(replaced.submitted)
+        self.assertTrue(replaced.submitted_at_step_limit)
 
     def test_evidence_bundle_recursively_freezes_nested_json_values(self):
         original = {'nested': {'values': [1, {'name': 'before'}]}}

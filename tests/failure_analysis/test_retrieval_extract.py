@@ -20,7 +20,7 @@ from experiments.failure_analysis.retrieval_extract import (
     write_preparation_files,
 )
 from experiments.failure_analysis.retrieval_models import QueryStep
-from tests.failure_analysis.helpers import agent_entry, env_entry, question
+from tests.failure_analysis.helpers import agent_entry, env_entry as base_env_entry, question
 
 
 REVIEW_FIELDS = [
@@ -28,6 +28,10 @@ REVIEW_FIELDS = [
     "question_index",
     "question_fingerprint_sha256",
     "reward_official",
+    "steps",
+    "max_steps",
+    "submitted",
+    "submitted_at_step_limit",
     "reviewed_primary",
     "review_notes",
 ]
@@ -43,6 +47,10 @@ def review_row(incident: str, index: int, item: dict[str, object], **extra: str)
         "question_index": str(index),
         "question_fingerprint_sha256": question_identity(incident, index, item).question_fingerprint_sha256,
         "reward_official": "1.0",
+        "steps": "0",
+        "max_steps": "15",
+        "submitted": "False",
+        "submitted_at_step_limit": "False",
         "reviewed_primary": "SQL_RETRIEVAL",
         "review_notes": "needs semantic inspection",
     }
@@ -50,11 +58,25 @@ def review_row(incident: str, index: int, item: dict[str, object], **extra: str)
     return row
 
 
-def write_review(path: Path, rows: list[dict[str, str]]) -> None:
+def write_review(
+    path: Path,
+    rows: list[dict[str, str]],
+    fieldnames: list[str] | None = None,
+) -> None:
     with path.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=REVIEW_FIELDS)
+        writer = csv.DictWriter(handle, fieldnames=fieldnames or REVIEW_FIELDS)
         writer.writeheader()
         writer.writerows(rows)
+
+
+def env_entry(
+    item: dict[str, object],
+    reward: float = 0.0,
+    trajectory: list[dict[str, object]] | None = None,
+) -> dict[str, object]:
+    entry = base_env_entry(item, reward, trajectory)
+    entry["steps"] = len(entry["trajectory"])
+    return entry
 
 
 class RetrievalExtractTest(unittest.TestCase):
@@ -95,6 +117,46 @@ class RetrievalExtractTest(unittest.TestCase):
             write_review(path, [duplicate, duplicate])
             with self.assertRaises(InputError):
                 load_reviewed_rows(path)
+
+    def test_load_reviewed_rows_requires_canonical_submission_contract(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            item = question("contract")
+            path = root / "review.csv"
+
+            for field in ("steps", "max_steps", "submitted", "submitted_at_step_limit"):
+                fieldnames = [name for name in REVIEW_FIELDS if name != field]
+                row = review_row("incident_2", 0, item)
+                row.pop(field)
+                write_review(path, [row], fieldnames)
+                with self.subTest(missing=field), self.assertRaises(MappingError):
+                    load_reviewed_rows(path)
+
+            integer_invalid = ("", " ", "+1", "-1", "00", "01", "1 ", " 1", "١", "１")
+            for field in ("steps", "max_steps"):
+                for value in integer_invalid:
+                    row = review_row("incident_2", 0, item)
+                    row[field] = value
+                    write_review(path, [row])
+                    with self.subTest(field=field, value=value), self.assertRaises(MappingError):
+                        load_reviewed_rows(path)
+
+            boolean_invalid = ("", " ", "1", "0", "true", "false", "TRUE", "False ")
+            for field in ("submitted", "submitted_at_step_limit"):
+                for value in boolean_invalid:
+                    row = review_row("incident_2", 0, item)
+                    row[field] = value
+                    write_review(path, [row])
+                    with self.subTest(field=field, value=value), self.assertRaises(MappingError):
+                        load_reviewed_rows(path)
+
+            for extra in (
+                {"steps": "0", "submitted": "True", "submitted_at_step_limit": "True"},
+                {"steps": "1", "submitted": "False", "submitted_at_step_limit": "True"},
+            ):
+                write_review(path, [review_row("incident_2", 0, item, **extra)])
+                with self.subTest(extra=extra), self.assertRaises(MappingError):
+                    load_reviewed_rows(path)
 
     def test_load_source_specs_resolves_and_validates_sources_before_json_read(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -190,7 +252,10 @@ class RetrievalExtractTest(unittest.TestCase):
                 "sources": {name: {"path": path.name, "sha256": sha256_file(path)} for name, path in source_paths.items()},
             })
             specs = load_source_specs([manifest], root)
-            rows = [review_row("incident_2", 1, second), review_row("incident_2", 0, first)]
+            rows = [
+                review_row("incident_2", 1, second, steps="1"),
+                review_row("incident_2", 0, first, steps="2", submitted="True"),
+            ]
 
             bundles = build_evidence_bundles(rows, specs, {"incident_2": 2})
 
@@ -201,6 +266,9 @@ class RetrievalExtractTest(unittest.TestCase):
             self.assertEqual(bundle.golden_answer, "gold")
             self.assertEqual(bundle.golden_solution["steps"], ("look up gold",))
             self.assertEqual(bundle.submitted_answer, "gold")
+            self.assertEqual(bundle.trajectory_steps, 2)
+            self.assertTrue(bundle.submitted)
+            self.assertFalse(bundle.submitted_at_step_limit)
             self.assertEqual(bundle.reward_official, 1.0)
             self.assertEqual(bundle.review_notes_original, "needs semantic inspection")
             self.assertEqual((bundle.agent_source_index, bundle.env_source_index), (1, 1))
@@ -244,6 +312,119 @@ class RetrievalExtractTest(unittest.TestCase):
                 len(build_evidence_bundles(rows, specs, {"incident_2": 2})),
                 2,
             )
+
+    def test_build_evidence_bundles_derives_submission_from_full_trajectory(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            items = [question("early"), question("at limit"), question("not submitted")]
+            trajectories = [
+                [
+                    {"action": "SELECT early", "observation": "[]", "info": {"query_success": True}},
+                    {"action": "answer", "observation": "", "info": {"submit": True}},
+                ],
+                [
+                    {"action": "SELECT one", "observation": "[]", "info": {"query_success": True}},
+                    {"action": "SELECT two", "observation": "[]", "info": {"query_success": True}},
+                    {"action": "answer", "observation": "", "info": {"submit": True}},
+                ],
+                [
+                    {"action": "SELECT one", "observation": "[]", "info": {"query_success": True}},
+                    {"action": "SELECT two", "observation": "[]", "info": {"query_success": True}},
+                ],
+            ]
+            paths = {name: root / f"{name}.json" for name in ("agent", "env", "question")}
+            write_json(paths["question"], items)
+            write_json(paths["agent"], [agent_entry(item, 1.0) for item in items])
+            write_json(paths["env"], [env_entry(item, 1.0, trajectory) for item, trajectory in zip(items, trajectories)])
+            manifest = root / "manifest.json"
+            write_json(manifest, {"incident": "incident_2", "sources": {name: {"path": path.name, "sha256": sha256_file(path)} for name, path in paths.items()}})
+            specs = load_source_specs([manifest], root)
+            rows = [
+                review_row("incident_2", 0, items[0], steps="2", max_steps="4", submitted="True"),
+                review_row("incident_2", 1, items[1], steps="3", max_steps="3", submitted="True", submitted_at_step_limit="True"),
+                review_row("incident_2", 2, items[2], steps="2", max_steps="2"),
+            ]
+
+            bundles = build_evidence_bundles(rows, specs, {"incident_2": 3})
+
+            self.assertEqual(
+                [(bundle.trajectory_steps, bundle.submitted, bundle.submitted_at_step_limit) for bundle in bundles],
+                [(2, True, False), (3, True, True), (2, False, False)],
+            )
+            self.assertEqual([[step.step for step in bundle.query_steps] for bundle in bundles], [[1], [1, 2], [1, 2]])
+
+    def test_build_evidence_bundles_rejects_submission_contract_mismatches(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            item = question("mismatch")
+            trajectory = [
+                {"action": "SELECT one", "observation": "[]", "info": {"query_success": True}},
+                {"action": "answer", "observation": "", "info": {"submit": True}},
+            ]
+
+            def build(env_overrides=None, row_overrides=None):
+                env = env_entry(item, 1.0, trajectory)
+                overrides = dict(env_overrides or {})
+                if overrides.pop("remove_steps", False):
+                    env.pop("steps")
+                env.update(overrides)
+                paths = {name: root / f"{name}.json" for name in ("agent", "env", "question")}
+                write_json(paths["question"], [item])
+                write_json(paths["agent"], [agent_entry(item, 1.0)])
+                write_json(paths["env"], [env])
+                manifest = root / "manifest.json"
+                write_json(manifest, {"incident": "incident_2", "sources": {name: {"path": path.name, "sha256": sha256_file(path)} for name, path in paths.items()}})
+                row = review_row("incident_2", 0, item, steps="2", max_steps="4", submitted="True")
+                row.update(row_overrides or {})
+                return build_evidence_bundles([row], load_source_specs([manifest], root), {"incident_2": 1})
+
+            for field, value in (
+                ("steps", "1"),
+                ("submitted", "False"),
+                ("submitted_at_step_limit", "True"),
+            ):
+                with self.subTest(field=field):
+                    with self.assertRaises(MappingError) as raised:
+                        build(row_overrides={field: value})
+                    message = str(raised.exception)
+                    self.assertIn(field, message)
+                    self.assertIn("incident_2", message)
+                    self.assertIn("question_index=0", message)
+                    self.assertIn(question_identity("incident_2", 0, item).question_fingerprint_sha256, message)
+
+            for field, value in (
+                ("missing", None),
+                ("type", "2"),
+                ("bool", True),
+                ("mismatch", 1),
+            ):
+                overrides = {"remove_steps": True} if field == "missing" else {"steps": value}
+                with self.subTest(env_steps=field):
+                    with self.assertRaises(MappingError) as raised:
+                        build(env_overrides=overrides)
+                    message = str(raised.exception)
+                    self.assertIn("steps", message)
+                    self.assertIn("incident_2", message)
+                    self.assertIn("question_index=0", message)
+                    self.assertIn(question_identity("incident_2", 0, item).question_fingerprint_sha256, message)
+
+            for label, invalid_trajectory in (
+                ("not-list", "not a trajectory"),
+                ("non-object-step", [trajectory[0], 2]),
+            ):
+                with self.subTest(trajectory=label):
+                    with self.assertRaises(MappingError) as raised:
+                        build(env_overrides={"trajectory": invalid_trajectory})
+                    self.assertIn("trajectory", str(raised.exception))
+
+            for field, value in (
+                ("steps", "01"),
+                ("max_steps", "١"),
+                ("submitted", "true"),
+                ("submitted_at_step_limit", "1"),
+            ):
+                with self.subTest(direct_row=field), self.assertRaises(MappingError):
+                    build(row_overrides={field: value})
 
     def test_build_evidence_bundles_rejects_reward_conflicts_and_bad_incidents(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -311,8 +492,16 @@ class RetrievalExtractTest(unittest.TestCase):
             evidence_row = json.loads(evidence.read_text(encoding="utf-8"))
             self.assertEqual(evidence_row["golden_answer"], {"answer": "example-service"})
             self.assertEqual(evidence_row["query_steps"][0]["step"], 1)
+            self.assertEqual(
+                {key: evidence_row[key] for key in ("trajectory_steps", "submitted", "submitted_at_step_limit")},
+                {"trajectory_steps": 2, "submitted": True, "submitted_at_step_limit": False},
+            )
             with template.open(encoding="utf-8", newline="") as handle:
                 row = next(csv.DictReader(handle))
+            self.assertEqual(
+                {key: row[key] for key in ("trajectory_steps", "submitted", "submitted_at_step_limit")},
+                {"trajectory_steps": "2", "submitted": "True", "submitted_at_step_limit": "False"},
+            )
             self.assertEqual(
                 {key: row[key] for key in (
                     "retrieval_primary_subtype", "auxiliary_tags", "retrieval_outcome",
@@ -406,6 +595,12 @@ class RetrievalExtractTest(unittest.TestCase):
                 replace(bundle, agent_source_index=True),
                 replace(bundle, reward_official=math.nan),
                 replace(bundle, question_fingerprint_sha256="A" * 64),
+                replace(bundle, trajectory_steps=True),
+                replace(bundle, trajectory_steps=-1),
+                replace(bundle, submitted=1),
+                replace(bundle, submitted_at_step_limit=0),
+                replace(bundle, trajectory_steps=0, submitted=True, submitted_at_step_limit=True),
+                replace(bundle, submitted=False, submitted_at_step_limit=True),
                 replace(bundle, query_steps=[QueryStep(1, "SELECT 1", "[]", True)]),
                 replace(bundle, query_steps=(QueryStep(0, "SELECT 1", "[]", True),)),
                 replace(bundle, query_steps=(QueryStep(True, "SELECT 1", "[]", True),)),

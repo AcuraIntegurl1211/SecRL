@@ -22,11 +22,19 @@ from .retrieval_models import QueryStep, RetrievalEvidenceBundle, thaw_json_valu
 
 _FINGERPRINT_RE = re.compile(r"[0-9a-f]{64}\Z")
 _INCIDENT_RE = re.compile(r"incident_([0-9]+)\Z")
+_CANONICAL_NONNEGATIVE_INT_RE = re.compile(r"(?:0|[1-9][0-9]*)\Z")
+_AGGREGATE_SUBMISSION_FIELDS = (
+    "steps",
+    "max_steps",
+    "submitted",
+    "submitted_at_step_limit",
+)
 _REVIEW_REQUIRED_FIELDS = (
     "incident",
     "question_index",
     "question_fingerprint_sha256",
     "reward_official",
+    *_AGGREGATE_SUBMISSION_FIELDS,
     "reviewed_primary",
     "review_notes",
 )
@@ -41,6 +49,14 @@ class SourceSpec:
     agent_sha256: str
     env_sha256: str
     question_sha256: str
+
+
+@dataclass(frozen=True)
+class _AggregateSubmissionContract:
+    steps: int
+    max_steps: int
+    submitted: bool
+    submitted_at_step_limit: bool
 
 
 def _incident_sort_key(incident: str) -> int:
@@ -83,6 +99,67 @@ def _reviewed_reward(row: dict[str, str], source_index: int) -> float:
     return reward
 
 
+def _aggregate_mapping_error(
+    row: dict[str, object], source_index: int, field: str, detail: str
+) -> MappingError:
+    return MappingError(
+        "invalid aggregate submission contract: "
+        f"incident={row.get('incident', '')!r} "
+        f"question_index={row.get('question_index', '')} "
+        f"fingerprint={row.get('question_fingerprint_sha256', '')} "
+        f"row={source_index} field={field} {detail}"
+    )
+
+
+def _canonical_nonnegative_int(
+    row: dict[str, object], source_index: int, field: str
+) -> int:
+    value = row.get(field)
+    if not isinstance(value, str) or _CANONICAL_NONNEGATIVE_INT_RE.fullmatch(value) is None:
+        raise _aggregate_mapping_error(row, source_index, field, "is not canonical")
+    return int(value)
+
+
+def _canonical_bool(
+    row: dict[str, object], source_index: int, field: str
+) -> bool:
+    value = row.get(field)
+    if value not in ("True", "False"):
+        raise _aggregate_mapping_error(row, source_index, field, "is not canonical")
+    return value == "True"
+
+
+def _aggregate_submission_contract(
+    row: dict[str, object], source_index: int
+) -> _AggregateSubmissionContract:
+    steps = _canonical_nonnegative_int(row, source_index, "steps")
+    max_steps = _canonical_nonnegative_int(row, source_index, "max_steps")
+    submitted = _canonical_bool(row, source_index, "submitted")
+    submitted_at_step_limit = _canonical_bool(
+        row, source_index, "submitted_at_step_limit"
+    )
+    if submitted_at_step_limit and not submitted:
+        raise _aggregate_mapping_error(
+            row,
+            source_index,
+            "submitted_at_step_limit",
+            "requires submitted=True",
+        )
+    if submitted_at_step_limit and steps <= 0:
+        raise _aggregate_mapping_error(
+            row,
+            source_index,
+            "submitted_at_step_limit",
+            "requires steps>0",
+        )
+    return _AggregateSubmissionContract(
+        steps=steps,
+        max_steps=max_steps,
+        submitted=submitted,
+        submitted_at_step_limit=submitted_at_step_limit,
+    )
+
+
 def load_reviewed_rows(path: Path) -> list[dict[str, str]]:
     """Read and identity-validate only rows reviewed as SQL retrieval failures."""
     try:
@@ -92,9 +169,19 @@ def load_reviewed_rows(path: Path) -> list[dict[str, str]]:
 
     with handle:
         reader = csv.DictReader(handle)
-        if reader.fieldnames is None or any(
-            field not in reader.fieldnames for field in _REVIEW_REQUIRED_FIELDS
-        ):
+        if reader.fieldnames is None:
+            raise InputError(f"invalid review header in {path}")
+        missing_submission_fields = [
+            field
+            for field in _AGGREGATE_SUBMISSION_FIELDS
+            if field not in reader.fieldnames
+        ]
+        if missing_submission_fields:
+            raise MappingError(
+                f"invalid review header in {path}: missing "
+                f"{','.join(missing_submission_fields)}"
+            )
+        if any(field not in reader.fieldnames for field in _REVIEW_REQUIRED_FIELDS):
             raise InputError(f"invalid review header in {path}")
         selected: list[dict[str, str]] = []
         identities: set[tuple[str, int, str]] = set()
@@ -102,6 +189,7 @@ def load_reviewed_rows(path: Path) -> list[dict[str, str]]:
             row = {key: (value if value is not None else "") for key, value in raw_row.items()}
             identity = _row_identity(row, source_index)
             _reviewed_reward(row, source_index)
+            _aggregate_submission_contract(row, source_index)
             if identity in identities:
                 raise InputError(
                     f"duplicate review identity at row {source_index}: {identity}"
@@ -279,8 +367,12 @@ def build_evidence_bundles(
         incident: [] for incident in source_specs
     }
     identities: set[tuple[str, int, str]] = set()
+    aggregate_by_identity: dict[
+        tuple[str, int, str], _AggregateSubmissionContract
+    ] = {}
     for row in reviewed_rows:
         identity = _review_identity(row)
+        aggregate_by_identity[identity] = _aggregate_submission_contract(row, 0)
         if identity in identities:
             raise MappingError(f"duplicate output identity: {identity}")
         identities.add(identity)
@@ -307,6 +399,7 @@ def build_evidence_bundles(
         }
         for row in rows_by_incident[incident]:
             _, question_index, fingerprint = _review_identity(row)
+            aggregate = aggregate_by_identity[(incident, question_index, fingerprint)]
             reviewed_reward = _reviewed_reward(row, 0)
             mapped = mapped_by_index.get(question_index)
             if mapped is None:
@@ -319,9 +412,51 @@ def build_evidence_bundles(
                 )
             trajectory = mapped.env.get("trajectory")
             if not isinstance(trajectory, list):
-                raise MappingError("env trajectory is not a list")
+                raise MappingError(
+                    "env trajectory is not a list: "
+                    f"incident={incident} question_index={question_index} "
+                    f"fingerprint={fingerprint} field=trajectory"
+                )
+            for step_index, step in enumerate(trajectory, 1):
+                if not isinstance(step, dict):
+                    raise MappingError(
+                        "env trajectory step is not an object: "
+                        f"incident={incident} question_index={question_index} "
+                        f"fingerprint={fingerprint} field=trajectory "
+                        f"step={step_index}"
+                    )
+            env_steps = mapped.env.get("steps")
+            if type(env_steps) is not int:
+                raise MappingError(
+                    "invalid env steps: "
+                    f"incident={incident} question_index={question_index} "
+                    f"fingerprint={fingerprint} field=steps expected exact int"
+                )
+            if env_steps != len(trajectory):
+                raise MappingError(
+                    "env steps mismatch: "
+                    f"incident={incident} question_index={question_index} "
+                    f"fingerprint={fingerprint} field=steps "
+                    f"env={env_steps} trajectory={len(trajectory)}"
+                )
             # The existing extractor compares agent and env official rewards.
-            features = extract_features(mapped, len(trajectory))
+            features = extract_features(mapped, aggregate.max_steps)
+            for field, aggregate_value, mapped_value in (
+                ("steps", aggregate.steps, features.steps),
+                ("submitted", aggregate.submitted, features.submitted),
+                (
+                    "submitted_at_step_limit",
+                    aggregate.submitted_at_step_limit,
+                    features.submitted_at_step_limit,
+                ),
+            ):
+                if aggregate_value != mapped_value:
+                    raise MappingError(
+                        "aggregate/env submission mismatch: "
+                        f"incident={incident} question_index={question_index} "
+                        f"fingerprint={fingerprint} field={field} "
+                        f"aggregate={aggregate_value} mapped={mapped_value}"
+                    )
             if reviewed_reward != features.reward_official:
                 raise MappingError(
                     "reviewed official reward mismatch: "
@@ -346,6 +481,9 @@ def build_evidence_bundles(
                     golden_answer=question.get("answer"),
                     golden_solution=question.get("solution"),
                     submitted_answer=_submitted_answer(mapped.env),
+                    trajectory_steps=features.steps,
+                    submitted=features.submitted,
+                    submitted_at_step_limit=features.submitted_at_step_limit,
                     reward_official=features.reward_official,
                     reviewed_primary_original=row["reviewed_primary"],
                     review_notes_original=row["review_notes"],
@@ -408,6 +546,19 @@ def _validate_bundle(bundle: RetrievalEvidenceBundle) -> None:
         value = getattr(bundle, field)
         if type(value) is not int or value < 0:
             raise InputError(f"invalid bundle {field}")
+    if type(bundle.trajectory_steps) is not int or bundle.trajectory_steps < 0:
+        raise InputError("invalid bundle trajectory_steps")
+    for field in ("submitted", "submitted_at_step_limit"):
+        if type(getattr(bundle, field)) is not bool:
+            raise InputError(f"invalid bundle {field}")
+    if bundle.submitted_at_step_limit and not bundle.submitted:
+        raise InputError(
+            "invalid bundle submitted_at_step_limit requires submitted"
+        )
+    if bundle.submitted_at_step_limit and bundle.trajectory_steps <= 0:
+        raise InputError(
+            "invalid bundle submitted_at_step_limit requires trajectory_steps"
+        )
     for field in (
         "question_fingerprint_sha256", "question_text_fingerprint_sha256",
         "agent_source_sha256", "env_source_sha256", "question_source_sha256",
