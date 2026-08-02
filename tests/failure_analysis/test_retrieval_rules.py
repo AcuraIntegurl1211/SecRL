@@ -1,6 +1,7 @@
 import inspect
 import unittest
 from dataclasses import replace
+from types import SimpleNamespace
 
 from experiments.failure_analysis.models import MappingError
 from experiments.failure_analysis.retrieval_models import (
@@ -32,6 +33,7 @@ class RetrievalRulesTest(unittest.TestCase):
 
         self.assertIsInstance(decision, RetrievalDecision)
         self.assertEqual(decision.retrieval_primary_subtype, 'INDETERMINATE')
+        self.assertEqual(decision.auxiliary_tags, ())
         self.assertEqual(decision.retrieval_outcome, 'UNOBSERVED')
         self.assertEqual(decision.boundary_flag, 'NONE')
         self.assertEqual(decision.confidence, 'low')
@@ -80,6 +82,23 @@ class RetrievalRulesTest(unittest.TestCase):
         self.assertEqual(decision.relevant_sql_steps, (2, 3))
         self.assertNotIn(1, decision.relevant_sql_steps)
         self.assertEqual(decision.retrieval_primary_subtype, 'INDETERMINATE')
+
+    def test_normalized_empty_sql_never_counts_as_a_repeated_query(self):
+        for first_sql, second_sql in (
+            ('', ''),
+            ('   ', '\n\t'),
+            (';', ' ; '),
+        ):
+            with self.subTest(first_sql=first_sql, second_sql=second_sql):
+                decision = suggest_prelabel(
+                    self.bundle(
+                        QueryStep(1, first_sql, '[{"value": 1}]', True),
+                        QueryStep(2, second_sql, '[{"value": 2}]', True),
+                    )
+                )
+
+                self.assertNotIn('REPEATED_QUERY', decision.auxiliary_tags)
+                self.assertEqual(decision.relevant_sql_steps, ())
 
     def test_all_successful_observable_results_empty_has_empty_outcome(self):
         decision = suggest_prelabel(
@@ -203,6 +222,61 @@ class RetrievalRulesTest(unittest.TestCase):
         for bundle in invalid_bundles:
             with self.subTest(bundle=bundle), self.assertRaises(MappingError):
                 suggest_prelabel(bundle)
+
+    def test_query_steps_container_and_items_require_exact_types(self):
+        fixture = RetrievalEvidenceBundle.fixture_for_test()
+        query = QueryStep(1, 'SELECT 1', '[{"value": 1}]', True)
+        invalid_values = (
+            [query],
+            (SimpleNamespace(
+                step=1,
+                sql='SELECT 1',
+                observation='[{"value": 1}]',
+                query_success=True,
+            ),),
+        )
+
+        for query_steps in invalid_values:
+            with self.subTest(query_steps=query_steps):
+                with self.assertRaisesRegex(MappingError, 'query_steps'):
+                    suggest_prelabel(replace(fixture, query_steps=query_steps))
+
+    def test_query_step_numbers_must_be_exact_positive_increasing_and_in_range(self):
+        fixture = RetrievalEvidenceBundle.fixture_for_test()
+        invalid_values = (
+            (QueryStep(True, 'SELECT 1', '[]', True),),
+            (QueryStep(0, 'SELECT 1', '[]', True),),
+            (
+                QueryStep(1, 'SELECT 1', '[]', True),
+                QueryStep(1, 'SELECT 2', '[]', True),
+            ),
+            (
+                QueryStep(2, 'SELECT 2', '[]', True),
+                QueryStep(1, 'SELECT 1', '[]', True),
+            ),
+            (QueryStep(3, 'SELECT 3', '[]', True),),
+        )
+
+        for query_steps in invalid_values:
+            with self.subTest(query_steps=query_steps):
+                with self.assertRaisesRegex(MappingError, 'query_steps.*step'):
+                    suggest_prelabel(replace(fixture, query_steps=query_steps))
+
+    def test_query_step_fields_require_exact_str_and_optional_exact_bool(self):
+        class TextSubclass(str):
+            pass
+
+        fixture = RetrievalEvidenceBundle.fixture_for_test()
+        invalid_values = (
+            ('sql', QueryStep(1, TextSubclass('SELECT 1'), '[]', True)),
+            ('observation', QueryStep(1, 'SELECT 1', TextSubclass('[]'), True)),
+            ('query_success', QueryStep(1, 'SELECT 1', '[]', 1)),
+        )
+
+        for field, query_step in invalid_values:
+            with self.subTest(field=field):
+                with self.assertRaisesRegex(MappingError, f'query_steps.*{field}'):
+                    suggest_prelabel(replace(fixture, query_steps=(query_step,)))
 
 
 if __name__ == '__main__':

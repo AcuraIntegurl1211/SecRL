@@ -25,6 +25,29 @@ def _validate_step_limit_contract(bundle: RetrievalEvidenceBundle) -> None:
         )
 
 
+def _validate_query_steps(bundle: RetrievalEvidenceBundle) -> None:
+    if type(bundle.query_steps) is not tuple:
+        raise MappingError('query_steps must be a tuple')
+
+    previous_step = 0
+    for item in bundle.query_steps:
+        if type(item) is not QueryStep:
+            raise MappingError('query_steps items must be QueryStep values')
+        if type(item.step) is not int or item.step <= previous_step:
+            raise MappingError(
+                'query_steps step must be an exact positive, strictly increasing integer'
+            )
+        if item.step > bundle.trajectory_steps:
+            raise MappingError('query_steps step must not exceed trajectory_steps')
+        if type(item.sql) is not str:
+            raise MappingError('query_steps sql must be an exact string')
+        if type(item.observation) is not str:
+            raise MappingError('query_steps observation must be an exact string')
+        if item.query_success is not None and type(item.query_success) is not bool:
+            raise MappingError('query_steps query_success must be None or an exact boolean')
+        previous_step = item.step
+
+
 def _evidence_segment(prefix: str, value: str) -> str:
     segment = prefix + ' '.join(value.split())
     if len(segment) <= _EVIDENCE_SEGMENT_LIMIT:
@@ -57,6 +80,7 @@ def _evidence_text(
 
 def suggest_prelabel(bundle: RetrievalEvidenceBundle) -> RetrievalDecision:
     _validate_step_limit_contract(bundle)
+    _validate_query_steps(bundle)
 
     tags: set[str] = set()
     relevant_steps: set[int] = set()
@@ -69,11 +93,12 @@ def suggest_prelabel(bundle: RetrievalEvidenceBundle) -> RetrievalDecision:
         query_by_step[query_step.step] = query_step
 
         normalized_sql = normalize_sql(query_step.sql)
-        if normalized_sql in normalized_sql_seen:
-            tags.add('REPEATED_QUERY')
-            relevant_steps.add(query_step.step)
-        else:
-            normalized_sql_seen.add(normalized_sql)
+        if normalized_sql:
+            if normalized_sql in normalized_sql_seen:
+                tags.add('REPEATED_QUERY')
+                relevant_steps.add(query_step.step)
+            else:
+                normalized_sql_seen.add(normalized_sql)
 
         observation = query_step.observation.strip()
         if query_step.query_success is True and observation == '[]':
