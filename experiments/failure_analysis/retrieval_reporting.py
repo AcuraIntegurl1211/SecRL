@@ -785,9 +785,10 @@ def write_retrieval_outputs(
         moved = True
         return [output_dir / name for name in _OUTPUT_NAMES]
     finally:
-        if not moved and temp_dir is not None and temp_dir.exists():
+        if not moved and temp_dir is not None:
             try:
-                shutil.rmtree(temp_dir)
+                if temp_dir.exists():
+                    shutil.rmtree(temp_dir)
             except (OSError, TypeError, ValueError, RuntimeError):
                 pass
 
