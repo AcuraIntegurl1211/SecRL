@@ -113,6 +113,13 @@ def _hash(path: Path, label: str) -> str:
         raise InputError(f"cannot hash {label} {path}: {exc}") from exc
 
 
+def _mapping_hash(path: Path, label: str) -> str:
+    try:
+        return _hash(path, label)
+    except InputError as exc:
+        raise MappingError(str(exc)) from exc
+
+
 def _canonical_provenance_paths(paths: dict[str, Path]) -> dict[str, Path]:
     canonical: dict[str, Path] = {}
     for key, path in paths.items():
@@ -132,7 +139,10 @@ def _manifest_incidents(manifest_paths: list[Path], source_specs: dict[str, Sour
         raise MappingError("manifest incidents do not match the frozen eight-incident set")
     result: dict[str, Path] = {}
     for path in manifest_paths:
-        path = _canonical_file(path, "manifest")
+        try:
+            path = _canonical_file(path, "manifest")
+        except InputError as exc:
+            raise MappingError(str(exc)) from exc
         try:
             value = json.loads(
                 path.read_text(encoding="utf-8"),
@@ -458,7 +468,16 @@ def _load_inputs(args: argparse.Namespace) -> tuple[Path, dict[str, Path], dict[
         raise
     except (OSError, ValueError, RuntimeError) as exc:
         raise InputError(f"cannot read source-repo-root {root}: {exc}") from exc
-    manifest_paths = [_canonical_file(path, "manifest") for path in args.manifest]
+    manifest_paths: list[Path] = []
+    for path in args.manifest:
+        try:
+            manifest_paths.append(_canonical_file(path, "manifest"))
+        except InputError as exc:
+            raise MappingError(str(exc)) from exc
+    manifest_hashes_before = {
+        path: _mapping_hash(path, f"manifest {path}") for path in manifest_paths
+    }
+    taxonomy_hash_before = _mapping_hash(taxonomy_path, "taxonomy")
     try:
         source_specs = load_source_specs(manifest_paths, root)
     except InputError as exc:
@@ -470,11 +489,18 @@ def _load_inputs(args: argparse.Namespace) -> tuple[Path, dict[str, Path], dict[
             "SHA-256 mismatch" in message
             or "source path is not a file" in message
             or "duplicate source manifest incident" in message
+            or "cannot read input path" in message
         ):
             raise MappingError(message) from exc
         raise
     manifest_by_incident = _manifest_incidents(manifest_paths, source_specs)
     taxonomy = load_overlay_taxonomy(taxonomy_path)
+    for path, expected in manifest_hashes_before.items():
+        actual = _mapping_hash(path, f"manifest {path}")
+        if actual != expected:
+            raise MappingError(f"manifest changed during load: {path}")
+    if _mapping_hash(taxonomy_path, "taxonomy") != taxonomy_hash_before:
+        raise MappingError(f"taxonomy changed during load: {taxonomy_path}")
     return aggregate, manifest_by_incident, source_specs, taxonomy
 
 
