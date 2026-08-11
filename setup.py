@@ -24,6 +24,7 @@ setup(
     install_requires=parse_requirements("requirements.txt"),
     entry_points={
         "console_scripts": [
+            "secrl-lite=secrl_platform.cli:main",
         ],
     },
     python_requires=">=3.7",
