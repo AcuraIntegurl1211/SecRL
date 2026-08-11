@@ -19,6 +19,8 @@ class Settings(BaseSettings):
     @field_validator("master_key")
     @classmethod
     def validate_hex_key(cls, value: str) -> str:
+        if any(character not in "0123456789abcdefABCDEF" for character in value):
+            raise ValueError("master_key must contain exactly 64 hexadecimal characters")
         bytes.fromhex(value)
         return value
 

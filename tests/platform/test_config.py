@@ -29,8 +29,10 @@ class SettingsTest(unittest.TestCase):
             self.assertEqual(settings.artifact_dir, Path(tmp) / "artifacts")
 
     def test_master_key_must_be_32_byte_hex(self):
-        with self.assertRaises(ValidationError):
-            Settings(master_key="short", session_secret="s" * 32)
+        for invalid_key in ("short", "a" * 62 + "  ", "g" * 64):
+            with self.subTest(invalid_key=invalid_key):
+                with self.assertRaises(ValidationError):
+                    Settings(master_key=invalid_key, session_secret="s" * 32)
 
 
 if __name__ == "__main__":
