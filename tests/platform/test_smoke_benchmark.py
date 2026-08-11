@@ -247,6 +247,12 @@ class ProtocolSmokeAdapterTest(unittest.TestCase):
         self.assertEqual(observation.type, "submission")
         self.assertTrue(observation.terminal)
 
+    def test_close_episode_releases_in_memory_state(self):
+        episode = self.start_case("smoke-001")
+        self.assertIn(episode.ref.id, self.adapter._episodes)
+        self.adapter.close_episode(episode.ref)
+        self.assertNotIn(episode.ref.id, self.adapter._episodes)
+
 
 if __name__ == "__main__":
     unittest.main()

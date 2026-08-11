@@ -3,8 +3,20 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import Boolean, Enum, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import (
+    Boolean,
+    CheckConstraint,
+    DateTime,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    text,
+)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+from sqlalchemy.types import TypeDecorator
 
 
 def uuid4_string() -> str:
@@ -15,13 +27,38 @@ def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def constrained_string(name: str, *values: str) -> Enum:
-    return Enum(
-        *values,
+class UTCDateTime(TypeDecorator[datetime]):
+    impl = DateTime
+    cache_ok = True
+
+    def process_bind_param(self, value: datetime | None, _dialect) -> datetime | None:
+        if value is None:
+            return None
+        if value.tzinfo is None:
+            raise ValueError("UTC timestamps must be timezone-aware")
+        return value.astimezone(timezone.utc).replace(tzinfo=None)
+
+    def process_result_value(
+        self,
+        value: datetime | None,
+        _dialect,
+    ) -> datetime | None:
+        if value is None:
+            return None
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
+
+
+def constrained_string(_name: str, *values: str) -> String:
+    return String(max(len(value) for value in values))
+
+
+def constrained_check(column: str, name: str, *values: str) -> CheckConstraint:
+    allowed = ", ".join(f"'{value}'" for value in values)
+    return CheckConstraint(
+        f"{column} IN ({allowed})",
         name=name,
-        native_enum=False,
-        create_constraint=True,
-        validate_strings=True,
     )
 
 
@@ -30,8 +67,16 @@ class Base(DeclarativeBase):
 
 
 class TimestampedORM:
-    created_at: Mapped[datetime] = mapped_column(default=utc_now, index=True)
-    updated_at: Mapped[datetime] = mapped_column(default=utc_now, onupdate=utc_now)
+    created_at: Mapped[datetime] = mapped_column(
+        UTCDateTime(),
+        default=utc_now,
+        index=True,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        UTCDateTime(),
+        default=utc_now,
+        onupdate=utc_now,
+    )
 
 
 class AppSettingORM(TimestampedORM, Base):
@@ -44,6 +89,9 @@ class AppSettingORM(TimestampedORM, Base):
 
 class LocalUserORM(TimestampedORM, Base):
     __tablename__ = "local_user"
+    __table_args__ = (
+        constrained_check("status", "local_user_status", "ACTIVE", "DISABLED"),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid4_string)
     username: Mapped[str] = mapped_column(String(128), unique=True, index=True)
@@ -56,6 +104,15 @@ class LocalUserORM(TimestampedORM, Base):
 
 class SecretRefORM(TimestampedORM, Base):
     __tablename__ = "secret_ref"
+    __table_args__ = (
+        constrained_check(
+            "status",
+            "secret_ref_status",
+            "UNVERIFIED",
+            "VALID",
+            "INVALID",
+        ),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid4_string)
     name: Mapped[str] = mapped_column(String(128), unique=True)
@@ -64,7 +121,10 @@ class SecretRefORM(TimestampedORM, Base):
         constrained_string("secret_ref_status", "UNVERIFIED", "VALID", "INVALID"),
         default="UNVERIFIED",
     )
-    last_verified_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    last_verified_at: Mapped[datetime | None] = mapped_column(
+        UTCDateTime(),
+        nullable=True,
+    )
 
 
 class ModelConfigRevisionORM(TimestampedORM, Base):
@@ -96,6 +156,15 @@ class BenchmarkRevisionORM(TimestampedORM, Base):
 
 class DatasetVersionORM(TimestampedORM, Base):
     __tablename__ = "dataset_version"
+    __table_args__ = (
+        constrained_check(
+            "status",
+            "dataset_status",
+            "DRAFT",
+            "PUBLISHED",
+            "RETIRED",
+        ),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid4_string)
     benchmark_revision_id: Mapped[str] = mapped_column(
@@ -137,6 +206,9 @@ class CaseRecordORM(TimestampedORM, Base):
 
 class AgentRevisionORM(TimestampedORM, Base):
     __tablename__ = "agent_revision"
+    __table_args__ = (
+        constrained_check("kind", "agent_kind", "BUILT_IN", "SERVICE"),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid4_string)
     name: Mapped[str] = mapped_column(String(128), index=True)
@@ -150,6 +222,27 @@ class AgentRevisionORM(TimestampedORM, Base):
 
 class EvaluationTaskORM(TimestampedORM, Base):
     __tablename__ = "evaluation_task"
+    __table_args__ = (
+        constrained_check(
+            "status",
+            "evaluation_task_status",
+            "DRAFT",
+            "QUEUED",
+            "RUNNING",
+            "PAUSE_REQUESTED",
+            "PAUSED",
+            "SUCCEEDED",
+            "FAILED",
+            "BUDGET_EXHAUSTED",
+            "CANCELED",
+        ),
+        Index(
+            "uq_evaluation_task_single_running",
+            "status",
+            unique=True,
+            sqlite_where=text("status = 'RUNNING'"),
+        ),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid4_string)
     name: Mapped[str] = mapped_column(String(256))
@@ -183,12 +276,29 @@ class EvaluationTaskORM(TimestampedORM, Base):
         index=True,
     )
     budget_json: Mapped[str] = mapped_column(Text, default="{}")
-    started_at: Mapped[datetime | None] = mapped_column(nullable=True)
-    finished_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(
+        UTCDateTime(),
+        nullable=True,
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(
+        UTCDateTime(),
+        nullable=True,
+    )
 
 
 class RunORM(TimestampedORM, Base):
     __tablename__ = "run"
+    __table_args__ = (
+        constrained_check(
+            "status",
+            "run_status",
+            "QUEUED",
+            "RUNNING",
+            "SUCCEEDED",
+            "FAILED",
+            "CANCELED",
+        ),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid4_string)
     task_id: Mapped[str] = mapped_column(ForeignKey("evaluation_task.id"), index=True)
@@ -213,6 +323,16 @@ class RunORM(TimestampedORM, Base):
 
 class CaseAttemptORM(TimestampedORM, Base):
     __tablename__ = "case_attempt"
+    __table_args__ = (
+        constrained_check(
+            "status",
+            "case_attempt_status",
+            "RUNNING",
+            "SUCCEEDED",
+            "FAILED",
+            "CANCELED",
+        ),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid4_string)
     run_id: Mapped[str] = mapped_column(ForeignKey("run.id"), index=True)
@@ -272,7 +392,11 @@ class AuditEventORM(Base):
     __tablename__ = "audit_event"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid4_string)
-    created_at: Mapped[datetime] = mapped_column(default=utc_now, index=True)
+    created_at: Mapped[datetime] = mapped_column(
+        UTCDateTime(),
+        default=utc_now,
+        index=True,
+    )
     actor_user_id: Mapped[str | None] = mapped_column(
         ForeignKey("local_user.id"), nullable=True
     )

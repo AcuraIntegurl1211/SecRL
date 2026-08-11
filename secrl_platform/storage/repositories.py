@@ -5,8 +5,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Mapping
 
-from sqlalchemy import select
-from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy import select, update
+from sqlalchemy.orm import Session, aliased, sessionmaker
 
 from secrl_platform.storage.orm import EvaluationTaskORM, utc_now
 
@@ -54,25 +54,33 @@ class TaskRepository:
             return TaskRecord.from_orm(task)
 
     def claim_next(self) -> TaskRecord | None:
+        queued_task = aliased(EvaluationTaskORM)
+        running_task = aliased(EvaluationTaskORM)
+        next_task_id = (
+            select(queued_task.id)
+            .where(queued_task.status == "QUEUED")
+            .order_by(queued_task.created_at, queued_task.id)
+            .limit(1)
+            .scalar_subquery()
+        )
+        running_exists = (
+            select(running_task.id)
+            .where(running_task.status == "RUNNING")
+            .exists()
+        )
         with self._session_factory.begin() as session:
-            running = session.scalar(
-                select(EvaluationTaskORM.id).where(
-                    EvaluationTaskORM.status == "RUNNING"
-                )
-            )
-            if running is not None:
-                return None
             task = session.scalar(
-                select(EvaluationTaskORM)
-                .where(EvaluationTaskORM.status == "QUEUED")
-                .order_by(EvaluationTaskORM.created_at, EvaluationTaskORM.id)
-                .limit(1)
+                update(EvaluationTaskORM)
+                .where(
+                    EvaluationTaskORM.id == next_task_id,
+                    EvaluationTaskORM.status == "QUEUED",
+                    ~running_exists,
+                )
+                .values(status="RUNNING", started_at=utc_now())
+                .returning(EvaluationTaskORM)
             )
             if task is None:
                 return None
-            task.status = "RUNNING"
-            task.started_at = utc_now()
-            session.flush()
             return TaskRecord.from_orm(task)
 
     def finish(self, task_id: str, status: str) -> TaskRecord:

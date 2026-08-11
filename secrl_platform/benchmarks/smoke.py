@@ -59,7 +59,6 @@ class _EpisodeState:
     ref: EpisodeRef
     case: _SmokeCase
     step_count: int = 0
-    closed: bool = False
 
 
 _DATASET_SCHEMA: dict[str, Any] = {
@@ -281,7 +280,8 @@ class ProtocolSmokeAdapter:
         )
 
     def close_episode(self, episode: EpisodeRef) -> None:
-        self._state_for(episode).closed = True
+        state = self._state_for(episode)
+        del self._episodes[state.ref.id]
 
     def release_scenario(self, lease: EnvironmentLease) -> None:
         self._leases.discard(lease.id)
@@ -290,8 +290,6 @@ class ProtocolSmokeAdapter:
         state = self._episodes.get(episode.id)
         if state is None or state.ref != episode:
             raise KeyError(episode.id)
-        if state.closed:
-            raise RuntimeError(f"episode is closed: {episode.id}")
         return state
 
     def _search(self, state: _EpisodeState, query: str) -> Observation:
