@@ -1,0 +1,120 @@
+{
+  "dataset_id": "protocol-smoke",
+  "version": "1.0.0",
+  "scenario_id": "protocol-smoke-default",
+  "cases": [
+    {
+      "id": "smoke-001",
+      "public_input": {"question": "What value belongs to alpha?"},
+      "documents": {"doc-alpha": "alpha = 17"},
+      "gold": {"answer": "17"},
+      "tags": ["exact-answer", "search-read-multi-step"],
+      "max_steps": 6,
+      "max_observation_chars": 256
+    },
+    {
+      "id": "smoke-002",
+      "public_input": {"question": "What accented word belongs to cafe?"},
+      "documents": {"doc-cafe": "cafe = Café"},
+      "gold": {"answer": "Café"},
+      "tags": ["normalized-answer"],
+      "max_steps": 6,
+      "max_observation_chars": 256
+    },
+    {
+      "id": "smoke-003",
+      "public_input": {"question": "Which two documents mention gamma?"},
+      "documents": {
+        "doc-gamma-a": "gamma appears here",
+        "doc-gamma-b": "gamma appears there"
+      },
+      "gold": {"answer": "doc-gamma-a,doc-gamma-b"},
+      "tags": ["search-read-multi-step"],
+      "max_steps": 8,
+      "max_observation_chars": 256
+    },
+    {
+      "id": "smoke-004",
+      "public_input": {"question": "Search for a key that is absent."},
+      "documents": {"doc-delta": "delta = 23"},
+      "gold": {"answer": "none"},
+      "tags": ["unknown-key"],
+      "max_steps": 4,
+      "max_observation_chars": 256
+    },
+    {
+      "id": "smoke-005",
+      "public_input": {"question": "Read the deliberately long document."},
+      "documents": {
+        "doc-long": "long = abcdefghijklmnopqrstuvwxyz abcdefghijklmnopqrstuvwxyz abcdefghijklmnopqrstuvwxyz abcdefghijklmnopqrstuvwxyz abcdefghijklmnopqrstuvwxyz"
+      },
+      "gold": {"answer": "long"},
+      "tags": ["long-observation"],
+      "max_steps": 4,
+      "max_observation_chars": 64
+    },
+    {
+      "id": "smoke-006",
+      "public_input": {"question": "Reject a search call without a query."},
+      "documents": {"doc-epsilon": "epsilon = 29"},
+      "gold": {"answer": "29"},
+      "tags": ["invalid-tool-arguments"],
+      "max_steps": 4,
+      "max_observation_chars": 256
+    },
+    {
+      "id": "smoke-007",
+      "public_input": {"question": "Reject a read call with a non-string id."},
+      "documents": {"doc-zeta": "zeta = 31"},
+      "gold": {"answer": "31"},
+      "tags": ["invalid-tool-arguments"],
+      "max_steps": 4,
+      "max_observation_chars": 256
+    },
+    {
+      "id": "smoke-008",
+      "public_input": {"question": "Stop after the configured step budget."},
+      "documents": {"doc-eta": "eta = 37"},
+      "gold": {"answer": "37"},
+      "tags": ["max-steps"],
+      "max_steps": 2,
+      "max_observation_chars": 256
+    },
+    {
+      "id": "smoke-009",
+      "public_input": {"question": "A wrong answer must receive zero reward."},
+      "documents": {"doc-theta": "theta = 41"},
+      "gold": {"answer": "41"},
+      "tags": ["wrong-answer"],
+      "max_steps": 4,
+      "max_observation_chars": 256
+    },
+    {
+      "id": "smoke-010",
+      "public_input": {"question": "What city belongs to kappa?"},
+      "documents": {"doc-kappa": "kappa = 東京"},
+      "gold": {"answer": "東京"},
+      "tags": ["exact-answer", "unicode"],
+      "max_steps": 6,
+      "max_observation_chars": 256
+    },
+    {
+      "id": "smoke-011",
+      "public_input": {"question": "Submit the value for lambda."},
+      "documents": {"doc-lambda": "lambda = 43"},
+      "gold": {"answer": "43"},
+      "tags": ["submit-action"],
+      "max_steps": 6,
+      "max_observation_chars": 256
+    },
+    {
+      "id": "smoke-012",
+      "public_input": {"question": "Yield safely before answering mu."},
+      "documents": {"doc-mu": "mu = 47"},
+      "gold": {"answer": "47"},
+      "tags": ["yield-action", "exact-answer"],
+      "max_steps": 6,
+      "max_observation_chars": 256
+    }
+  ]
+}
