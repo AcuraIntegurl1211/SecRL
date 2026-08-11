@@ -20,6 +20,7 @@ setup(
     version="0.1",
     packages=find_packages(),
     include_package_data=True,
+    package_data={"secrl_platform.benchmarks": ["data/*.json"]},
     description="A benchmark for security question answering",
     install_requires=parse_requirements("requirements.txt"),
     entry_points={
