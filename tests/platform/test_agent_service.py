@@ -1,4 +1,5 @@
 import json
+import asyncio
 import tempfile
 import unittest
 from decimal import Decimal
@@ -12,6 +13,7 @@ from secrl_platform.agents.capabilities import (
     CapabilityBudgetError,
     CapabilityClaims,
     CapabilityRequestCompleted,
+    CapabilityRequestInProgress,
     CapabilityScopeError,
     CapabilitySigner,
     ExpiredCapability,
@@ -739,6 +741,53 @@ class AgentServiceTest(unittest.IsolatedAsyncioTestCase):
         await gateway.complete(request)
         with self.assertRaises(CapabilityRequestCompleted):
             await gateway.complete(request)
+        self.assertEqual(provider.calls, 1)
+
+    async def test_concurrent_identical_request_is_dispatched_once(self):
+        signer = CapabilitySigner(
+            b"i" * 32,
+            now=lambda: 1_000,
+            budget_store=InMemoryCapabilityBudgetStore(),
+        )
+        token = signer.issue(valid_claims(max_tokens=100, max_cost="1"))
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        class Provider:
+            calls = 0
+
+            async def complete(self, _request):
+                self.calls += 1
+                started.set()
+                await release.wait()
+                return ModelResponse(text="ok", usage=Usage(prompt=1, completion=1))
+
+        provider = Provider()
+        gateway = ModelGateway(
+            provider=provider,
+            pricing=Pricing(input_per_million=1, output_per_million=1),
+            capability_signer=signer,
+        )
+        request = ModelRequest(
+            provider_adapter_version="v1",
+            model_role="agent",
+            model="fixture",
+            messages=({"role": "user", "content": "hello"},),
+            run_id="run-1",
+            case_id="case-1",
+            attempt_id="attempt-1",
+            agent_revision_id=DeterministicSmokeAgent.revision().id,
+            capability_token=token,
+            request_id="concurrent-call",
+            max_output_tokens=1,
+        )
+
+        first = asyncio.create_task(gateway.complete(request))
+        await started.wait()
+        with self.assertRaises(CapabilityRequestInProgress):
+            await gateway.complete(request)
+        release.set()
+        await first
         self.assertEqual(provider.calls, 1)
 
 

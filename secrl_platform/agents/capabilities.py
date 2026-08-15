@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from pathlib import Path
 from tempfile import NamedTemporaryFile
-from typing import Protocol, TypeVar
+from typing import Literal, Protocol, TypeVar
 
 import fcntl
 
@@ -42,6 +42,17 @@ class CapabilityRequestCompleted(CapabilityBudgetError):
         super().__init__("capability request has already completed")
         self.actual_tokens = actual_tokens
         self.actual_cost = actual_cost
+
+
+class CapabilityRequestInProgress(CapabilityBudgetError):
+    pass
+
+
+@dataclass(frozen=True)
+class CapabilityRequestAdmission:
+    status: Literal["NEW", "IN_PROGRESS", "COMPLETED"]
+    claims: "CapabilityClaims"
+    actual: tuple[int, Decimal] | None = None
 
 
 class CapabilityClaims(BaseModel):
@@ -217,6 +228,27 @@ class CapabilitySigner:
         expected_agent: str | None = None,
         model_role: str | None = None,
     ) -> CapabilityClaims:
+        return self.begin_request(
+            token,
+            request_id=request_id,
+            reserved_tokens=reserved_tokens,
+            reserved_cost=reserved_cost,
+            expected_run=expected_run,
+            expected_agent=expected_agent,
+            model_role=model_role,
+        ).claims
+
+    def begin_request(
+        self,
+        token: str,
+        *,
+        request_id: str,
+        reserved_tokens: int,
+        reserved_cost: Decimal,
+        expected_run: str | None = None,
+        expected_agent: str | None = None,
+        model_role: str | None = None,
+    ) -> CapabilityRequestAdmission:
         if reserved_tokens < 0 or reserved_cost < 0:
             raise CapabilityBudgetError("capability reservation must not be negative")
         claims = self.verify(
@@ -227,17 +259,25 @@ class CapabilitySigner:
         )
         key = (claims.run_id, claims.agent_revision_id)
         reservation = (reserved_tokens, reserved_cost)
-        def reserve(state: _BudgetState) -> None:
+
+        def begin(state: _BudgetState) -> CapabilityRequestAdmission:
             completed = state.completed.get(request_id)
             if completed is not None:
                 if completed.reservation != reservation:
                     raise CapabilityBudgetError("capability request ID was reused")
-                return
+                return CapabilityRequestAdmission(
+                    status="COMPLETED",
+                    claims=claims,
+                    actual=completed.actual,
+                )
             existing = state.reservations.get(request_id)
             if existing is not None:
                 if existing != reservation:
                     raise CapabilityBudgetError("capability request ID was reused")
-                return
+                return CapabilityRequestAdmission(
+                    status="IN_PROGRESS",
+                    claims=claims,
+                )
             reserved_token_total = sum(item[0] for item in state.reservations.values())
             reserved_cost_total = sum(
                 (item[1] for item in state.reservations.values()), Decimal(0)
@@ -247,8 +287,9 @@ class CapabilitySigner:
             if state.consumed_cost + reserved_cost_total + reserved_cost > claims.max_cost:
                 raise CapabilityBudgetError("capability cost budget exceeded")
             state.reservations[request_id] = reservation
-        self._require_budget_store().transact(key, reserve)
-        return claims
+            return CapabilityRequestAdmission(status="NEW", claims=claims)
+
+        return self._require_budget_store().transact(key, begin)
 
     def completed_usage(
         self,

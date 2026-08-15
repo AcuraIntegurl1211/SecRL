@@ -12,6 +12,7 @@ from pydantic import BaseModel, ConfigDict
 from secrl_platform.agents.capabilities import (
     CapabilityBudgetError,
     CapabilityRequestCompleted,
+    CapabilityRequestInProgress,
     CapabilitySigner,
     InvalidCapability,
 )
@@ -76,7 +77,7 @@ class ModelGateway:
                 raise CapabilityBudgetError(
                     "budgeted model request requires frozen input and output pricing"
                 )
-            completed = self._capability_signer.completed_usage(
+            admission = self._capability_signer.begin_request(
                 token,
                 request_id=request.request_id,
                 reserved_tokens=reservation_usage.total,
@@ -85,20 +86,19 @@ class ModelGateway:
                 expected_agent=request.agent_revision_id,
                 model_role=request.model_role,
             )
-            if completed is not None:
+            if admission.status == "COMPLETED":
+                if admission.actual is None:
+                    raise CapabilityBudgetError(
+                        "completed capability request is missing usage"
+                    )
                 raise CapabilityRequestCompleted(
-                    actual_tokens=completed[0],
-                    actual_cost=completed[1],
+                    actual_tokens=admission.actual[0],
+                    actual_cost=admission.actual[1],
                 )
-            self._capability_signer.reserve_usage(
-                token,
-                request_id=request.request_id,
-                reserved_tokens=reservation_usage.total,
-                reserved_cost=reservation_cost,
-                expected_run=request.run_id,
-                expected_agent=request.agent_revision_id,
-                model_role=request.model_role,
-            )
+            if admission.status == "IN_PROGRESS":
+                raise CapabilityRequestInProgress(
+                    "capability request is already in progress"
+                )
         for attempt in range(1, request.max_attempts + 1):
             try:
                 response = await self._provider.complete(request)
