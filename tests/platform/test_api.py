@@ -1,18 +1,23 @@
+import asyncio
 import json
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import httpx
 from fastapi.testclient import TestClient
 
+from examples.agent_service.app import create_app as create_agent_service_app
 from secrl_platform.api.app import create_app
 from secrl_platform.agents.builtin import DeterministicSmokeAgent
-from secrl_platform.agents.service import manifest_sha256
+from secrl_platform.agents.service import HttpxAgentServiceTransport, manifest_sha256
 from secrl_platform.auth.passwords import hash_password
 from secrl_platform.auth.sessions import SessionStore
 from secrl_platform.benchmarks.smoke import ProtocolSmokeAdapter
 from secrl_platform.config import Settings
+from secrl_platform.models.secrets import encrypted_secret_from_json
+from secrl_platform.runner.process import capability_signer, run_pending_once
 from secrl_platform.runner.recovery import RunnerRepository
 from secrl_platform.storage.artifacts import LocalArtifactStore
 from secrl_platform.storage.database import create_engine_and_session
@@ -27,6 +32,7 @@ from secrl_platform.storage.orm import (
     LocalUserORM,
     ModelConfigRevisionORM,
     RunORM,
+    SecretRefORM,
 )
 
 
@@ -369,6 +375,67 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(len(benchmarks.json()), 1)
         self.assertNotIn("secret", json.dumps(created_model.json()).lower())
 
+    def test_model_key_is_encrypted_and_api_task_is_runner_executable(self):
+        self.login()
+        headers = {
+            "X-CSRF-Token": self.csrf_token,
+            "X-Model-API-Key": "sk-runtime-only-secret",
+        }
+        model = self.client.post(
+            "/api/v1/models",
+            headers=headers,
+            json={
+                "name": "encrypted-fixture",
+                "provider": "openai-compatible",
+                "endpoint": "https://models.invalid/v1",
+                "model": "fixture",
+                "parameters": {"max_output_tokens": 16},
+                "pricing": {
+                    "input_per_million": "1",
+                    "output_per_million": "1",
+                },
+            },
+        )
+        task_payload = valid_smoke_task()
+        task_payload["model_config_revision_id"] = model.json().get("id")
+        task_payload["budget"] = {}
+        task = self.client.post(
+            "/api/v1/tasks",
+            headers={"X-CSRF-Token": self.csrf_token},
+            json=task_payload,
+        )
+
+        self.assertEqual(model.status_code, 201, model.text)
+        self.assertTrue(model.json()["credential_configured"])
+        self.assertNotIn("sk-runtime-only-secret", model.text)
+        self.assertEqual(task.status_code, 201, task.text)
+        with self.session_factory() as session:
+            stored_model = session.get(ModelConfigRevisionORM, model.json()["id"])
+            secret = session.get(SecretRefORM, stored_model.secret_ref_id)
+            stored_task = session.get(EvaluationTaskORM, task.json()["id"])
+            self.assertNotIn("sk-runtime-only-secret", secret.ciphertext)
+            self.assertEqual(
+                self.app.state.api_context.secret_store.decrypt(
+                    encrypted_secret_from_json(secret.ciphertext)
+                ),
+                "sk-runtime-only-secret",
+            )
+            self.assertEqual(stored_task.model_config_revision_id, stored_model.id)
+            self.assertEqual(
+                json.loads(stored_task.task_spec_json)["model_config_sha256"],
+                stored_model.sha256,
+            )
+
+        status = asyncio.run(
+            run_pending_once(
+                settings=self.settings,
+                session_factory=self.session_factory,
+                artifact_store=self.artifact_store,
+            )
+        )
+
+        self.assertEqual(status, "SUCCEEDED")
+
     def test_agent_service_registration_check_and_task_creation(self):
         manifest = json.loads(
             (Path("examples/agent_service/manifest.json")).read_text(encoding="utf-8")
@@ -416,6 +483,7 @@ class ApiTest(unittest.TestCase):
             )
             task_payload = valid_smoke_task()
             task_payload["agent_revision_id"] = created.json().get("id", "missing")
+            task_payload["budget"] = {}
             task = client.post(
                 "/api/v1/tasks",
                 headers=headers,
@@ -439,6 +507,24 @@ class ApiTest(unittest.TestCase):
                 task_spec["agent_revision_sha256"],
                 service.sha256,
             )
+
+        async def execute_registered_service_task():
+            signer = capability_signer(settings)
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(
+                    app=create_agent_service_app(signer)
+                ),
+                base_url="http://agent-service-reference",
+            ) as service_client:
+                return await run_pending_once(
+                    settings=settings,
+                    session_factory=self.session_factory,
+                    artifact_store=self.artifact_store,
+                    agent_service_transport=HttpxAgentServiceTransport(service_client),
+                    agent_service_resolver=lambda _host, _port: ("127.0.0.1",),
+                )
+
+        self.assertEqual(asyncio.run(execute_registered_service_task()), "SUCCEEDED")
 
     def test_model_responses_do_not_echo_parameter_values(self):
         self.login()

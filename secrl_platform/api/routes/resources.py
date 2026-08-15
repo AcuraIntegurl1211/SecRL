@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import uuid
 
 import httpx
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from sqlalchemy import select
 
 from secrl_platform.agents.builtin import DeterministicSmokeAgent
@@ -26,10 +27,12 @@ from secrl_platform.api.errors import ApiError
 from secrl_platform.api.schemas import AgentCreateRequest, ModelCreateRequest
 from secrl_platform.benchmarks.smoke import ProtocolSmokeAdapter
 from secrl_platform.models.providers import validate_model_endpoint
+from secrl_platform.models.secrets import encrypted_secret_to_json
 from secrl_platform.storage.orm import (
     AgentRevisionORM,
     LocalUserORM,
     ModelConfigRevisionORM,
+    SecretRefORM,
 )
 from secrl_platform.storage.repositories import canonical_json
 
@@ -55,9 +58,12 @@ def list_models(
 @router.post("/models", tags=["models"], status_code=201)
 def create_model(
     payload: ModelCreateRequest,
+    request: Request,
     _user: LocalUserORM = Depends(require_csrf_user),
     context: ApiContext = Depends(get_context),
 ) -> dict:
+    if payload.provider != "openai-compatible":
+        raise ApiError(422, "INVALID_MODEL_CONFIG", "Model provider is invalid")
     try:
         validate_model_endpoint(
             payload.endpoint,
@@ -68,6 +74,8 @@ def create_model(
         raise ApiError(422, "INVALID_MODEL_CONFIG", "Model endpoint is invalid")
     parameters = payload.parameters.model_dump(mode="json", exclude_none=True)
     pricing = payload.pricing.model_dump(mode="json", exclude_none=True)
+    api_key = request.headers.get("X-Model-API-Key")
+    secret_ref_id = str(uuid.uuid4()) if api_key else None
     frozen = {
         "endpoint": payload.endpoint,
         "model": payload.model,
@@ -75,6 +83,7 @@ def create_model(
         "parameters": parameters,
         "pricing": pricing,
         "provider": payload.provider,
+        "secret_ref_id": secret_ref_id,
     }
     digest = hashlib.sha256(canonical_json(frozen).encode("utf-8")).hexdigest()
     with context.session_factory.begin() as session:
@@ -84,12 +93,34 @@ def create_model(
         if existing is not None:
             model = existing
         else:
+            if secret_ref_id is not None:
+                if context.secret_store is None:
+                    raise ApiError(
+                        503,
+                        "SECRET_STORE_UNAVAILABLE",
+                        "Model credential storage is unavailable",
+                    )
+                encrypted = context.secret_store.encrypt(
+                    api_key,
+                    secret_ref_id=secret_ref_id,
+                    owner_id=_user.id,
+                    provider=payload.provider,
+                )
+                session.add(
+                    SecretRefORM(
+                        id=secret_ref_id,
+                        name=f"model-credential-{secret_ref_id}",
+                        ciphertext=encrypted_secret_to_json(encrypted),
+                        status="UNVERIFIED",
+                    )
+                )
+                session.flush()
             model = ModelConfigRevisionORM(
                 name=payload.name,
                 provider=payload.provider,
                 endpoint=payload.endpoint,
                 model=payload.model,
-                secret_ref_id=None,
+                secret_ref_id=secret_ref_id,
                 parameters_json=canonical_json(parameters),
                 pricing_json=canonical_json(pricing),
                 sha256=digest,

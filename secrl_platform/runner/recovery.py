@@ -90,6 +90,8 @@ class RunnerRepository:
         agent_revision: AgentRevisionRef,
         case_ids: tuple[str, ...] | None = None,
         budget: dict[str, Any] | None = None,
+        model_config_revision_id: str | None = None,
+        model_config_sha256: str | None = None,
     ) -> RunHandle:
         scope = Scope(case_ids=case_ids) if case_ids is not None else Scope.all()
         cases = adapter.enumerate_cases(adapter.dataset_ref(), scope)
@@ -191,11 +193,17 @@ class RunnerRepository:
                 "case_ids": [case.id for case in cases],
                 "budget": frozen_budget,
             }
+            if model_config_revision_id is not None:
+                if model_config_sha256 is None:
+                    raise ValueError("model config hash is required")
+                task_spec["model_config_revision_id"] = model_config_revision_id
+                task_spec["model_config_sha256"] = model_config_sha256
             task = EvaluationTaskORM(
                 name=name,
                 benchmark_revision_id=benchmark.id,
                 dataset_version_id=dataset.id,
                 agent_revision_id=agent.id,
+                model_config_revision_id=model_config_revision_id,
                 task_spec_json=canonical_json(task_spec),
                 status="QUEUED",
                 budget_json=canonical_json(frozen_budget),

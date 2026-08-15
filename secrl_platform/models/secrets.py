@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import os
 import uuid
@@ -81,6 +82,61 @@ class SecretStore:
 
 def mask_secret(_value: object) -> str:
     return "configured"
+
+
+def encrypted_secret_to_json(secret: EncryptedSecret) -> str:
+    """Serialize ciphertext metadata only; plaintext is never accepted here."""
+    return json.dumps(
+        {
+            "ciphertext": _b64encode(secret.ciphertext),
+            "created_at": secret.created_at.isoformat(),
+            "key_version": secret.key_version,
+            "nonce": _b64encode(secret.nonce),
+            "owner_id": secret.owner_id,
+            "provider": secret.provider,
+            "secret_ref_id": secret.secret_ref_id,
+            "status": secret.status,
+            "tag": _b64encode(secret.tag),
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+
+
+def encrypted_secret_from_json(payload: str) -> EncryptedSecret:
+    try:
+        value = json.loads(payload)
+        created_at = datetime.fromisoformat(value["created_at"])
+        if created_at.tzinfo is None:
+            raise ValueError("secret timestamp must include a timezone")
+        return EncryptedSecret(
+            secret_ref_id=value["secret_ref_id"],
+            owner_id=value["owner_id"],
+            provider=value["provider"],
+            key_version=int(value["key_version"]),
+            nonce=_b64decode(value["nonce"]),
+            ciphertext=_b64decode(value["ciphertext"]),
+            tag=_b64decode(value["tag"]),
+            created_at=created_at,
+            status=value["status"],
+        )
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise SecretDecryptionError("secret envelope is invalid") from exc
+
+
+def _b64encode(value: bytes) -> str:
+    return base64.urlsafe_b64encode(value).rstrip(b"=").decode("ascii")
+
+
+def _b64decode(value: str) -> bytes:
+    if not isinstance(value, str) or not value or any(c.isspace() for c in value):
+        raise ValueError("invalid base64url")
+    padding = "=" * (-len(value) % 4)
+    decoded = base64.b64decode(value + padding, altchars=b"-_", validate=True)
+    if _b64encode(decoded) != value:
+        raise ValueError("non-canonical base64url")
+    return decoded
 
 
 def _associated_data(

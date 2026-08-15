@@ -14,6 +14,8 @@ import httpcore
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
 from uuid import uuid4
 
+from secrl_platform.models.secrets import EncryptedSecret, SecretStore
+
 
 class ProviderModel(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -92,6 +94,29 @@ class ProviderError(RuntimeError):
 
 class ModelProvider(Protocol):
     async def complete(self, request: ModelRequest) -> ModelResponse: ...
+
+
+class DeferredSecretProvider:
+    """Decrypt a stored API key only for the duration of one provider call."""
+
+    def __init__(
+        self,
+        *,
+        secret_store: SecretStore,
+        encrypted_secret: EncryptedSecret,
+        provider_factory: Callable[[str], ModelProvider],
+    ) -> None:
+        self._secret_store = secret_store
+        self._encrypted_secret = encrypted_secret
+        self._provider_factory = provider_factory
+
+    async def complete(self, request: ModelRequest) -> ModelResponse:
+        api_key = self._secret_store.decrypt(self._encrypted_secret)
+        try:
+            provider = self._provider_factory(api_key)
+            return await provider.complete(request)
+        finally:
+            api_key = ""
 
 
 class OpenAICompatibleProvider:

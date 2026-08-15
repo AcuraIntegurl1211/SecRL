@@ -22,6 +22,7 @@ from secrl_platform.storage.orm import (
     AgentRevisionORM,
     EvaluationTaskORM,
     LocalUserORM,
+    ModelConfigRevisionORM,
 )
 
 
@@ -64,6 +65,9 @@ def create_task(
     if payload.benchmark_id != adapter.manifest().benchmark_id:
         raise ApiError(422, "INVALID_TASK_SPEC", "Unknown benchmark revision")
     revision = _resolve_agent_revision(context, payload.agent_revision_id)
+    model_id, model_sha256 = _resolve_model_revision(
+        context, payload.model_config_revision_id
+    )
     budget = payload.budget.model_dump(mode="json", exclude_none=True)
     try:
         handle = RunnerRepository(context.session_factory).create_protocol_smoke_run(
@@ -72,6 +76,8 @@ def create_task(
             agent_revision=revision,
             case_ids=payload.case_ids,
             budget=budget,
+            model_config_revision_id=model_id,
+            model_config_sha256=model_sha256,
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise ApiError(422, "INVALID_TASK_SPEC", "Invalid Protocol-Smoke task") from exc
@@ -87,6 +93,23 @@ def create_task(
         status=status,
         task_spec_sha256=task_hash,
     )
+
+
+def _resolve_model_revision(
+    context: ApiContext,
+    revision_id: str | None,
+) -> tuple[str | None, str | None]:
+    if revision_id is None:
+        return None, None
+    with context.session_factory() as session:
+        model = session.get(ModelConfigRevisionORM, revision_id)
+        if model is None or model.secret_ref_id is None:
+            raise ApiError(
+                422,
+                "INVALID_TASK_SPEC",
+                "Model config is missing an encrypted credential",
+            )
+        return model.id, model.sha256
 
 
 def _resolve_agent_revision(

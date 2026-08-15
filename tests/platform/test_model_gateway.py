@@ -8,6 +8,7 @@ from pydantic import ValidationError
 from secrl_platform.models.gateway import ModelGateway
 from secrl_platform.models.pricing import Pricing
 from secrl_platform.models.providers import (
+    DeferredSecretProvider,
     ModelRequest,
     ModelResponse,
     OpenAICompatibleProvider,
@@ -15,6 +16,7 @@ from secrl_platform.models.providers import (
     Usage,
     _PinnedNetworkBackend,
 )
+from secrl_platform.models.secrets import SecretStore
 
 
 class FakeProvider:
@@ -57,6 +59,36 @@ def public_resolver(_host, _port):
 
 
 class ModelGatewayTest(unittest.IsolatedAsyncioTestCase):
+    async def test_model_secret_is_decrypted_only_inside_provider_call(self):
+        class RecordingSecretStore(SecretStore):
+            def __init__(self):
+                super().__init__(bytes.fromhex("22" * 32))
+                self.decrypt_calls = 0
+
+            def decrypt(self, secret):
+                self.decrypt_calls += 1
+                return super().decrypt(secret)
+
+        store = RecordingSecretStore()
+        envelope = store.encrypt("sk-call-scoped")
+        seen_keys = []
+
+        class Provider:
+            async def complete(self, _request):
+                return ModelResponse(text="ok", usage=Usage(prompt=1, completion=1))
+
+        provider = DeferredSecretProvider(
+            secret_store=store,
+            encrypted_secret=envelope,
+            provider_factory=lambda api_key: seen_keys.append(api_key) or Provider(),
+        )
+        self.assertEqual(store.decrypt_calls, 0)
+
+        await provider.complete(model_request())
+
+        self.assertEqual(store.decrypt_calls, 1)
+        self.assertEqual(seen_keys, ["sk-call-scoped"])
+
     async def test_429_retries_and_records_one_successful_usage(self):
         provider = FakeProvider(
             [

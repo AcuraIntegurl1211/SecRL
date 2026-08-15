@@ -5,11 +5,28 @@ from secrl_platform.auth.passwords import hash_password, verify_password
 from secrl_platform.models.secrets import (
     SecretDecryptionError,
     SecretStore,
+    encrypted_secret_from_json,
+    encrypted_secret_to_json,
     mask_secret,
 )
 
 
 class SecretStoreTest(unittest.TestCase):
+    def test_encrypted_envelope_can_be_persisted_without_plaintext(self):
+        store = SecretStore(bytes.fromhex("11" * 32))
+        encrypted = store.encrypt(
+            "sk-persisted-private-value",
+            secret_ref_id="secret-1",
+            owner_id="owner-1",
+            provider="openai-compatible",
+        )
+
+        payload = encrypted_secret_to_json(encrypted)
+        restored = encrypted_secret_from_json(payload)
+
+        self.assertNotIn("sk-persisted-private-value", payload)
+        self.assertEqual(store.decrypt(restored), "sk-persisted-private-value")
+
     def setUp(self):
         self.store = SecretStore(bytes.fromhex("11" * 32))
 

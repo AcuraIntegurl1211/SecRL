@@ -24,6 +24,7 @@ from secrl_platform.config import (
     DEFAULT_MODEL_PROVIDER_ALLOWLIST,
     Settings,
 )
+from secrl_platform.models.secrets import SecretStore
 from secrl_platform.storage.artifacts import LocalArtifactStore
 from secrl_platform.storage.database import create_engine_and_session
 
@@ -190,6 +191,11 @@ def _context(
         ),
         agent_service_transport=agent_service_transport,
         agent_service_resolver=agent_service_resolver,
+        secret_store=(
+            SecretStore(bytes.fromhex(settings.master_key))
+            if settings is not None
+            else None
+        ),
     )
 
 

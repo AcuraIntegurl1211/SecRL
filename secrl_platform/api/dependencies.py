@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from secrl_platform.api.errors import ApiError
 from secrl_platform.agents.service import AgentServiceTransport
 from secrl_platform.auth.sessions import CSRF_HEADER, SESSION_COOKIE, SessionStore
+from secrl_platform.models.secrets import SecretStore
 from secrl_platform.storage.artifacts import LocalArtifactStore
 from secrl_platform.storage.orm import LocalUserORM
 
@@ -23,6 +24,7 @@ class ApiContext:
     agent_service_allowlist: tuple[str, ...]
     agent_service_transport: AgentServiceTransport | None
     agent_service_resolver: Callable[[str, int], object] | None
+    secret_store: SecretStore | None
 
 
 def get_context(request: Request) -> ApiContext:

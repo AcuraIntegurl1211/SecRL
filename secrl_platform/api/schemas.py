@@ -20,6 +20,7 @@ class TaskCreateRequest(ApiModel):
     name: str = Field(min_length=1, max_length=256)
     benchmark_id: str
     agent_revision_id: str
+    model_config_revision_id: str | None = None
     case_ids: tuple[str, ...] = Field(min_length=1)
     budget: BudgetSpec = Field(default_factory=BudgetSpec)
 
