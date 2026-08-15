@@ -4,13 +4,48 @@ import hashlib
 import json
 from typing import Any, Literal, Protocol
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from secrl_platform.benchmarks.protocol import AgentAction, Observation, ToolDefinition
 
 
 class AgentProtocolModel(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
+
+
+class FrozenDict(dict[str, Any]):
+    def _immutable(self, *_args, **_kwargs):
+        raise TypeError("frozen JSON object cannot be modified")
+
+    __setitem__ = _immutable
+    __delitem__ = _immutable
+    clear = _immutable
+    pop = _immutable
+    popitem = _immutable
+    setdefault = _immutable
+    update = _immutable
+    __ior__ = _immutable
+
+    def __deepcopy__(self, _memo):
+        return self
+
+
+def freeze_json(value: Any) -> Any:
+    if isinstance(value, dict):
+        frozen = {key: freeze_json(item) for key, item in value.items()}
+        result = FrozenDict()
+        dict.update(result, frozen)
+        return result
+    if isinstance(value, (list, tuple)):
+        return tuple(freeze_json(item) for item in value)
+    return value
+
+
+class AgentToolDefinition(ToolDefinition):
+    @field_validator("parameters", mode="after")
+    @classmethod
+    def freeze_parameters(cls, value: dict[str, Any]) -> dict[str, Any]:
+        return freeze_json(value)
 
 
 class AgentManifest(AgentProtocolModel):
@@ -20,6 +55,11 @@ class AgentManifest(AgentProtocolModel):
     runtime: Literal["built_in", "service"]
     protocol_version: Literal["1"] = "1"
     parameter_schema: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("parameter_schema", mode="after")
+    @classmethod
+    def freeze_parameter_schema(cls, value: dict[str, Any]) -> dict[str, Any]:
+        return freeze_json(value)
 
     def sha256(self) -> str:
         payload = json.dumps(
@@ -48,8 +88,21 @@ class EpisodeContext(AgentProtocolModel):
     case_id: str = Field(min_length=1)
     attempt_id: str = Field(min_length=1)
     public_input: dict[str, Any]
-    tools: tuple[ToolDefinition, ...]
+    tools: tuple[AgentToolDefinition, ...]
     max_steps: int = Field(ge=1)
+
+    @field_validator("public_input", mode="after")
+    @classmethod
+    def freeze_public_input(cls, value: dict[str, Any]) -> dict[str, Any]:
+        return freeze_json(value)
+
+    @field_validator("tools", mode="before")
+    @classmethod
+    def normalize_tools(cls, value: Any) -> Any:
+        return tuple(
+            item.model_dump(mode="python") if isinstance(item, ToolDefinition) else item
+            for item in value
+        )
 
 
 class UsageSnapshot(AgentProtocolModel):

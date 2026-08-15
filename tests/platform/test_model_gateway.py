@@ -1,7 +1,9 @@
 import unittest
 from decimal import Decimal
+from math import isfinite
 
 import httpx
+from pydantic import ValidationError
 
 from secrl_platform.models.gateway import ModelGateway
 from secrl_platform.models.pricing import Pricing
@@ -98,6 +100,36 @@ class ModelGatewayTest(unittest.IsolatedAsyncioTestCase):
             await gateway.complete(model_request(max_attempts=2))
 
         self.assertEqual(provider.calls, 2)
+
+    async def test_retry_delay_is_finite_and_capped(self):
+        delays = []
+
+        async def record_delay(value):
+            delays.append(value)
+
+        provider = FakeProvider(
+            [
+                ProviderError("RATE_LIMITED", retry_after=float("inf")),
+                ModelResponse(text="ok", usage=Usage(prompt=1, completion=1)),
+            ]
+        )
+        gateway = ModelGateway(
+            provider=provider,
+            pricing=Pricing(input_per_million=1, output_per_million=1),
+            sleep=record_delay,
+        )
+
+        await gateway.complete(model_request())
+
+        self.assertEqual(len(delays), 1)
+        self.assertTrue(isfinite(delays[0]))
+        self.assertLessEqual(delays[0], 30)
+
+    def test_effective_parameters_cannot_replace_authoritative_request_fields(self):
+        for reserved in ("model", "messages"):
+            with self.subTest(reserved=reserved):
+                with self.assertRaises(ValidationError):
+                    model_request(effective_parameters={reserved: "changed"})
 
     async def test_missing_usage_or_price_is_unknown_not_zero(self):
         without_usage = ModelGateway(

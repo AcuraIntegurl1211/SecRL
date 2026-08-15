@@ -1,13 +1,18 @@
 from __future__ import annotations
 
 import asyncio
+import math
 from collections.abc import Awaitable, Callable
 from decimal import Decimal
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict
 
-from secrl_platform.agents.capabilities import CapabilitySigner, InvalidCapability
+from secrl_platform.agents.capabilities import (
+    CapabilityBudgetError,
+    CapabilitySigner,
+    InvalidCapability,
+)
 from secrl_platform.models.pricing import Pricing
 from secrl_platform.models.providers import (
     ModelProvider,
@@ -54,6 +59,22 @@ class ModelGateway:
                 expected_agent=request.agent_revision_id,
                 model_role=request.model_role,
             )
+            if (
+                request.budget_reservation_tokens is None
+                or request.budget_reservation_cost is None
+            ):
+                raise CapabilityBudgetError(
+                    "budgeted model request requires token and cost reservations"
+                )
+            self._capability_signer.reserve_usage(
+                token,
+                request_id=request.request_id,
+                reserved_tokens=request.budget_reservation_tokens,
+                reserved_cost=request.budget_reservation_cost,
+                expected_run=request.run_id,
+                expected_agent=request.agent_revision_id,
+                model_role=request.model_role,
+            )
         for attempt in range(1, request.max_attempts + 1):
             try:
                 response = await self._provider.complete(request)
@@ -61,16 +82,22 @@ class ModelGateway:
                 if not exc.transient or attempt == request.max_attempts:
                     raise
                 delay = exc.retry_after
-                if delay is None:
+                if delay is None or not math.isfinite(delay):
                     delay = min(0.5 * (2 ** (attempt - 1)), 5.0)
+                delay = min(max(delay, 0.0), 30.0)
                 await self._sleep(delay)
                 continue
             estimated_cost = self._pricing.estimate(response.usage)
             if self._capability_signer is not None and token is not None:
-                self._capability_signer.authorize_usage(
+                if response.usage is None or estimated_cost is None:
+                    raise CapabilityBudgetError(
+                        "budgeted model response requires usage and pricing"
+                    )
+                self._capability_signer.reconcile_usage(
                     token,
-                    additional_tokens=response.usage.total if response.usage else 0,
-                    additional_cost=estimated_cost or Decimal(0),
+                    request_id=request.request_id,
+                    actual_tokens=response.usage.total,
+                    actual_cost=estimated_cost,
                     expected_run=request.run_id,
                     expected_agent=request.agent_revision_id,
                     model_role=request.model_role,

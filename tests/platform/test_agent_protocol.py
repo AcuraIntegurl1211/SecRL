@@ -10,6 +10,7 @@ from secrl_platform.agents.protocol import (
 )
 from secrl_platform.agents.registry import (
     AgentRegistry,
+    ApprovedAgentRevision,
     UnapprovedAgentError,
 )
 from secrl_platform.benchmarks.protocol import (
@@ -99,6 +100,10 @@ class AgentRuntimeTest(unittest.IsolatedAsyncioTestCase):
         context = smoke_episode_context()
         with self.assertRaises(ValidationError):
             context.max_steps = 7
+        with self.assertRaises(TypeError):
+            context.public_input["question"] = "changed"
+        with self.assertRaises(TypeError):
+            context.tools[0].parameters["type"] = "string"
         with self.assertRaises(ValidationError):
             from secrl_platform.agents.protocol import UsageSnapshot
 
@@ -116,7 +121,7 @@ class AgentRuntimeTest(unittest.IsolatedAsyncioTestCase):
             manifest=manifest,
             manifest_sha256=manifest.sha256(),
         )
-        registry = AgentRegistry(approved_revision_ids=set())
+        registry = AgentRegistry()
         registry.register(revision, DeterministicSmokeAgent)
 
         with self.assertRaises(UnapprovedAgentError):
@@ -124,7 +129,11 @@ class AgentRuntimeTest(unittest.IsolatedAsyncioTestCase):
 
     def test_registry_resolves_only_matching_approved_manifest(self):
         revision = DeterministicSmokeAgent.revision()
-        registry = AgentRegistry(approved_revision_ids={revision.id})
+        approval = ApprovedAgentRevision.from_trusted_factory(
+            revision,
+            DeterministicSmokeAgent,
+        )
+        registry = AgentRegistry(approved_revisions=(approval,))
         registry.register(revision, DeterministicSmokeAgent)
 
         runtime = registry.resolve(revision.id)
@@ -136,6 +145,38 @@ class AgentRuntimeTest(unittest.IsolatedAsyncioTestCase):
                 manifest=revision.manifest,
                 manifest_sha256="0" * 64,
             )
+
+    def test_registry_rejects_approved_id_with_changed_manifest_or_factory(self):
+        revision = DeterministicSmokeAgent.revision()
+        approval = ApprovedAgentRevision.from_trusted_factory(
+            revision,
+            DeterministicSmokeAgent,
+        )
+        changed_manifest = revision.manifest.model_copy(
+            update={"name": "Changed implementation"}
+        )
+        changed_revision = AgentRevisionRef(
+            id=revision.id,
+            manifest=changed_manifest,
+            manifest_sha256=changed_manifest.sha256(),
+        )
+        registry = AgentRegistry(approved_revisions=(approval,))
+        registry.register(changed_revision, DeterministicSmokeAgent)
+        with self.assertRaises(UnapprovedAgentError):
+            registry.resolve(revision.id)
+
+        class ArbitraryFactory(DeterministicSmokeAgent):
+            pass
+
+        registry = AgentRegistry(approved_revisions=(approval,))
+        registry.register(revision, ArbitraryFactory)
+        with self.assertRaises(UnapprovedAgentError):
+            registry.resolve(revision.id)
+
+    def test_manifest_nested_schema_cannot_change_after_hash_validation(self):
+        revision = DeterministicSmokeAgent.revision()
+        with self.assertRaises(TypeError):
+            revision.manifest.parameter_schema["type"] = "array"
 
 
 if __name__ == "__main__":

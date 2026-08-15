@@ -17,13 +17,15 @@ from secrl_platform.agents.capabilities import (
 )
 from secrl_platform.agents.service import (
     AgentServiceRuntime,
+    AgentServiceError,
+    AgentServiceProtocolError,
     AgentServiceTimeout,
     HttpxAgentServiceTransport,
     InvalidAgentAction,
     ServiceConfig,
     manifest_sha256,
 )
-from secrl_platform.benchmarks.protocol import Observation, ToolDefinition
+from secrl_platform.benchmarks.protocol import Observation
 from secrl_platform.models.gateway import ModelGateway
 from secrl_platform.models.pricing import Pricing
 from secrl_platform.models.providers import ModelRequest, ModelResponse, Usage
@@ -57,21 +59,47 @@ def tamper(token):
 
 
 class RecordingTransport:
-    def __init__(self, action, *, timeout_once=False):
+    def __init__(
+        self,
+        action,
+        *,
+        timeout_once=False,
+        session_timeout_once=False,
+        corrupt_correlation=False,
+    ):
         self.action = action
         self.timeout_once = timeout_once
+        self.session_timeout_once = session_timeout_once
+        self.corrupt_correlation = corrupt_correlation
         self.act_requests = []
+        self.session_requests = []
+        self.urls = []
 
     async def request(self, method, url, *, json_body=None, headers=None):
+        self.urls.append(url)
         if method == "GET" and url.endswith("/v1/manifest"):
             return manifest_payload()
         if method == "POST" and url.endswith("/v1/sessions"):
-            return {"session_id": "session-1"}
+            self.session_requests.append(json_body)
+            if self.session_timeout_once and len(self.session_requests) == 1:
+                raise AgentServiceTimeout("timeout")
+            return {
+                "request_id": json_body["request_id"],
+                "sequence": json_body["sequence"],
+                "session_id": "session-1",
+            }
         if method == "POST" and ":act" in url:
             self.act_requests.append(json_body)
             if self.timeout_once and len(self.act_requests) == 1:
                 raise AgentServiceTimeout("timeout")
-            return {"action": self.action, "usage": {"prompt_tokens": 0, "completion_tokens": 0}}
+            return {
+                "request_id": (
+                    "wrong-request" if self.corrupt_correlation else json_body["request_id"]
+                ),
+                "sequence": json_body["sequence"],
+                "action": self.action,
+                "usage": {"prompt_tokens": 0, "completion_tokens": 0},
+            }
         if method == "POST" and url.endswith(":close"):
             return {"closed": True}
         raise AssertionError((method, url))
@@ -84,7 +112,6 @@ def service_config(token):
         expected_manifest_sha256=manifest_sha256(manifest),
         agent_revision_id=DeterministicSmokeAgent.revision().id,
         capability_token=token,
-        allowlist=("agent-service-reference",),
     )
 
 
@@ -94,7 +121,18 @@ def fake_resolver(_host, _port):
 
 class CapabilityTokenTest(unittest.TestCase):
     def setUp(self):
-        self.signer = CapabilitySigner(b"c" * 32, now=lambda: 1_000)
+        self.active_leases = {
+            ("run-1", DeterministicSmokeAgent.revision().id)
+        }
+        self.signer = CapabilitySigner(
+            b"c" * 32,
+            now=lambda: 1_000,
+            lease_is_active=lambda run_id, agent_id: (
+                run_id,
+                agent_id,
+            )
+            in self.active_leases,
+        )
 
     def test_capability_rejects_tamper_expiry_scope_and_budget(self):
         token = self.signer.issue(valid_claims())
@@ -122,13 +160,43 @@ class CapabilityTokenTest(unittest.TestCase):
     def test_refresh_defaults_to_five_minutes_and_requires_active_run_lease(self):
         token = self.signer.issue(valid_claims())
 
+        self.active_leases.clear()
         with self.assertRaises(CapabilityScopeError):
-            self.signer.refresh(token, lease_active=False)
+            self.signer.refresh(token)
 
-        refreshed = self.signer.refresh(token, lease_active=True)
+        self.active_leases.add(("run-1", DeterministicSmokeAgent.revision().id))
+        refreshed = self.signer.refresh(token)
         claims = self.signer.verify(refreshed)
         self.assertEqual(claims.expires_at - claims.issued_at, 300)
         self.assertNotEqual(claims.nonce, "nonce-1")
+
+    def test_token_lifetime_and_future_issued_at_are_rejected(self):
+        long_lived = valid_claims().model_copy(update={"expires_at": 101_000})
+        future = valid_claims().model_copy(
+            update={"issued_at": 1_100, "expires_at": 1_200}
+        )
+
+        with self.assertRaises(InvalidCapability):
+            self.signer.verify(self.signer.issue(long_lived))
+        with self.assertRaises(InvalidCapability):
+            self.signer.verify(self.signer.issue(future))
+
+    def test_usage_is_cumulative_for_same_run_and_agent(self):
+        token = self.signer.issue(valid_claims(max_tokens=10))
+
+        self.signer.authorize_usage(
+            token,
+            additional_tokens=6,
+            additional_cost=Decimal("0"),
+            request_id="model-call-1",
+        )
+        with self.assertRaises(CapabilityBudgetError):
+            self.signer.authorize_usage(
+                token,
+                additional_tokens=6,
+                additional_cost=Decimal("0"),
+                request_id="model-call-2",
+            )
 
 
 class AgentServiceTest(unittest.IsolatedAsyncioTestCase):
@@ -145,6 +213,7 @@ class AgentServiceTest(unittest.IsolatedAsyncioTestCase):
             config=service_config(self.token),
             transport=transport,
             resolver=fake_resolver,
+            allowed_hosts=("agent-service-reference",),
         )
         await runtime.reset(smoke_episode_context())
         await runtime.act(Observation(type="episode_start", content={"question": "alpha"}))
@@ -161,6 +230,7 @@ class AgentServiceTest(unittest.IsolatedAsyncioTestCase):
                 {"type": "tool_call", "tool": "shell", "arguments": {}}
             ),
             resolver=fake_resolver,
+            allowed_hosts=("agent-service-reference",),
         )
         await runtime.reset(smoke_episode_context())
 
@@ -173,13 +243,23 @@ class AgentServiceTest(unittest.IsolatedAsyncioTestCase):
             update={"endpoint": "http://user@agent-service-reference"}
         )
         with self.assertRaises(ValueError):
-            AgentServiceRuntime(config=config, transport=RecordingTransport({}), resolver=fake_resolver)
+            AgentServiceRuntime(
+                config=config,
+                transport=RecordingTransport({}),
+                resolver=fake_resolver,
+                allowed_hosts=("agent-service-reference",),
+            )
 
         config = service_config(self.token).model_copy(
             update={"endpoint": "http://not-allowlisted"}
         )
         with self.assertRaises(ValueError):
-            AgentServiceRuntime(config=config, transport=RecordingTransport({}), resolver=fake_resolver)
+            AgentServiceRuntime(
+                config=config,
+                transport=RecordingTransport({}),
+                resolver=fake_resolver,
+                allowed_hosts=("agent-service-reference",),
+            )
 
         config = service_config(self.token).model_copy(
             update={"expected_manifest_sha256": "0" * 64}
@@ -188,6 +268,7 @@ class AgentServiceTest(unittest.IsolatedAsyncioTestCase):
             config=config,
             transport=RecordingTransport({}),
             resolver=fake_resolver,
+            allowed_hosts=("agent-service-reference",),
         )
         with self.assertRaises(ValueError):
             await runtime.reset(smoke_episode_context())
@@ -202,6 +283,7 @@ class AgentServiceTest(unittest.IsolatedAsyncioTestCase):
                 config=service_config(self.token),
                 transport=HttpxAgentServiceTransport(client),
                 resolver=fake_resolver,
+                allowed_hosts=("agent-service-reference",),
             )
             builtin = DeterministicSmokeAgent()
             context = smoke_episode_context()
@@ -218,6 +300,69 @@ class AgentServiceTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(actual, expected)
             await builtin.close()
             await service.close()
+
+    async def test_session_creation_retry_reuses_request_id_and_sequence(self):
+        transport = RecordingTransport({}, session_timeout_once=True)
+        runtime = AgentServiceRuntime(
+            config=service_config(self.token),
+            transport=transport,
+            resolver=fake_resolver,
+            allowed_hosts=("agent-service-reference",),
+        )
+
+        await runtime.reset(smoke_episode_context())
+
+        first, second = transport.session_requests
+        self.assertEqual(first["request_id"], second["request_id"])
+        self.assertEqual(first["sequence"], second["sequence"])
+        await runtime.close()
+
+    async def test_response_correlation_is_required(self):
+        runtime = AgentServiceRuntime(
+            config=service_config(self.token),
+            transport=RecordingTransport(
+                {"type": "tool_call", "tool": "search", "arguments": {"query": "alpha"}},
+                corrupt_correlation=True,
+            ),
+            resolver=fake_resolver,
+            allowed_hosts=("agent-service-reference",),
+        )
+        await runtime.reset(smoke_episode_context())
+
+        with self.assertRaises(AgentServiceProtocolError) as raised:
+            await runtime.act(Observation(type="episode_start", content={}))
+        self.assertEqual(raised.exception.code, "AGENT_SERVICE_CORRELATION_ERROR")
+
+    async def test_resolution_must_be_nonempty_and_connection_uses_pinned_address(self):
+        with self.assertRaises(ValueError):
+            AgentServiceRuntime(
+                config=service_config(self.token),
+                transport=RecordingTransport({}),
+                resolver=lambda _host, _port: (),
+                allowed_hosts=("agent-service-reference",),
+            )
+
+        transport = RecordingTransport({})
+        runtime = AgentServiceRuntime(
+            config=service_config(self.token),
+            transport=transport,
+            resolver=fake_resolver,
+            allowed_hosts=("agent-service-reference",),
+        )
+        await runtime.reset(smoke_episode_context())
+        self.assertTrue(all("127.0.0.1" in url for url in transport.urls))
+        await runtime.close()
+
+    async def test_http_transport_rejects_redirects(self):
+        transport = httpx.MockTransport(
+            lambda _request: httpx.Response(302, headers={"Location": "http://elsewhere"})
+        )
+        async with httpx.AsyncClient(transport=transport) as client:
+            with self.assertRaises(AgentServiceError) as raised:
+                await HttpxAgentServiceTransport(client).request(
+                    "GET", "http://127.0.0.1/v1/manifest"
+                )
+        self.assertEqual(raised.exception.code, "AGENT_SERVICE_REDIRECT_REJECTED")
 
     async def test_model_gateway_rejects_tampered_capability_before_provider_call(self):
         class Provider:
@@ -248,6 +393,83 @@ class AgentServiceTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(InvalidCapability):
             await gateway.complete(request)
         self.assertEqual(provider.calls, 0)
+
+    async def test_gateway_reserves_cumulative_budget_before_provider_call(self):
+        signer = CapabilitySigner(b"d" * 32, now=lambda: 1_000)
+        token = signer.issue(valid_claims(max_tokens=10))
+
+        class Provider:
+            calls = 0
+
+            async def complete(self, _request):
+                self.calls += 1
+                return ModelResponse(
+                    text="ok",
+                    usage=Usage(prompt=3, completion=3),
+                )
+
+        provider = Provider()
+        gateway = ModelGateway(
+            provider=provider,
+            pricing=Pricing(input_per_million=1, output_per_million=1),
+            capability_signer=signer,
+        )
+
+        def request(request_id):
+            return ModelRequest(
+                provider_adapter_version="v1",
+                model_role="agent",
+                model="fixture",
+                messages=({"role": "user", "content": "hello"},),
+                run_id="run-1",
+                case_id="case-1",
+                attempt_id="attempt-1",
+                agent_revision_id=DeterministicSmokeAgent.revision().id,
+                capability_token=token,
+                request_id=request_id,
+                budget_reservation_tokens=6,
+                budget_reservation_cost=Decimal("0.000006"),
+            )
+
+        await gateway.complete(request("model-call-1"))
+        with self.assertRaises(CapabilityBudgetError):
+            await gateway.complete(request("model-call-2"))
+        self.assertEqual(provider.calls, 1)
+
+    async def test_gateway_fails_closed_when_usage_or_pricing_is_missing(self):
+        for response, pricing in (
+            (ModelResponse(text="ok", usage=None), Pricing(1, 1)),
+            (ModelResponse(text="ok", usage=Usage(prompt=1, completion=1)), Pricing()),
+        ):
+            with self.subTest(response=response, pricing=pricing):
+                signer = CapabilitySigner(b"e" * 32, now=lambda: 1_000)
+                token = signer.issue(valid_claims())
+
+                class Provider:
+                    async def complete(self, _request):
+                        return response
+
+                gateway = ModelGateway(
+                    provider=Provider(),
+                    pricing=pricing,
+                    capability_signer=signer,
+                )
+                request = ModelRequest(
+                    provider_adapter_version="v1",
+                    model_role="agent",
+                    model="fixture",
+                    messages=({"role": "user", "content": "hello"},),
+                    run_id="run-1",
+                    case_id="case-1",
+                    attempt_id="attempt-1",
+                    agent_revision_id=DeterministicSmokeAgent.revision().id,
+                    capability_token=token,
+                    request_id="model-call",
+                    budget_reservation_tokens=10,
+                    budget_reservation_cost=Decimal("0.1"),
+                )
+                with self.assertRaises(CapabilityBudgetError):
+                    await gateway.complete(request)
 
 
 if __name__ == "__main__":

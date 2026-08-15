@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+import math
+from datetime import datetime, timezone
+from decimal import Decimal
+from email.utils import parsedate_to_datetime
 from typing import Any, Literal, Protocol
 
 import httpx
-from pydantic import BaseModel, ConfigDict, Field, SecretStr
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
+from uuid import uuid4
 
 
 class ProviderModel(BaseModel):
@@ -41,6 +46,18 @@ class ModelRequest(ProviderModel):
     max_attempts: int = Field(default=3, ge=1, le=10)
     agent_revision_id: str | None = None
     capability_token: SecretStr | None = Field(default=None, repr=False)
+    request_id: str = Field(default_factory=lambda: str(uuid4()))
+    budget_reservation_tokens: int | None = Field(default=None, ge=0)
+    budget_reservation_cost: Decimal | None = Field(default=None, ge=0)
+
+    @model_validator(mode="after")
+    def reject_reserved_parameters(self) -> "ModelRequest":
+        reserved = {"model", "messages"}
+        if reserved.intersection(self.requested_parameters):
+            raise ValueError("requested parameters contain reserved provider fields")
+        if reserved.intersection(self.effective_parameters):
+            raise ValueError("effective parameters contain reserved provider fields")
+        return self
 
 
 class ModelResponse(ProviderModel):
@@ -81,9 +98,9 @@ class OpenAICompatibleProvider:
 
     async def complete(self, request: ModelRequest) -> ModelResponse:
         payload = {
+            **request.effective_parameters,
             "model": request.model,
             "messages": [message.model_dump(mode="json") for message in request.messages],
-            **request.effective_parameters,
         }
         headers = {"Authorization": f"Bearer {self._api_key}"}
         try:
@@ -147,6 +164,14 @@ def _retry_after_seconds(value: str | None) -> float | None:
     try:
         seconds = float(value)
     except ValueError:
+        try:
+            retry_at = parsedate_to_datetime(value)
+        except (TypeError, ValueError):
+            return None
+        if retry_at.tzinfo is None:
+            retry_at = retry_at.replace(tzinfo=timezone.utc)
+        seconds = (retry_at - datetime.now(timezone.utc)).total_seconds()
+    if not math.isfinite(seconds):
         return None
     return max(0.0, seconds)
 
