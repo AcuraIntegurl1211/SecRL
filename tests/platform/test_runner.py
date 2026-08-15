@@ -11,10 +11,16 @@ from secrl_platform.agents.capabilities import (
     InMemoryCapabilityBudgetStore,
 )
 from secrl_platform.agents.protocol import UsageSnapshot
+from secrl_platform.agents.service import AgentServiceError, InvalidAgentAction
 from secrl_platform.benchmarks.smoke import ProtocolSmokeAdapter
 from secrl_platform.models.gateway import ModelGateway, _conservative_input_token_bound
 from secrl_platform.models.pricing import Pricing
-from secrl_platform.models.providers import ModelRequest, ModelResponse, Usage
+from secrl_platform.models.providers import (
+    ModelRequest,
+    ModelResponse,
+    ProviderError,
+    Usage,
+)
 from secrl_platform.runner.engine import CapabilityBudgetGuard, RunnerEngine
 from secrl_platform.runner.process import RunnerProcess
 from secrl_platform.runner.recovery import (
@@ -204,6 +210,27 @@ class RunnerEngineTest(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(repo.final_result_count(handle.task_id), 1)
                     self.assertEqual(repo.checkpoint(handle.task_id, handle.run_id), 1)
 
+    async def test_hard_budget_exhaustion_wins_over_pause_request(self):
+        with tempfile.TemporaryDirectory() as directory:
+            adapter, repo, handle, store = self.create_harness(
+                Path(directory),
+                budget={"max_cases": 1},
+                case_ids=("smoke-001", "smoke-002"),
+            )
+
+            def request_pause(_case_id, _artifact):
+                repo.request_pause(handle.task_id, handle.run_id)
+
+            status = await RunnerEngine(
+                repository=repo,
+                artifact_store=store,
+                adapter=adapter,
+                runtime_factory=DeterministicSmokeAgent,
+                after_artifact_write=request_pause,
+            ).run(handle.task_id, handle.run_id)
+
+            self.assertEqual(status, "BUDGET_EXHAUSTED")
+            self.assertEqual(repo.final_result_count(handle.task_id), 1)
 
     async def test_model_budget_uses_platform_gateway_ledger_before_each_call(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -274,6 +301,149 @@ class RunnerEngineTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(status, "BUDGET_EXHAUSTED")
             self.assertEqual(repo.final_result_count(handle.task_id), 1)
             self.assertEqual(provider.calls, 1)
+
+    async def test_model_budget_rejection_before_dispatch_is_terminal(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            adapter, repo, handle, store = self.create_harness(
+                root,
+                budget={"max_tokens": 1, "max_cost": "0"},
+                case_ids=("smoke-001",),
+            )
+            signer = CapabilitySigner(
+                b"f" * 32,
+                now=lambda: 1_000,
+                budget_store=InMemoryCapabilityBudgetStore(),
+            )
+            token = signer.issue(
+                CapabilityClaims(
+                    run_id=handle.run_id,
+                    agent_revision_id=DeterministicSmokeAgent.revision().id,
+                    allowed_model_roles=("agent",),
+                    max_tokens=1,
+                    max_cost=Decimal("0"),
+                    issued_at=1_000,
+                    expires_at=1_300,
+                    nonce="pre-dispatch-budget-rejection",
+                )
+            )
+
+            class Provider:
+                calls = 0
+
+                async def complete(self, _request):
+                    self.calls += 1
+                    return ModelResponse(text="unexpected", usage=Usage(prompt=1, completion=1))
+
+            provider = Provider()
+            gateway = ModelGateway(
+                provider=provider,
+                pricing=Pricing(input_per_million=0, output_per_million=0),
+                capability_signer=signer,
+            )
+            guard = CapabilityBudgetGuard(
+                signer=signer,
+                token=token,
+                run_id=handle.run_id,
+                agent_revision_id=DeterministicSmokeAgent.revision().id,
+            )
+
+            status = await RunnerEngine(
+                repository=repo,
+                artifact_store=store,
+                adapter=adapter,
+                runtime_factory=lambda: GatewaySmokeAgent(
+                    gateway, token, handle.run_id
+                ),
+                model_budget_guard=guard,
+            ).run(handle.task_id, handle.run_id)
+
+            self.assertEqual(status, "BUDGET_EXHAUSTED")
+            self.assertEqual(repo.final_result_count(handle.task_id), 1)
+            self.assertEqual(provider.calls, 0)
+
+    async def test_transient_agent_service_error_retries_with_typed_evidence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            adapter, repo, handle, store = self.create_harness(
+                Path(directory), case_ids=("smoke-001",)
+            )
+            calls = 0
+
+            class TransientThenHealthyAgent(DeterministicSmokeAgent):
+                async def act(self, observation):
+                    nonlocal calls
+                    calls += 1
+                    if calls == 1:
+                        raise AgentServiceError("temporary outage", code="UNAVAILABLE")
+                    return await super().act(observation)
+
+            status = await RunnerEngine(
+                repository=repo,
+                artifact_store=store,
+                adapter=adapter,
+                runtime_factory=TransientThenHealthyAgent,
+            ).run(handle.task_id, handle.run_id)
+
+            self.assertEqual(status, "SUCCEEDED")
+            self.assertEqual(repo.final_result_count(handle.task_id), 1)
+            self.assertEqual(
+                repo.attempt_errors(handle.task_id),
+                ({"code": "UNAVAILABLE", "retryable": True},),
+            )
+
+    async def test_ambiguous_provider_failure_is_not_retried_by_runner(self):
+        with tempfile.TemporaryDirectory() as directory:
+            adapter, repo, handle, store = self.create_harness(
+                Path(directory), case_ids=("smoke-001",)
+            )
+            calls = 0
+
+            class AmbiguousProviderAgent(DeterministicSmokeAgent):
+                async def act(self, _observation):
+                    nonlocal calls
+                    calls += 1
+                    raise ProviderError("TIMEOUT", usage_may_have_occurred=True)
+
+            status = await RunnerEngine(
+                repository=repo,
+                artifact_store=store,
+                adapter=adapter,
+                runtime_factory=AmbiguousProviderAgent,
+            ).run(handle.task_id, handle.run_id)
+
+            self.assertEqual(status, "FAILED")
+            self.assertEqual(calls, 1)
+            self.assertEqual(
+                repo.attempt_errors(handle.task_id),
+                ({"code": "TIMEOUT", "retryable": False},),
+            )
+
+    async def test_permanent_agent_action_error_fails_without_retry(self):
+        with tempfile.TemporaryDirectory() as directory:
+            adapter, repo, handle, store = self.create_harness(
+                Path(directory), case_ids=("smoke-001",)
+            )
+            calls = 0
+
+            class InvalidActionAgent(DeterministicSmokeAgent):
+                async def act(self, _observation):
+                    nonlocal calls
+                    calls += 1
+                    raise InvalidAgentAction("unapproved tool")
+
+            status = await RunnerEngine(
+                repository=repo,
+                artifact_store=store,
+                adapter=adapter,
+                runtime_factory=InvalidActionAgent,
+            ).run(handle.task_id, handle.run_id)
+
+            self.assertEqual(status, "FAILED")
+            self.assertEqual(calls, 1)
+            self.assertEqual(
+                repo.attempt_errors(handle.task_id),
+                ({"code": "INVALID_ACTION", "retryable": False},),
+            )
 
     async def test_model_runtime_must_be_bound_to_guard_capability(self):
         with tempfile.TemporaryDirectory() as directory:

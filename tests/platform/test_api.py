@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 
 from secrl_platform.api.app import create_app
 from secrl_platform.agents.builtin import DeterministicSmokeAgent
+from secrl_platform.agents.service import manifest_sha256
 from secrl_platform.auth.passwords import hash_password
 from secrl_platform.auth.sessions import SessionStore
 from secrl_platform.benchmarks.smoke import ProtocolSmokeAdapter
@@ -18,6 +19,7 @@ from secrl_platform.storage.database import create_engine_and_session
 from sqlalchemy import func, select, text
 
 from secrl_platform.storage.orm import (
+    AgentRevisionORM,
     AppSettingORM,
     ArtifactORM,
     EvaluationTaskORM,
@@ -37,6 +39,18 @@ def valid_smoke_task():
     }
 
 
+class ManifestTransport:
+    def __init__(self, manifest):
+        self.manifest = manifest
+        self.requests = []
+
+    async def request(self, method, url, *, json_body=None, headers=None):
+        self.requests.append((method, url, json_body, headers))
+        if method == "GET" and url.endswith("/v1/manifest"):
+            return self.manifest
+        raise AssertionError((method, url))
+
+
 class ApiTest(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
@@ -54,9 +68,17 @@ class ApiTest(unittest.TestCase):
                 )
             )
         self.artifact_store = LocalArtifactStore(root / "artifacts")
+        self.settings = Settings(
+            data_dir=root,
+            master_key="00" * 32,
+            session_secret="s" * 32,
+            model_provider_allowlist=("models.invalid",),
+        )
         self.app = create_app(
+            settings=self.settings,
             session_factory=self.session_factory,
             artifact_store=self.artifact_store,
+            model_provider_resolver=lambda _host, _port: ("93.184.216.34",),
         )
         self.client = TestClient(self.app)
         self.client.__enter__()
@@ -346,6 +368,77 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(len(benchmarks.json()), 1)
         self.assertNotIn("secret", json.dumps(created_model.json()).lower())
 
+    def test_agent_service_registration_check_and_task_creation(self):
+        manifest = json.loads(
+            (Path("examples/agent_service/manifest.json")).read_text(encoding="utf-8")
+        )
+        transport = ManifestTransport(manifest)
+        settings = Settings(
+            data_dir=Path(self.directory.name),
+            master_key="00" * 32,
+            session_secret="s" * 32,
+            agent_service_allowlist=("agent-service-reference",),
+            model_provider_allowlist=("models.invalid",),
+        )
+        try:
+            app = create_app(
+                settings=settings,
+                session_factory=self.session_factory,
+                artifact_store=self.artifact_store,
+                agent_service_transport=transport,
+                agent_service_resolver=lambda _host, _port: ("127.0.0.1",),
+            )
+        except TypeError as exc:
+            self.fail(f"Agent Service API dependencies are unavailable: {exc}")
+        with TestClient(app) as client:
+            login = client.post(
+                "/api/v1/auth/login",
+                json={
+                    "username": "admin",
+                    "password": "correct horse battery staple",
+                },
+            )
+            headers = {"X-CSRF-Token": login.json()["csrf_token"]}
+            created = client.post(
+                "/api/v1/agents",
+                headers=headers,
+                json={
+                    "kind": "SERVICE",
+                    "revision_id": manifest["agent_revision_id"],
+                    "endpoint": "http://agent-service-reference",
+                    "manifest_sha256": manifest_sha256(manifest),
+                },
+            )
+            checked = client.post(
+                f"/api/v1/agents/{created.json().get('id', 'missing')}:check",
+                headers=headers,
+            )
+            task_payload = valid_smoke_task()
+            task_payload["agent_revision_id"] = created.json().get("id", "missing")
+            task = client.post(
+                "/api/v1/tasks",
+                headers=headers,
+                json=task_payload,
+            )
+
+        self.assertEqual(created.status_code, 201, created.text)
+        self.assertEqual(created.json()["kind"], "SERVICE")
+        self.assertEqual(checked.status_code, 200, checked.text)
+        self.assertEqual(checked.json()["status"], "valid")
+        self.assertEqual(task.status_code, 201, task.text)
+        self.assertEqual(len(transport.requests), 2)
+        with self.session_factory() as session:
+            service = session.get(AgentRevisionORM, created.json()["id"])
+            self.assertEqual(service.service_endpoint, "http://agent-service-reference")
+            self.assertEqual(service.service_manifest_sha256, manifest_sha256(manifest))
+            stored_task = session.get(EvaluationTaskORM, task.json()["id"])
+            task_spec = json.loads(stored_task.task_spec_json)
+            self.assertIn("agent_revision_sha256", task_spec)
+            self.assertEqual(
+                task_spec["agent_revision_sha256"],
+                service.sha256,
+            )
+
     def test_model_responses_do_not_echo_parameter_values(self):
         self.login()
         headers = {"X-CSRF-Token": self.csrf_token}
@@ -405,6 +498,70 @@ class ApiTest(unittest.TestCase):
                 session.scalar(select(func.count(ModelConfigRevisionORM.id))),
                 0,
             )
+
+    def test_model_endpoint_allowlist_rejects_unapproved_host(self):
+        try:
+            settings = Settings(
+                data_dir=Path(self.directory.name),
+                master_key="00" * 32,
+                session_secret="s" * 32,
+                model_provider_allowlist=("models.invalid",),
+            )
+        except Exception as exc:
+            self.fail(f"model provider allowlist setting is unavailable: {exc}")
+        app = create_app(
+            settings=settings,
+            session_factory=self.session_factory,
+            artifact_store=self.artifact_store,
+        )
+        with TestClient(app) as client:
+            login = client.post(
+                "/api/v1/auth/login",
+                json={
+                    "username": "admin",
+                    "password": "correct horse battery staple",
+                },
+            )
+            headers = {"X-CSRF-Token": login.json()["csrf_token"]}
+            response = client.post(
+                "/api/v1/models",
+                headers=headers,
+                json={
+                    "name": "unapproved-endpoint",
+                    "provider": "openai-compatible",
+                    "endpoint": "https://unapproved.example/v1",
+                    "model": "fixture",
+                },
+            )
+
+        self.assertEqual(response.status_code, 422)
+        self.assertEqual(response.json()["error"]["code"], "INVALID_MODEL_CONFIG")
+
+    def test_injected_session_factory_does_not_disable_model_allowlist(self):
+        app = create_app(
+            session_factory=self.session_factory,
+            artifact_store=self.artifact_store,
+        )
+        with TestClient(app) as client:
+            login = client.post(
+                "/api/v1/auth/login",
+                json={
+                    "username": "admin",
+                    "password": "correct horse battery staple",
+                },
+            )
+            response = client.post(
+                "/api/v1/models",
+                headers={"X-CSRF-Token": login.json()["csrf_token"]},
+                json={
+                    "name": "not-default-allowlisted",
+                    "provider": "openai-compatible",
+                    "endpoint": "https://models.invalid/v1",
+                    "model": "fixture",
+                },
+            )
+
+        self.assertEqual(response.status_code, 422)
 
     def test_model_config_uses_allowlist_not_secret_key_patterns(self):
         self.login()
@@ -549,7 +706,7 @@ class ApiTest(unittest.TestCase):
             session_factory = create_engine_and_session(settings.database_path)
             with session_factory() as session:
                 revision = session.scalar(text("SELECT version_num FROM alembic_version"))
-            self.assertEqual(revision, "0002_runner_attempt_fencing")
+            self.assertEqual(revision, "0003_agent_service_registration")
 
     def test_milestone_three_analysis_is_not_started(self):
         self.login()

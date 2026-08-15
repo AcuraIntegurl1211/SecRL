@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from decimal import Decimal
+from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class ApiModel(BaseModel):
@@ -56,7 +57,19 @@ class ModelCreateRequest(ApiModel):
 
 
 class AgentCreateRequest(ApiModel):
+    kind: Literal["BUILT_IN", "SERVICE"] = "BUILT_IN"
     revision_id: str
+    endpoint: str | None = Field(default=None, max_length=2048)
+    manifest_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+
+    @model_validator(mode="after")
+    def validate_kind_fields(self) -> "AgentCreateRequest":
+        if self.kind == "BUILT_IN":
+            if self.endpoint is not None or self.manifest_sha256 is not None:
+                raise ValueError("built-in agent registration has service fields")
+        elif self.endpoint is None or self.manifest_sha256 is None:
+            raise ValueError("service agent registration requires endpoint and manifest hash")
+        return self
 
 
 class ReviewCreateRequest(ApiModel):

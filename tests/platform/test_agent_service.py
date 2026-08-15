@@ -35,7 +35,12 @@ from secrl_platform.benchmarks.protocol import Observation
 from secrl_platform.config import Settings
 from secrl_platform.models.gateway import ModelGateway
 from secrl_platform.models.pricing import Pricing
-from secrl_platform.models.providers import ModelRequest, ModelResponse, Usage
+from secrl_platform.models.providers import (
+    ModelRequest,
+    ModelResponse,
+    ProviderError,
+    Usage,
+)
 from tests.platform.test_agent_protocol import smoke_episode_context
 
 
@@ -578,11 +583,19 @@ class AgentServiceTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(provider.calls, 1)
 
     async def test_gateway_fails_closed_when_usage_or_pricing_is_missing(self):
-        for response, pricing in (
-            (ModelResponse(text="ok", usage=None), Pricing(1, 1)),
-            (ModelResponse(text="ok", usage=Usage(prompt=1, completion=1)), Pricing()),
+        for response, pricing, expected_consumed in (
+            (ModelResponse(text="ok", usage=None), Pricing(1, 1), True),
+            (
+                ModelResponse(text="ok", usage=Usage(prompt=1, completion=1)),
+                Pricing(),
+                False,
+            ),
         ):
-            with self.subTest(response=response, pricing=pricing):
+            with self.subTest(
+                response=response,
+                pricing=pricing,
+                expected_consumed=expected_consumed,
+            ):
                 signer = CapabilitySigner(
                     b"e" * 32,
                     now=lambda: 1_000,
@@ -614,6 +627,165 @@ class AgentServiceTest(unittest.IsolatedAsyncioTestCase):
                 )
                 with self.assertRaises(CapabilityBudgetError):
                     await gateway.complete(request)
+                snapshot = signer.budget_snapshot(
+                    token,
+                    expected_run="run-1",
+                    expected_agent=DeterministicSmokeAgent.revision().id,
+                )
+                self.assertEqual(snapshot.reserved_tokens, 0)
+                if expected_consumed:
+                    self.assertGreater(snapshot.consumed_tokens, 0)
+                else:
+                    self.assertEqual(snapshot.consumed_tokens, 0)
+
+    async def test_terminal_rate_limit_releases_reservation_for_safe_replay(self):
+        signer = CapabilitySigner(
+            b"j" * 32,
+            now=lambda: 1_000,
+            budget_store=InMemoryCapabilityBudgetStore(),
+        )
+        token = signer.issue(valid_claims(max_tokens=1_000, max_cost="1"))
+
+        class Provider:
+            calls = 0
+
+            async def complete(self, _request):
+                self.calls += 1
+                if self.calls == 1:
+                    raise ProviderError("RATE_LIMITED", retry_after=0)
+                return ModelResponse(text="ok", usage=Usage(prompt=1, completion=1))
+
+        provider = Provider()
+        gateway = ModelGateway(
+            provider=provider,
+            pricing=Pricing(input_per_million=1, output_per_million=1),
+            capability_signer=signer,
+        )
+        request = ModelRequest(
+            provider_adapter_version="v1",
+            model_role="agent",
+            model="fixture",
+            messages=({"role": "user", "content": "hello"},),
+            run_id="run-1",
+            case_id="case-1",
+            attempt_id="attempt-1",
+            agent_revision_id=DeterministicSmokeAgent.revision().id,
+            capability_token=token,
+            request_id="safe-replay-after-429",
+            max_output_tokens=1,
+            max_attempts=1,
+        )
+
+        with self.assertRaises(ProviderError):
+            await gateway.complete(request)
+        after_failure = signer.budget_snapshot(
+            token,
+            expected_run="run-1",
+            expected_agent=DeterministicSmokeAgent.revision().id,
+        )
+        self.assertEqual(after_failure.reserved_tokens, 0)
+        self.assertEqual(after_failure.consumed_tokens, 0)
+
+        result = await gateway.complete(request)
+
+        self.assertEqual(result.text, "ok")
+        self.assertEqual(provider.calls, 2)
+
+    async def test_ambiguous_timeout_consumes_reservation_and_blocks_replay(self):
+        signer = CapabilitySigner(
+            b"k" * 32,
+            now=lambda: 1_000,
+            budget_store=InMemoryCapabilityBudgetStore(),
+        )
+        token = signer.issue(valid_claims(max_tokens=1_000, max_cost="1"))
+        timeout = ProviderError("TIMEOUT")
+        timeout.usage_may_have_occurred = True
+
+        class Provider:
+            calls = 0
+
+            async def complete(self, _request):
+                self.calls += 1
+                raise timeout
+
+        provider = Provider()
+        gateway = ModelGateway(
+            provider=provider,
+            pricing=Pricing(input_per_million=1, output_per_million=1),
+            capability_signer=signer,
+        )
+        request = ModelRequest(
+            provider_adapter_version="v1",
+            model_role="agent",
+            model="fixture",
+            messages=({"role": "user", "content": "hello"},),
+            run_id="run-1",
+            case_id="case-1",
+            attempt_id="attempt-1",
+            agent_revision_id=DeterministicSmokeAgent.revision().id,
+            capability_token=token,
+            request_id="ambiguous-timeout",
+            max_output_tokens=1,
+            max_attempts=1,
+        )
+
+        with self.assertRaises(ProviderError):
+            await gateway.complete(request)
+        after_failure = signer.budget_snapshot(
+            token,
+            expected_run="run-1",
+            expected_agent=DeterministicSmokeAgent.revision().id,
+        )
+        self.assertEqual(after_failure.reserved_tokens, 0)
+        self.assertGreater(after_failure.consumed_tokens, 0)
+
+        with self.assertRaises(CapabilityRequestCompleted):
+            await gateway.complete(request)
+        self.assertEqual(provider.calls, 1)
+
+    async def test_ambiguous_timeout_is_not_automatically_retried(self):
+        signer = CapabilitySigner(
+            b"l" * 32,
+            now=lambda: 1_000,
+            budget_store=InMemoryCapabilityBudgetStore(),
+        )
+        token = signer.issue(valid_claims(max_tokens=1_000, max_cost="1"))
+
+        class Provider:
+            calls = 0
+
+            async def complete(self, _request):
+                self.calls += 1
+                raise ProviderError(
+                    "TIMEOUT",
+                    usage_may_have_occurred=True,
+                )
+
+        provider = Provider()
+        gateway = ModelGateway(
+            provider=provider,
+            pricing=Pricing(input_per_million=1, output_per_million=1),
+            capability_signer=signer,
+        )
+        request = ModelRequest(
+            provider_adapter_version="v1",
+            model_role="agent",
+            model="fixture",
+            messages=({"role": "user", "content": "hello"},),
+            run_id="run-1",
+            case_id="case-1",
+            attempt_id="attempt-1",
+            agent_revision_id=DeterministicSmokeAgent.revision().id,
+            capability_token=token,
+            request_id="ambiguous-no-auto-retry",
+            max_output_tokens=1,
+            max_attempts=3,
+        )
+
+        with self.assertRaises(ProviderError):
+            await gateway.complete(request)
+
+        self.assertEqual(provider.calls, 1)
 
     async def test_gateway_derives_reservation_and_rejects_tiny_budget_before_dispatch(self):
         signer = CapabilitySigner(

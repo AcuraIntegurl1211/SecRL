@@ -13,7 +13,9 @@ ALLOWED_TRANSITIONS = {
             "CANCELED",
         }
     ),
-    "PAUSE_REQUESTED": frozenset({"PAUSED", "FAILED", "CANCELED"}),
+    "PAUSE_REQUESTED": frozenset(
+        {"PAUSED", "FAILED", "BUDGET_EXHAUSTED", "CANCELED"}
+    ),
     "PAUSED": frozenset({"QUEUED", "CANCELED"}),
     "SUCCEEDED": frozenset(),
     "FAILED": frozenset({"QUEUED"}),

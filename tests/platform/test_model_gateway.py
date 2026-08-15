@@ -51,6 +51,10 @@ async def no_wait(_seconds):
     return None
 
 
+def public_resolver(_host, _port):
+    return ("93.184.216.34",)
+
+
 class ModelGatewayTest(unittest.IsolatedAsyncioTestCase):
     async def test_429_retries_and_records_one_successful_usage(self):
         provider = FakeProvider(
@@ -148,6 +152,66 @@ class ModelGatewayTest(unittest.IsolatedAsyncioTestCase):
 
 
 class OpenAICompatibleProviderTest(unittest.IsolatedAsyncioTestCase):
+    def test_endpoint_policy_rejects_unallowlisted_and_private_hosts(self):
+        def provider_for(base_url, *, allowed_hosts, resolver):
+            try:
+                return OpenAICompatibleProvider(
+                    base_url=base_url,
+                    api_key="test-provider-key",
+                    allowed_hosts=allowed_hosts,
+                    resolver=resolver,
+                )
+            except TypeError as exc:
+                self.fail(f"provider endpoint policy is unavailable: {exc}")
+
+        with self.assertRaises(ValueError):
+            provider_for(
+                "https://unapproved.example/v1",
+                allowed_hosts=("provider.example",),
+                resolver=lambda _host, _port: ("93.184.216.34",),
+            )
+        with self.assertRaises(ValueError):
+            provider_for(
+                "https://provider.example/v1",
+                allowed_hosts=("provider.example",),
+                resolver=lambda _host, _port: ("127.0.0.1",),
+            )
+
+    async def test_injected_client_cannot_follow_provider_redirect(self):
+        seen_hosts = []
+
+        def handler(request):
+            seen_hosts.append(request.url.host)
+            if request.url.host == "provider.example":
+                return httpx.Response(
+                    302,
+                    headers={"Location": "http://169.254.169.254/latest"},
+                )
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [{"message": {"content": "unsafe"}}],
+                    "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+                },
+            )
+
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            follow_redirects=True,
+        ) as client:
+            provider = OpenAICompatibleProvider(
+                base_url="https://provider.example/v1",
+                api_key="test-provider-key",
+                client=client,
+                allowed_hosts=("provider.example",),
+                resolver=public_resolver,
+            )
+            with self.assertRaises(ProviderError) as raised:
+                await provider.complete(model_request())
+
+        self.assertEqual(raised.exception.code, "PROVIDER_REDIRECT")
+        self.assertEqual(seen_hosts, ["provider.example"])
+
     async def test_normalizes_successful_response_and_sends_bearer_token(self):
         seen_authorization = []
 
@@ -172,6 +236,8 @@ class OpenAICompatibleProviderTest(unittest.IsolatedAsyncioTestCase):
                 base_url="https://provider.invalid/v1",
                 api_key="test-provider-key",
                 client=client,
+                allowed_hosts=("provider.invalid",),
+                resolver=public_resolver,
             )
             response = await provider.complete(model_request())
 
@@ -180,6 +246,24 @@ class OpenAICompatibleProviderTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.usage.cached, 1)
         self.assertEqual(response.usage.reasoning, 1)
         self.assertEqual(seen_authorization, ["Bearer test-provider-key"])
+
+    async def test_invalid_success_response_is_treated_as_ambiguous_usage(self):
+        transport = httpx.MockTransport(
+            lambda _request: httpx.Response(200, json={"choices": []})
+        )
+        async with httpx.AsyncClient(transport=transport) as client:
+            provider = OpenAICompatibleProvider(
+                base_url="https://provider.invalid/v1",
+                api_key="test-provider-key",
+                client=client,
+                allowed_hosts=("provider.invalid",),
+                resolver=public_resolver,
+            )
+            with self.assertRaises(ProviderError) as raised:
+                await provider.complete(model_request())
+
+        self.assertEqual(raised.exception.code, "INVALID_PROVIDER_RESPONSE")
+        self.assertTrue(raised.exception.usage_may_have_occurred)
 
     async def test_classifies_permanent_and_transient_statuses(self):
         statuses = [
@@ -201,6 +285,8 @@ class OpenAICompatibleProviderTest(unittest.IsolatedAsyncioTestCase):
                         base_url="https://provider.invalid/v1",
                         api_key="test-provider-key",
                         client=client,
+                        allowed_hosts=("provider.invalid",),
+                        resolver=public_resolver,
                     )
                     with self.assertRaises(ProviderError) as raised:
                         await provider.complete(model_request())

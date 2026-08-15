@@ -12,6 +12,7 @@ from secrl_platform.agents.capabilities import (
     CapabilitySigner,
 )
 from secrl_platform.agents.protocol import AgentRuntime, EpisodeContext, UsageSnapshot
+from secrl_platform.agents.service import AgentServiceError
 from secrl_platform.benchmarks.protocol import (
     EvaluationResult,
     Scope,
@@ -20,6 +21,7 @@ from secrl_platform.benchmarks.protocol import (
     ToolCallAction,
 )
 from secrl_platform.benchmarks.smoke import ProtocolSmokeAdapter
+from secrl_platform.models.providers import ProviderError
 from secrl_platform.runner.recovery import RunnerRepository, StoredCase
 from secrl_platform.storage.artifacts import (
     ArtifactIntegrityError,
@@ -27,6 +29,9 @@ from secrl_platform.storage.artifacts import (
     LocalArtifactStore,
 )
 from secrl_platform.storage.repositories import canonical_json
+
+
+MAX_PLATFORM_ATTEMPTS = 3
 
 
 class RunnerEngine:
@@ -82,7 +87,7 @@ class RunnerEngine:
                         self._repository.model_budget_anchor(task_id, run_id)
                     )
                 budget_baseline = guard.usage() if guard is not None else None
-                trajectory, result, usage = await self._run_case(
+                trajectory, result, usage, budget_exhausted = await self._run_case(
                     run_id=run_id,
                     stored_case=stored_case,
                     case=case_by_id[stored_case.external_id],
@@ -92,6 +97,32 @@ class RunnerEngine:
                     budget_baseline=budget_baseline,
                 )
                 budget_anchor = guard.usage() if guard is not None else None
+            except (AgentServiceError, ProviderError) as exc:
+                safely_retryable = exc.transient and not (
+                    isinstance(exc, ProviderError) and exc.usage_may_have_occurred
+                )
+                if safely_retryable and attempt.number < MAX_PLATFORM_ATTEMPTS:
+                    self._repository.retry_attempt(
+                        run_id=run_id,
+                        attempt_id=attempt.id,
+                        code=exc.code,
+                    )
+                    continue
+                return self._repository.fail_attempt(
+                    task_id=task_id,
+                    run_id=run_id,
+                    attempt_id=attempt.id,
+                    code=exc.code,
+                    retryable=safely_retryable,
+                )
+            except CapabilityBudgetError:
+                return self._repository.fail_attempt(
+                    task_id=task_id,
+                    run_id=run_id,
+                    attempt_id=attempt.id,
+                    code="CAPABILITY_BUDGET_ERROR",
+                    retryable=False,
+                )
             except Exception:
                 return self._repository.fail_attempt(
                     task_id=task_id,
@@ -130,6 +161,7 @@ class RunnerEngine:
                 result=result.model_dump(mode="json"),
                 usage=usage,
                 budget_anchor=budget_anchor,
+                budget_exhausted=budget_exhausted,
                 case_count=len(cases),
             )
             if status != "RUNNING":
@@ -146,12 +178,13 @@ class RunnerEngine:
         runtime: AgentRuntime,
         budget_guard: "CapabilityBudgetGuard | None",
         budget_baseline: UsageSnapshot | None,
-    ) -> tuple[dict[str, Any], EvaluationResult, UsageSnapshot]:
+    ) -> tuple[dict[str, Any], EvaluationResult, UsageSnapshot, bool]:
         lease = self._adapter.prepare_scenario(case.scenario)
         episode = None
         exchanges: list[dict[str, Any]] = []
         result: EvaluationResult | None = None
         usage = UsageSnapshot()
+        budget_exhausted = False
         runtime_started = False
         heartbeat = asyncio.create_task(self._heartbeat_loop(run_id))
         try:
@@ -171,6 +204,7 @@ class RunnerEngine:
             runtime_started = True
             for sequence in range(1, context.max_steps + 1):
                 if budget_guard is not None and budget_guard.exhausted():
+                    budget_exhausted = True
                     result = EvaluationResult(
                         reward=0.0,
                         correct=False,
@@ -180,6 +214,7 @@ class RunnerEngine:
                 try:
                     action = await runtime.act(observation)
                 except CapabilityBudgetError:
+                    budget_exhausted = True
                     result = EvaluationResult(
                         reward=0.0,
                         correct=False,
@@ -254,7 +289,7 @@ class RunnerEngine:
             "result": result.model_dump(mode="json"),
             "usage": usage.model_dump(mode="json"),
         }
-        return trajectory, result, usage
+        return trajectory, result, usage, budget_exhausted
 
     async def _heartbeat_loop(self, run_id: str) -> None:
         while True:

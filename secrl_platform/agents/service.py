@@ -182,7 +182,7 @@ class AgentServiceRuntime:
         self._config = config
         self._transport = transport
         self._resolver = resolver or _resolve_host
-        self._endpoint = _validated_endpoint(config, _policy, self._resolver)
+        self._endpoint = _validated_endpoint(config.endpoint, _policy, self._resolver)
         self._session_id: str | None = None
         self._episode: EpisodeContext | None = None
         self._sequence = 0
@@ -347,16 +347,7 @@ class AgentServiceRuntime:
             f"{self._endpoint.connect_base}/v1/manifest",
             headers={"Host": self._endpoint.host_header},
         )
-        try:
-            manifest = ServiceManifest.model_validate(manifest_payload)
-        except ValueError as exc:
-            raise AgentServiceProtocolError(
-                "agent service returned an invalid manifest"
-            ) from exc
-        if manifest.protocol_version != "1":
-            raise AgentServiceProtocolError(
-                "agent service protocol version is not supported"
-            )
+        manifest = _service_manifest_from_payload(manifest_payload)
         if manifest.agent_revision_id != self._config.agent_revision_id:
             raise AgentServiceProtocolError(
                 "agent service revision does not match registration"
@@ -380,6 +371,36 @@ def manifest_sha256(manifest: dict[str, Any]) -> str:
         sort_keys=True,
     ).encode("utf-8")
     return hashlib.sha256(payload).hexdigest()
+
+
+async def inspect_agent_service(
+    *,
+    endpoint: str,
+    transport: AgentServiceTransport,
+    policy: AgentServiceEndpointPolicy,
+    resolver: Callable[[str, int], object] | None = None,
+) -> ServiceManifest:
+    resolved = _validated_endpoint(endpoint, policy, resolver or _resolve_host)
+    manifest_payload = await transport.request(
+        "GET",
+        f"{resolved.connect_base}/v1/manifest",
+        headers={"Host": resolved.host_header},
+    )
+    return _service_manifest_from_payload(manifest_payload)
+
+
+def _service_manifest_from_payload(manifest_payload: dict[str, Any]) -> ServiceManifest:
+    try:
+        manifest = ServiceManifest.model_validate(manifest_payload)
+    except ValueError as exc:
+        raise AgentServiceProtocolError(
+            "agent service returned an invalid manifest"
+        ) from exc
+    if manifest.protocol_version != "1":
+        raise AgentServiceProtocolError(
+            "agent service protocol version is not supported"
+        )
+    return manifest
 
 
 def _http_service_error(response: httpx.Response) -> AgentServiceError:
@@ -407,11 +428,11 @@ class _ResolvedEndpoint(BaseModel):
 
 
 def _validated_endpoint(
-    config: ServiceConfig,
+    endpoint: str,
     policy: AgentServiceEndpointPolicy,
     resolver: Callable[[str, int], object],
 ) -> _ResolvedEndpoint:
-    parsed = urlsplit(config.endpoint)
+    parsed = urlsplit(endpoint)
     if parsed.scheme != "http":
         raise ValueError(
             "Agent Service Protocol v1 endpoints must use pinned internal HTTP"

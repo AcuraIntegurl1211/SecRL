@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -14,10 +15,15 @@ from sqlalchemy.orm import Session, sessionmaker
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from secrl_platform.api.dependencies import ApiContext
+from secrl_platform.agents.service import AgentServiceTransport
 from secrl_platform.api.errors import ApiError, error_payload
 from secrl_platform.api.routes import artifacts, auth, resources, runs, tasks
 from secrl_platform.auth.sessions import SessionStore
-from secrl_platform.config import Settings
+from secrl_platform.config import (
+    DEFAULT_AGENT_SERVICE_ALLOWLIST,
+    DEFAULT_MODEL_PROVIDER_ALLOWLIST,
+    Settings,
+)
 from secrl_platform.storage.artifacts import LocalArtifactStore
 from secrl_platform.storage.database import create_engine_and_session
 
@@ -27,6 +33,9 @@ def create_app(
     settings: Settings | None = None,
     session_factory: sessionmaker[Session] | None = None,
     artifact_store: LocalArtifactStore | None = None,
+    model_provider_resolver: Callable[[str, int], object] | None = None,
+    agent_service_transport: AgentServiceTransport | None = None,
+    agent_service_resolver: Callable[[str, int], object] | None = None,
 ) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -36,6 +45,10 @@ def create_app(
             app.state.api_context = _context(
                 create_engine_and_session(effective_settings.database_path),
                 LocalArtifactStore(effective_settings.artifact_dir),
+                effective_settings,
+                model_provider_resolver,
+                agent_service_transport,
+                agent_service_resolver,
             )
         yield
 
@@ -51,6 +64,10 @@ def create_app(
         app.state.api_context = _context(
             session_factory,
             artifact_store or LocalArtifactStore("/tmp/secrl-lite-artifacts"),
+            settings,
+            model_provider_resolver,
+            agent_service_transport,
+            agent_service_resolver,
         )
 
     @app.middleware("http")
@@ -151,11 +168,28 @@ def create_app(
 def _context(
     session_factory: sessionmaker[Session],
     artifact_store: LocalArtifactStore,
+    settings: Settings | None,
+    model_provider_resolver: Callable[[str, int], object] | None,
+    agent_service_transport: AgentServiceTransport | None,
+    agent_service_resolver: Callable[[str, int], object] | None,
 ) -> ApiContext:
     return ApiContext(
         session_factory=session_factory,
         artifact_store=artifact_store,
         sessions=SessionStore(session_factory),
+        model_provider_allowlist=(
+            settings.model_provider_allowlist
+            if settings is not None
+            else DEFAULT_MODEL_PROVIDER_ALLOWLIST
+        ),
+        model_provider_resolver=model_provider_resolver,
+        agent_service_allowlist=(
+            settings.agent_service_allowlist
+            if settings is not None
+            else DEFAULT_AGENT_SERVICE_ALLOWLIST
+        ),
+        agent_service_transport=agent_service_transport,
+        agent_service_resolver=agent_service_resolver,
     )
 
 

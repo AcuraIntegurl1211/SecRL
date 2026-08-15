@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from collections.abc import Callable
 
 from fastapi import Depends, Request
 from sqlalchemy.orm import Session, sessionmaker
 
 from secrl_platform.api.errors import ApiError
+from secrl_platform.agents.service import AgentServiceTransport
 from secrl_platform.auth.sessions import CSRF_HEADER, SESSION_COOKIE, SessionStore
 from secrl_platform.storage.artifacts import LocalArtifactStore
 from secrl_platform.storage.orm import LocalUserORM
@@ -16,6 +18,11 @@ class ApiContext:
     session_factory: sessionmaker[Session]
     artifact_store: LocalArtifactStore
     sessions: SessionStore
+    model_provider_allowlist: tuple[str, ...]
+    model_provider_resolver: Callable[[str, int], object] | None
+    agent_service_allowlist: tuple[str, ...]
+    agent_service_transport: AgentServiceTransport | None
+    agent_service_resolver: Callable[[str, int], object] | None
 
 
 def get_context(request: Request) -> ApiContext:

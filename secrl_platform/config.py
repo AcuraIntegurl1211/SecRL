@@ -5,6 +5,10 @@ from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+DEFAULT_AGENT_SERVICE_ALLOWLIST = ("agent-service-reference",)
+DEFAULT_MODEL_PROVIDER_ALLOWLIST = ("api.openai.com",)
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="SECRL_", env_file=".env")
 
@@ -14,7 +18,8 @@ class Settings(BaseSettings):
     host: str = "0.0.0.0"
     port: int = 8080
     runner_poll_seconds: float = 1.0
-    agent_service_allowlist: tuple[str, ...] = ("agent-service-reference",)
+    agent_service_allowlist: tuple[str, ...] = DEFAULT_AGENT_SERVICE_ALLOWLIST
+    model_provider_allowlist: tuple[str, ...] = DEFAULT_MODEL_PROVIDER_ALLOWLIST
 
     @field_validator("master_key")
     @classmethod

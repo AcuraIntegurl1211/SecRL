@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import math
+import ipaddress
+import socket
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
+from collections.abc import Callable
 from typing import Any, Literal, Protocol
+from urllib.parse import urlsplit
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
@@ -68,10 +72,17 @@ class ModelResponse(ProviderModel):
 class ProviderError(RuntimeError):
     TRANSIENT_CODES = frozenset({"TIMEOUT", "RATE_LIMITED", "PROVIDER_UNAVAILABLE"})
 
-    def __init__(self, code: str, *, retry_after: float | None = None) -> None:
+    def __init__(
+        self,
+        code: str,
+        *,
+        retry_after: float | None = None,
+        usage_may_have_occurred: bool = False,
+    ) -> None:
         super().__init__(f"model provider request failed: {code}")
         self.code = code
         self.retry_after = retry_after
+        self.usage_may_have_occurred = usage_may_have_occurred
 
     @property
     def transient(self) -> bool:
@@ -89,22 +100,36 @@ class OpenAICompatibleProvider:
         base_url: str,
         api_key: str,
         client: httpx.AsyncClient | None = None,
+        allowed_hosts: tuple[str, ...],
+        resolver: Callable[[str, int], object] | None = None,
     ) -> None:
-        self._base_url = base_url.rstrip("/")
+        self._resolver = resolver or _resolve_host
+        self._allowed_hosts = allowed_hosts
+        self._base_url = validate_model_endpoint(
+            base_url,
+            allowed_hosts=allowed_hosts,
+            resolver=self._resolver,
+        ).rstrip("/")
         self._api_key = api_key
         self._client = client
 
     async def complete(self, request: ModelRequest) -> ModelResponse:
+        validate_model_endpoint(
+            self._base_url,
+            allowed_hosts=self._allowed_hosts,
+            resolver=self._resolver,
+        )
         payload = provider_payload(request)
         headers = {"Authorization": f"Bearer {self._api_key}"}
         try:
             if self._client is None:
-                async with httpx.AsyncClient() as client:
+                async with httpx.AsyncClient(follow_redirects=False) as client:
                     response = await client.post(
                         f"{self._base_url}/chat/completions",
                         json=payload,
                         headers=headers,
                         timeout=request.timeout_seconds,
+                        follow_redirects=False,
                     )
             else:
                 response = await self._client.post(
@@ -112,12 +137,25 @@ class OpenAICompatibleProvider:
                     json=payload,
                     headers=headers,
                     timeout=request.timeout_seconds,
+                    follow_redirects=False,
                 )
         except httpx.TimeoutException as exc:
-            raise ProviderError("TIMEOUT") from exc
+            usage_may_have_occurred = not isinstance(
+                exc,
+                (httpx.ConnectTimeout, httpx.PoolTimeout),
+            )
+            raise ProviderError(
+                "TIMEOUT",
+                usage_may_have_occurred=usage_may_have_occurred,
+            ) from exc
         except httpx.RequestError as exc:
-            raise ProviderError("PROVIDER_UNAVAILABLE") from exc
+            raise ProviderError(
+                "PROVIDER_UNAVAILABLE",
+                usage_may_have_occurred=not isinstance(exc, httpx.ConnectError),
+            ) from exc
 
+        if 300 <= response.status_code < 400:
+            raise ProviderError("PROVIDER_REDIRECT")
         if response.status_code >= 400:
             raise _status_error(response)
         try:
@@ -127,7 +165,10 @@ class OpenAICompatibleProvider:
             usage = _normalize_usage(raw_usage) if raw_usage is not None else None
             request_id = body.get("id")
         except (KeyError, IndexError, TypeError, ValueError) as exc:
-            raise ProviderError("INVALID_PROVIDER_RESPONSE") from exc
+            raise ProviderError(
+                "INVALID_PROVIDER_RESPONSE",
+                usage_may_have_occurred=True,
+            ) from exc
         return ModelResponse(
             text=text,
             usage=usage,
@@ -145,6 +186,54 @@ def provider_payload(request: ModelRequest) -> dict[str, Any]:
     if request.max_output_tokens is not None:
         payload["max_tokens"] = request.max_output_tokens
     return payload
+
+
+def validate_model_endpoint(
+    base_url: str,
+    *,
+    allowed_hosts: tuple[str, ...] | None,
+    resolver: Callable[[str, int], object] | None = None,
+) -> str:
+    parsed = urlsplit(base_url)
+    if parsed.scheme != "https" or not parsed.hostname:
+        raise ValueError("model provider endpoint must use HTTPS")
+    if parsed.username is not None or parsed.password is not None:
+        raise ValueError("model provider endpoint must not include user information")
+    if parsed.query or parsed.fragment:
+        raise ValueError("model provider endpoint must not include query or fragment")
+    host = parsed.hostname.lower()
+    try:
+        literal = ipaddress.ip_address(host)
+    except ValueError:
+        literal = None
+    if literal is not None and not literal.is_global:
+        raise ValueError("model provider endpoint must not use a private address")
+    if allowed_hosts is None:
+        return base_url
+    normalized_allowlist = {value.lower() for value in allowed_hosts}
+    if host not in normalized_allowlist:
+        raise ValueError("model provider host is not allowlisted")
+    port = parsed.port or 443
+    resolve = resolver or _resolve_host
+    try:
+        raw_addresses = resolve(host, port)
+        addresses = tuple(str(address) for address in raw_addresses)
+    except (OSError, TypeError) as exc:
+        raise ValueError("model provider host could not be resolved") from exc
+    if not addresses:
+        raise ValueError("model provider host did not resolve to an address")
+    try:
+        parsed_addresses = tuple(ipaddress.ip_address(value) for value in addresses)
+    except ValueError as exc:
+        raise ValueError("model provider host returned an invalid address") from exc
+    if any(not address.is_global for address in parsed_addresses):
+        raise ValueError("model provider host resolved to a non-global address")
+    return base_url
+
+
+def _resolve_host(host: str, port: int) -> tuple[str, ...]:
+    results = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    return tuple(sorted({result[4][0] for result in results}))
 
 
 def _status_error(response: httpx.Response) -> ProviderError:

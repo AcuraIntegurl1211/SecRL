@@ -218,6 +218,11 @@ class AgentRevisionORM(TimestampedORM, Base):
     manifest_json: Mapped[str] = mapped_column(Text)
     parameter_schema_json: Mapped[str] = mapped_column(Text)
     sha256: Mapped[str] = mapped_column(String(64), unique=True)
+    service_endpoint: Mapped[str | None] = mapped_column(Text, nullable=True)
+    service_manifest_sha256: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
+    )
 
 
 class EvaluationTaskORM(TimestampedORM, Base):

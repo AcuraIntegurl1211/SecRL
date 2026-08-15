@@ -53,6 +53,8 @@ class ModelGateway:
 
     async def complete(self, request: ModelRequest) -> GatewayResponse:
         token: str | None = None
+        reservation_usage: Usage | None = None
+        reservation_cost: Decimal | None = None
         if self._capability_signer is not None:
             if request.capability_token is None or request.agent_revision_id is None:
                 raise InvalidCapability("model request requires a capability token")
@@ -103,15 +105,34 @@ class ModelGateway:
             try:
                 response = await self._provider.complete(request)
             except ProviderError as exc:
-                if not exc.transient or attempt == request.max_attempts:
-                    if not exc.transient and token is not None:
-                        self._capability_signer.cancel_reservation(
-                            token,
-                            request_id=request.request_id,
-                            expected_run=request.run_id,
-                            expected_agent=request.agent_revision_id,
-                            model_role=request.model_role,
-                        )
+                if (
+                    exc.usage_may_have_occurred
+                    or not exc.transient
+                    or attempt == request.max_attempts
+                ):
+                    if token is not None:
+                        if reservation_usage is None or reservation_cost is None:
+                            raise RuntimeError(
+                                "capability reservation state is missing"
+                            ) from exc
+                        if exc.usage_may_have_occurred:
+                            self._capability_signer.reconcile_usage(
+                                token,
+                                request_id=request.request_id,
+                                actual_tokens=reservation_usage.total,
+                                actual_cost=reservation_cost,
+                                expected_run=request.run_id,
+                                expected_agent=request.agent_revision_id,
+                                model_role=request.model_role,
+                            )
+                        else:
+                            self._capability_signer.cancel_reservation(
+                                token,
+                                request_id=request.request_id,
+                                expected_run=request.run_id,
+                                expected_agent=request.agent_revision_id,
+                                model_role=request.model_role,
+                            )
                     raise
                 delay = exc.retry_after
                 if delay is None or not math.isfinite(delay):
@@ -122,18 +143,43 @@ class ModelGateway:
             estimated_cost = self._pricing.estimate(response.usage)
             if self._capability_signer is not None and token is not None:
                 if response.usage is None or estimated_cost is None:
+                    if reservation_usage is None or reservation_cost is None:
+                        raise RuntimeError("capability reservation state is missing")
+                    self._capability_signer.reconcile_usage(
+                        token,
+                        request_id=request.request_id,
+                        actual_tokens=reservation_usage.total,
+                        actual_cost=reservation_cost,
+                        expected_run=request.run_id,
+                        expected_agent=request.agent_revision_id,
+                        model_role=request.model_role,
+                    )
                     raise CapabilityBudgetError(
                         "budgeted model response requires usage and pricing"
                     )
-                self._capability_signer.reconcile_usage(
-                    token,
-                    request_id=request.request_id,
-                    actual_tokens=response.usage.total,
-                    actual_cost=estimated_cost,
-                    expected_run=request.run_id,
-                    expected_agent=request.agent_revision_id,
-                    model_role=request.model_role,
-                )
+                try:
+                    self._capability_signer.reconcile_usage(
+                        token,
+                        request_id=request.request_id,
+                        actual_tokens=response.usage.total,
+                        actual_cost=estimated_cost,
+                        expected_run=request.run_id,
+                        expected_agent=request.agent_revision_id,
+                        model_role=request.model_role,
+                    )
+                except CapabilityBudgetError:
+                    if reservation_usage is None or reservation_cost is None:
+                        raise RuntimeError("capability reservation state is missing")
+                    self._capability_signer.reconcile_usage(
+                        token,
+                        request_id=request.request_id,
+                        actual_tokens=reservation_usage.total,
+                        actual_cost=reservation_cost,
+                        expected_run=request.run_id,
+                        expected_agent=request.agent_revision_id,
+                        model_role=request.model_role,
+                    )
+                    raise
             return GatewayResponse(
                 text=response.text,
                 usage=response.usage,

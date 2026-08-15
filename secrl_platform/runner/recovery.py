@@ -187,6 +187,7 @@ class RunnerRepository:
                 "benchmark_id": manifest.benchmark_id,
                 "dataset_sha256": dataset_ref.sha256,
                 "agent_revision_id": agent_revision.id,
+                "agent_revision_sha256": agent_revision.manifest_sha256,
                 "case_ids": [case.id for case in cases],
                 "budget": frozen_budget,
             }
@@ -314,6 +315,7 @@ class RunnerRepository:
         result: dict[str, Any],
         usage: UsageSnapshot,
         budget_anchor: UsageSnapshot | None,
+        budget_exhausted: bool,
         case_count: int,
     ) -> str:
         with self._session_factory.begin() as session:
@@ -369,14 +371,14 @@ class RunnerRepository:
                 _transition_task(task, "CANCELED")
                 run.status = "CANCELED"
                 task.finished_at = utc_now()
+            elif budget_exhausted or self._budget_reached(session, task, run_id):
+                _transition_task(task, "BUDGET_EXHAUSTED")
+                run.status = "FAILED"
+                task.finished_at = utc_now()
             elif task.status == "PAUSE_REQUESTED" or run.pause_requested:
                 _transition_task(task, "PAUSED")
                 run.status = "QUEUED"
                 run.pause_requested = False
-            elif self._budget_reached(session, task, run_id):
-                _transition_task(task, "BUDGET_EXHAUSTED")
-                run.status = "FAILED"
-                task.finished_at = utc_now()
             elif run.next_case_index >= case_count:
                 _transition_task(task, "SUCCEEDED")
                 run.status = "SUCCEEDED"
@@ -432,6 +434,7 @@ class RunnerRepository:
         run_id: str,
         attempt_id: str,
         code: str,
+        retryable: bool | None = None,
     ) -> str:
         with self._session_factory.begin() as session:
             task, run = self._get_task_run(session, task_id, run_id)
@@ -441,12 +444,36 @@ class RunnerRepository:
                 raise KeyError(attempt_id)
             attempt.status = "FAILED"
             attempt.is_final = False
-            attempt.error_json = canonical_json({"code": code})
+            error = {"code": code}
+            if retryable is not None:
+                error["retryable"] = retryable
+            attempt.error_json = canonical_json(error)
             _transition_task(task, "FAILED")
             task.finished_at = utc_now()
             run.status = "FAILED"
             self._release_lease(session, run_id)
             return task.status
+
+    def retry_attempt(
+        self,
+        *,
+        run_id: str,
+        attempt_id: str,
+        code: str,
+    ) -> None:
+        with self._session_factory.begin() as session:
+            self._require_lease(session, run_id)
+            attempt = session.get(CaseAttemptORM, attempt_id)
+            if attempt is None or attempt.run_id != run_id:
+                raise KeyError(attempt_id)
+            if attempt.status != "RUNNING":
+                raise RuntimeError("case attempt is not active")
+            attempt.status = "FAILED"
+            attempt.is_final = False
+            attempt.error_json = canonical_json(
+                {"code": code, "retryable": True}
+            )
+            self._renew_lease(session, run_id)
 
     def heartbeat(self, run_id: str) -> None:
         with self._session_factory.begin() as session:
