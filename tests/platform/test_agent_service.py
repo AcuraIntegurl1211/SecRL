@@ -249,6 +249,38 @@ class CapabilityTokenTest(unittest.TestCase):
                     request_id="second-process-call",
                 )
 
+    def test_restart_conservatively_reconciles_orphaned_reservation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            first = CapabilitySigner(
+                b"o" * 32,
+                now=lambda: 1_000,
+                budget_store=FileCapabilityBudgetStore(Path(directory)),
+            )
+            token = first.issue(valid_claims(max_tokens=10))
+            first.reserve_usage(
+                token,
+                request_id="crashed-model-call",
+                reserved_tokens=6,
+                reserved_cost=Decimal("0"),
+            )
+
+            restarted = CapabilitySigner(
+                b"o" * 32,
+                now=lambda: 1_000,
+                budget_store=FileCapabilityBudgetStore(Path(directory)),
+            )
+            snapshot = restarted.budget_snapshot(token)
+
+            self.assertEqual(snapshot.consumed_tokens, 6)
+            self.assertEqual(snapshot.reserved_tokens, 0)
+            with self.assertRaises(CapabilityBudgetError):
+                restarted.reserve_usage(
+                    token,
+                    request_id="after-restart",
+                    reserved_tokens=5,
+                    reserved_cost=Decimal("0"),
+                )
+
     def test_usage_fails_closed_without_a_budget_store(self):
         signer = CapabilitySigner(b"z" * 32, now=lambda: 1_000)
         token = signer.issue(valid_claims())

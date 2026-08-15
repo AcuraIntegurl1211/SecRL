@@ -109,6 +109,8 @@ class FileCapabilityBudgetStore:
     def __init__(self, root: Path) -> None:
         self._root = Path(root)
         self._root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self._local_lock = threading.Lock()
+        self._recovered_keys: set[tuple[str, str]] = set()
 
     def transact(
         self,
@@ -118,15 +120,20 @@ class FileCapabilityBudgetStore:
         digest = hashlib.sha256(_canonical_json(key)).hexdigest()
         state_path = self._root / f"{digest}.json"
         lock_path = self._root / f"{digest}.lock"
-        with lock_path.open("a+b") as lock_file:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-            try:
-                state = _read_budget_state(state_path)
-                result = operation(state)
-                _write_budget_state(state_path, state)
-                return result
-            finally:
-                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+        with self._local_lock:
+            with lock_path.open("a+b") as lock_file:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+                try:
+                    state = _read_budget_state(state_path)
+                    if key not in self._recovered_keys:
+                        _reconcile_orphaned_reservations(state)
+                        _write_budget_state(state_path, state)
+                        self._recovered_keys.add(key)
+                    result = operation(state)
+                    _write_budget_state(state_path, state)
+                    return result
+                finally:
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
 class CapabilitySigner:
@@ -475,6 +482,18 @@ class _BudgetState:
 class _CompletedUsage:
     reservation: tuple[int, Decimal]
     actual: tuple[int, Decimal]
+
+
+def _reconcile_orphaned_reservations(state: _BudgetState) -> None:
+    """Charge reservations left by a prior single-runner process conservatively."""
+    for request_id, reservation in tuple(state.reservations.items()):
+        state.consumed_tokens += reservation[0]
+        state.consumed_cost += reservation[1]
+        state.completed[request_id] = _CompletedUsage(
+            reservation=reservation,
+            actual=reservation,
+        )
+    state.reservations.clear()
 
 
 def _read_budget_state(path: Path) -> _BudgetState:
