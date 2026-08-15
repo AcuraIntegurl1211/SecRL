@@ -22,6 +22,7 @@ from secrl_platform.storage.orm import (
     AgentRevisionORM,
     AppSettingORM,
     ArtifactORM,
+    BenchmarkRevisionORM,
     EvaluationTaskORM,
     LocalUserORM,
     ModelConfigRevisionORM,
@@ -650,6 +651,36 @@ class ApiTest(unittest.TestCase):
             "ARTIFACT_INTEGRITY_ERROR",
         )
         self.assertNotIn(str(ref.path), tampered.text)
+
+    def test_compare_rejects_different_benchmark_revisions(self):
+        self.login()
+        headers = {"X-CSRF-Token": self.csrf_token}
+        left = self.client.post(
+            "/api/v1/tasks", json=valid_smoke_task(), headers=headers
+        ).json()["id"]
+        right = self.client.post(
+            "/api/v1/tasks", json=valid_smoke_task(), headers=headers
+        ).json()["id"]
+        with self.session_factory.begin() as session:
+            benchmark = BenchmarkRevisionORM(
+                adapter_name="different-revision",
+                manifest_json="{}",
+                tool_schema_json="[]",
+                evaluation_protocol_json="{}",
+                sha256="f" * 64,
+            )
+            session.add(benchmark)
+            session.flush()
+            session.get(EvaluationTaskORM, right).benchmark_revision_id = benchmark.id
+
+        response = self.client.get(
+            "/api/v1/compare", params={"left": left, "right": right}
+        )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(
+            response.json()["error"]["code"], "BENCHMARK_REVISION_MISMATCH"
+        )
 
     def test_artifact_download_cannot_swap_bytes_after_verification(self):
         self.login()

@@ -458,6 +458,8 @@ def _validated_endpoint(
         parsed_addresses = tuple(ipaddress.ip_address(address) for address in addresses)
     except ValueError as exc:
         raise ValueError("agent service host returned an invalid address") from exc
+    if any(address.is_global for address in parsed_addresses):
+        raise ValueError("agent service endpoint must resolve only to internal addresses")
     address = str(parsed_addresses[0])
     connect_host = f"[{address}]" if ":" in address else address
     default_port = 443 if parsed.scheme == "https" else 80

@@ -10,6 +10,7 @@ from typing import Any, Literal, Protocol
 from urllib.parse import urlsplit
 
 import httpx
+import httpcore
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
 from uuid import uuid4
 
@@ -105,11 +106,13 @@ class OpenAICompatibleProvider:
     ) -> None:
         self._resolver = resolver or _resolve_host
         self._allowed_hosts = allowed_hosts
-        self._base_url = validate_model_endpoint(
+        self._base_url, addresses = _validated_model_endpoint(
             base_url,
             allowed_hosts=allowed_hosts,
             resolver=self._resolver,
-        ).rstrip("/")
+        )
+        self._base_url = self._base_url.rstrip("/")
+        self._pinned_address = addresses[0]
         self._api_key = api_key
         self._client = client
 
@@ -123,7 +126,17 @@ class OpenAICompatibleProvider:
         headers = {"Authorization": f"Bearer {self._api_key}"}
         try:
             if self._client is None:
-                async with httpx.AsyncClient(follow_redirects=False) as client:
+                parsed = urlsplit(self._base_url)
+                backend = _PinnedNetworkBackend(
+                    hostname=parsed.hostname or "",
+                    address=self._pinned_address,
+                )
+                transport = _PinnedAsyncHTTPTransport(backend)
+                async with httpx.AsyncClient(
+                    follow_redirects=False,
+                    transport=transport,
+                    trust_env=False,
+                ) as client:
                     response = await client.post(
                         f"{self._base_url}/chat/completions",
                         json=payload,
@@ -194,6 +207,20 @@ def validate_model_endpoint(
     allowed_hosts: tuple[str, ...] | None,
     resolver: Callable[[str, int], object] | None = None,
 ) -> str:
+    endpoint, _addresses = _validated_model_endpoint(
+        base_url,
+        allowed_hosts=allowed_hosts,
+        resolver=resolver,
+    )
+    return endpoint
+
+
+def _validated_model_endpoint(
+    base_url: str,
+    *,
+    allowed_hosts: tuple[str, ...] | None,
+    resolver: Callable[[str, int], object] | None = None,
+) -> tuple[str, tuple[str, ...]]:
     parsed = urlsplit(base_url)
     if parsed.scheme != "https" or not parsed.hostname:
         raise ValueError("model provider endpoint must use HTTPS")
@@ -209,7 +236,7 @@ def validate_model_endpoint(
     if literal is not None and not literal.is_global:
         raise ValueError("model provider endpoint must not use a private address")
     if allowed_hosts is None:
-        return base_url
+        return base_url, (host,)
     normalized_allowlist = {value.lower() for value in allowed_hosts}
     if host not in normalized_allowlist:
         raise ValueError("model provider host is not allowlisted")
@@ -228,7 +255,57 @@ def validate_model_endpoint(
         raise ValueError("model provider host returned an invalid address") from exc
     if any(not address.is_global for address in parsed_addresses):
         raise ValueError("model provider host resolved to a non-global address")
-    return base_url
+    return base_url, tuple(str(address) for address in parsed_addresses)
+
+
+class _PinnedNetworkBackend:
+    """Resolve one validated provider hostname to one pre-approved address."""
+
+    def __init__(
+        self,
+        *,
+        hostname: str,
+        address: str,
+        backend: httpcore.AsyncNetworkBackend | None = None,
+    ) -> None:
+        self._hostname = hostname.lower()
+        self._address = address
+        self._backend = backend or httpcore.AnyIOBackend()
+
+    async def connect_tcp(
+        self,
+        host: str,
+        port: int,
+        timeout: float | None = None,
+        local_address: str | None = None,
+        socket_options=None,
+    ):
+        normalized = host.decode("ascii") if isinstance(host, bytes) else host
+        if normalized.lower() != self._hostname:
+            raise httpcore.ConnectError("connection host was not validated")
+        return await self._backend.connect_tcp(
+            self._address,
+            port,
+            timeout=timeout,
+            local_address=local_address,
+            socket_options=socket_options,
+        )
+
+    async def connect_unix_socket(self, path: str, **kwargs):
+        return await self._backend.connect_unix_socket(path, **kwargs)
+
+    async def sleep(self, seconds: float) -> None:
+        await self._backend.sleep(seconds)
+
+
+class _PinnedAsyncHTTPTransport(httpx.AsyncHTTPTransport):
+    def __init__(self, backend: _PinnedNetworkBackend) -> None:
+        super().__init__(trust_env=False, retries=0)
+        self._pool = httpcore.AsyncConnectionPool(
+            ssl_context=httpx.create_ssl_context(trust_env=False),
+            network_backend=backend,
+            retries=0,
+        )
 
 
 def _resolve_host(host: str, port: int) -> tuple[str, ...]:
@@ -244,11 +321,19 @@ def _status_error(response: httpx.Response) -> ProviderError:
     if status == 404:
         return ProviderError("MODEL_NOT_FOUND")
     if status == 408:
-        return ProviderError("TIMEOUT", retry_after=retry_after)
+        return ProviderError(
+            "TIMEOUT",
+            retry_after=retry_after,
+            usage_may_have_occurred=True,
+        )
     if status == 429:
         return ProviderError("RATE_LIMITED", retry_after=retry_after)
     if status >= 500:
-        return ProviderError("PROVIDER_UNAVAILABLE", retry_after=retry_after)
+        return ProviderError(
+            "PROVIDER_UNAVAILABLE",
+            retry_after=retry_after,
+            usage_may_have_occurred=True,
+        )
     return ProviderError("INVALID_PROVIDER_REQUEST")
 
 

@@ -13,6 +13,7 @@ from secrl_platform.models.providers import (
     OpenAICompatibleProvider,
     ProviderError,
     Usage,
+    _PinnedNetworkBackend,
 )
 
 
@@ -152,6 +153,32 @@ class ModelGatewayTest(unittest.IsolatedAsyncioTestCase):
 
 
 class OpenAICompatibleProviderTest(unittest.IsolatedAsyncioTestCase):
+    async def test_pinned_backend_connects_to_validated_ip_not_hostname(self):
+        class RecordingBackend:
+            def __init__(self):
+                self.hosts = []
+
+            async def connect_tcp(self, host, port, **kwargs):
+                self.hosts.append((host, port))
+                return object()
+
+            async def connect_unix_socket(self, path, **kwargs):
+                raise AssertionError(path)
+
+            async def sleep(self, seconds):
+                return None
+
+        backend = RecordingBackend()
+        pinned = _PinnedNetworkBackend(
+            hostname="provider.invalid",
+            address="93.184.216.34",
+            backend=backend,
+        )
+
+        await pinned.connect_tcp("provider.invalid", 443)
+
+        self.assertEqual(backend.hosts, [("93.184.216.34", 443)])
+
     def test_endpoint_policy_rejects_unallowlisted_and_private_hosts(self):
         def provider_for(base_url, *, allowed_hosts, resolver):
             try:
@@ -293,6 +320,25 @@ class OpenAICompatibleProviderTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(raised.exception.code, code)
                 self.assertEqual(raised.exception.retry_after, retry_after)
                 self.assertNotIn("test-provider-key", str(raised.exception))
+
+    async def test_timeout_and_server_errors_are_ambiguous_usage(self):
+        for status in (408, 500, 503):
+            with self.subTest(status=status):
+                async with httpx.AsyncClient(
+                    transport=httpx.MockTransport(
+                        lambda _request, value=status: httpx.Response(value)
+                    )
+                ) as client:
+                    provider = OpenAICompatibleProvider(
+                        base_url="https://provider.invalid/v1",
+                        api_key="test-provider-key",
+                        client=client,
+                        allowed_hosts=("provider.invalid",),
+                        resolver=public_resolver,
+                    )
+                    with self.assertRaises(ProviderError) as raised:
+                        await provider.complete(model_request(max_attempts=1))
+                self.assertTrue(raised.exception.usage_may_have_occurred)
 
 
 if __name__ == "__main__":

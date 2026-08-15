@@ -426,6 +426,21 @@ class AgentServiceTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all("127.0.0.1" in url for url in transport.urls))
         await runtime.close()
 
+    async def test_plain_http_service_rejects_every_global_resolution(self):
+        for addresses in (
+            ("93.184.216.34",),
+            ("127.0.0.1", "93.184.216.34"),
+            ("fd00::1", "2606:2800:220:1:248:1893:25c8:1946"),
+        ):
+            with self.subTest(addresses=addresses):
+                with self.assertRaisesRegex(ValueError, "internal"):
+                    AgentServiceRuntime.from_settings(
+                        config=service_config(self.token),
+                        transport=RecordingTransport({}),
+                        resolver=lambda _host, _port, value=addresses: value,
+                        settings=platform_settings(),
+                    )
+
     async def test_http_transport_rejects_redirects(self):
         transport = httpx.MockTransport(
             lambda _request: httpx.Response(302, headers={"Location": "http://elsewhere"})

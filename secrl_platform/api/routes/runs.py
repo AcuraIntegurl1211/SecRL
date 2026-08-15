@@ -199,6 +199,12 @@ def compare(
         right_task = session.get(EvaluationTaskORM, right)
         if left_task is None or right_task is None:
             raise ApiError(404, "TASK_NOT_FOUND", "Comparison task was not found")
+        if left_task.benchmark_revision_id != right_task.benchmark_revision_id:
+            raise ApiError(
+                409,
+                "BENCHMARK_REVISION_MISMATCH",
+                "Comparison requires the same Benchmark revision",
+            )
         return {
             "left": {"id": left_task.id, "status": left_task.status},
             "right": {"id": right_task.id, "status": right_task.status},
