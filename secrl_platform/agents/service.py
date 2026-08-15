@@ -18,27 +18,33 @@ from secrl_platform.benchmarks.protocol import (
     Observation,
     ToolCallAction,
 )
+from secrl_platform.config import Settings
 
 
 class AgentServiceError(RuntimeError):
-    code = "AGENT_SERVICE_ERROR"
+    code = "INTERNAL"
+    transient_codes = frozenset({"DEADLINE_EXCEEDED", "RATE_LIMITED", "UNAVAILABLE"})
 
     def __init__(self, message: str, *, code: str | None = None) -> None:
         super().__init__(message)
         if code is not None:
             self.code = code
 
+    @property
+    def transient(self) -> bool:
+        return self.code in self.transient_codes
+
 
 class AgentServiceTimeout(AgentServiceError):
-    code = "AGENT_SERVICE_TIMEOUT"
+    code = "DEADLINE_EXCEEDED"
 
 
 class AgentServiceProtocolError(AgentServiceError):
-    code = "AGENT_SERVICE_PROTOCOL_ERROR"
+    code = "PROTOCOL_MISMATCH"
 
 
 class InvalidAgentAction(AgentServiceError):
-    code = "INVALID_AGENT_ACTION"
+    code = "INVALID_ACTION"
 
 
 class ServiceConfig(BaseModel):
@@ -49,6 +55,16 @@ class ServiceConfig(BaseModel):
     agent_revision_id: str
     capability_token: SecretStr = Field(repr=False)
     max_attempts: int = Field(default=2, ge=1, le=3)
+
+
+class AgentServiceEndpointPolicy(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    allowed_hosts: tuple[str, ...]
+
+    @classmethod
+    def from_settings(cls, settings: Settings) -> "AgentServiceEndpointPolicy":
+        return cls(allowed_hosts=settings.agent_service_allowlist)
 
 
 class ServiceProtocolModel(BaseModel):
@@ -125,19 +141,18 @@ class HttpxAgentServiceTransport:
                 json=json_body,
                 headers=headers,
                 timeout=10.0,
+                follow_redirects=False,
             )
         except httpx.TimeoutException as exc:
             raise AgentServiceTimeout("agent service request timed out") from exc
         except httpx.RequestError as exc:
             raise AgentServiceError("agent service request failed") from exc
         if response.status_code >= 400:
-            raise AgentServiceError(
-                f"agent service returned HTTP {response.status_code}"
-            )
+            raise _http_service_error(response)
         if 300 <= response.status_code < 400:
             raise AgentServiceError(
                 "agent service redirects are not allowed",
-                code="AGENT_SERVICE_REDIRECT_REJECTED",
+                code="PROTOCOL_MISMATCH",
             )
         try:
             payload = response.json()
@@ -154,19 +169,38 @@ class AgentServiceRuntime:
         *,
         config: ServiceConfig,
         transport: AgentServiceTransport,
-        allowed_hosts: tuple[str, ...],
+        _policy: AgentServiceEndpointPolicy,
         resolver: Callable[[str, int], object] | None = None,
     ) -> None:
         self._config = config
         self._transport = transport
         self._resolver = resolver or _resolve_host
-        self._endpoint = _validated_endpoint(config, allowed_hosts, self._resolver)
+        self._endpoint = _validated_endpoint(config, _policy, self._resolver)
         self._session_id: str | None = None
         self._episode: EpisodeContext | None = None
         self._sequence = 0
         self._usage = UsageSnapshot()
         self._manifest_checked = False
         self._last_exchange: tuple[ActRequest, ActResponse] | None = None
+        self._pending_session: CreateSessionRequest | None = None
+        self._pending_act: ActRequest | None = None
+        self._pending_close: CloseRequest | None = None
+
+    @classmethod
+    def from_settings(
+        cls,
+        *,
+        config: ServiceConfig,
+        transport: AgentServiceTransport,
+        settings: Settings,
+        resolver: Callable[[str, int], object] | None = None,
+    ) -> "AgentServiceRuntime":
+        return cls(
+            config=config,
+            transport=transport,
+            _policy=AgentServiceEndpointPolicy.from_settings(settings),
+            resolver=resolver,
+        )
 
     @property
     def name(self) -> str:
@@ -177,12 +211,18 @@ class AgentServiceRuntime:
             raise AgentServiceError("agent service session is already active")
         if not self._manifest_checked:
             await self._check_manifest()
-        request_id = str(uuid.uuid4())
-        request = CreateSessionRequest(
-            request_id=request_id,
-            sequence=0,
-            episode=episode,
-        )
+        request = self._pending_session
+        if request is not None and request.episode != episode:
+            raise AgentServiceProtocolError(
+                "a different session creation request is still pending"
+            )
+        if request is None:
+            request = CreateSessionRequest(
+                request_id=str(uuid.uuid4()),
+                sequence=0,
+                episode=episode,
+            )
+            self._pending_session = request
         payload = request.model_dump(mode="json")
         response_payload: dict[str, Any] | None = None
         for attempt in range(1, self._config.max_attempts + 1):
@@ -194,8 +234,8 @@ class AgentServiceRuntime:
                     headers=self._authorization_headers(),
                 )
                 break
-            except AgentServiceTimeout:
-                if attempt == self._config.max_attempts:
+            except AgentServiceError as exc:
+                if not exc.transient or attempt == self._config.max_attempts:
                     raise
         if response_payload is None:
             raise AgentServiceError("agent service session request failed")
@@ -206,6 +246,7 @@ class AgentServiceRuntime:
                 "agent service returned an invalid session response"
             ) from exc
         _require_correlation(request.request_id, request.sequence, response)
+        self._pending_session = None
         self._session_id = response.session_id
         self._episode = episode
         self._sequence = 0
@@ -214,13 +255,18 @@ class AgentServiceRuntime:
     async def act(self, observation: Observation) -> AgentAction:
         if self._session_id is None or self._episode is None:
             raise AgentServiceError("agent service session is not active")
-        request_id = str(uuid.uuid4())
-        sequence = self._sequence + 1
-        request = ActRequest(
-            request_id=request_id,
-            sequence=sequence,
-            observation=observation,
-        )
+        request = self._pending_act
+        if request is not None and request.observation != observation:
+            raise AgentServiceProtocolError(
+                "a different agent action request is still pending"
+            )
+        if request is None:
+            request = ActRequest(
+                request_id=str(uuid.uuid4()),
+                sequence=self._sequence + 1,
+                observation=observation,
+            )
+            self._pending_act = request
         payload = request.model_dump(mode="json")
         response_payload: dict[str, Any] | None = None
         for attempt in range(1, self._config.max_attempts + 1):
@@ -232,8 +278,8 @@ class AgentServiceRuntime:
                     headers=self._authorization_headers(),
                 )
                 break
-            except AgentServiceTimeout:
-                if attempt == self._config.max_attempts:
+            except AgentServiceError as exc:
+                if not exc.transient or attempt == self._config.max_attempts:
                     raise
         if response_payload is None:
             raise AgentServiceError("agent service act request failed")
@@ -248,8 +294,9 @@ class AgentServiceRuntime:
             if action.tool not in allowed_tools:
                 raise InvalidAgentAction("agent service returned an unapproved tool")
         self._usage = response.usage
-        self._sequence = sequence
+        self._sequence = request.sequence
         self._last_exchange = (request, response)
+        self._pending_act = None
         return action
 
     def usage(self) -> UsageSnapshot:
@@ -257,21 +304,26 @@ class AgentServiceRuntime:
 
     async def close(self) -> None:
         session_id = self._session_id
-        try:
-            if session_id is not None:
-                await self._transport.request(
-                    "POST",
-                    f"{self._endpoint.connect_base}/v1/sessions/{session_id}:close",
-                    json_body=CloseRequest(
-                        request_id=str(uuid.uuid4())
-                    ).model_dump(mode="json"),
-                    headers=self._authorization_headers(),
-                )
-        finally:
-            self._session_id = None
-            self._episode = None
-            self._sequence = 0
-            self._last_exchange = None
+        if session_id is not None:
+            request = self._pending_close or CloseRequest(request_id=str(uuid.uuid4()))
+            self._pending_close = request
+            for attempt in range(1, self._config.max_attempts + 1):
+                try:
+                    await self._transport.request(
+                        "POST",
+                        f"{self._endpoint.connect_base}/v1/sessions/{session_id}:close",
+                        json_body=request.model_dump(mode="json"),
+                        headers=self._authorization_headers(),
+                    )
+                    break
+                except AgentServiceError as exc:
+                    if not exc.transient or attempt == self._config.max_attempts:
+                        raise
+        self._pending_close = None
+        self._session_id = None
+        self._episode = None
+        self._sequence = 0
+        self._last_exchange = None
 
     async def _check_manifest(self) -> None:
         manifest_payload = await self._transport.request(
@@ -310,6 +362,23 @@ def manifest_sha256(manifest: dict[str, Any]) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+def _http_service_error(response: httpx.Response) -> AgentServiceError:
+    status = response.status_code
+    code = {
+        404: "SESSION_NOT_FOUND",
+        408: "DEADLINE_EXCEEDED",
+        409: "PROTOCOL_MISMATCH",
+        422: "INVALID_ACTION",
+        429: "RATE_LIMITED",
+    }.get(status)
+    if code is None:
+        code = "UNAVAILABLE" if status >= 500 else "INTERNAL"
+    return AgentServiceError(
+        f"agent service returned HTTP {status}",
+        code=code,
+    )
+
+
 class _ResolvedEndpoint(BaseModel):
     model_config = ConfigDict(frozen=True)
 
@@ -319,12 +388,14 @@ class _ResolvedEndpoint(BaseModel):
 
 def _validated_endpoint(
     config: ServiceConfig,
-    allowed_hosts: tuple[str, ...],
+    policy: AgentServiceEndpointPolicy,
     resolver: Callable[[str, int], object],
 ) -> _ResolvedEndpoint:
     parsed = urlsplit(config.endpoint)
-    if parsed.scheme not in {"http", "https"}:
-        raise ValueError("agent service endpoint must use HTTP or HTTPS")
+    if parsed.scheme != "http":
+        raise ValueError(
+            "Agent Service Protocol v1 endpoints must use pinned internal HTTP"
+        )
     if parsed.username is not None or parsed.password is not None:
         raise ValueError("agent service endpoint must not include user information")
     if parsed.fragment or parsed.query:
@@ -332,7 +403,7 @@ def _validated_endpoint(
     if parsed.path not in {"", "/"}:
         raise ValueError("agent service endpoint must not include a path")
     host = parsed.hostname
-    if host is None or host not in allowed_hosts:
+    if host is None or host not in policy.allowed_hosts:
         raise ValueError("agent service host is not allowlisted")
     port = parsed.port or (443 if parsed.scheme == "https" else 80)
     try:
@@ -362,7 +433,7 @@ def _require_correlation(
     if response.request_id != request_id or response.sequence != sequence:
         raise AgentServiceProtocolError(
             "agent service response correlation mismatch",
-            code="AGENT_SERVICE_CORRELATION_ERROR",
+            code="PROTOCOL_MISMATCH",
         )
 
 

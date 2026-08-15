@@ -59,18 +59,25 @@ class ModelGateway:
                 expected_agent=request.agent_revision_id,
                 model_role=request.model_role,
             )
-            if (
-                request.budget_reservation_tokens is None
-                or request.budget_reservation_cost is None
-            ):
+            if request.max_output_tokens is None:
                 raise CapabilityBudgetError(
-                    "budgeted model request requires token and cost reservations"
+                    "budgeted model request requires an enforced output limit"
+                )
+            input_token_bound = _conservative_input_token_bound(request)
+            reservation_usage = Usage(
+                prompt=input_token_bound,
+                completion=request.max_output_tokens,
+            )
+            reservation_cost = self._pricing.estimate(reservation_usage)
+            if reservation_cost is None:
+                raise CapabilityBudgetError(
+                    "budgeted model request requires frozen input and output pricing"
                 )
             self._capability_signer.reserve_usage(
                 token,
                 request_id=request.request_id,
-                reserved_tokens=request.budget_reservation_tokens,
-                reserved_cost=request.budget_reservation_cost,
+                reserved_tokens=reservation_usage.total,
+                reserved_cost=reservation_cost,
                 expected_run=request.run_id,
                 expected_agent=request.agent_revision_id,
                 model_role=request.model_role,
@@ -111,3 +118,14 @@ class ModelGateway:
                 raw_usage=response.raw_usage,
             )
         raise RuntimeError("model gateway retry loop exited unexpectedly")
+
+
+def _conservative_input_token_bound(request: ModelRequest) -> int:
+    # UTF-8 bytes are a conservative upper bound for supported provider tokenizers,
+    # with fixed framing overhead for each normalized chat message.
+    return 8 + sum(
+        len(message.role.encode("utf-8"))
+        + len(message.content.encode("utf-8"))
+        + 8
+        for message in request.messages
+    )

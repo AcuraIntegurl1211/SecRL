@@ -126,7 +126,7 @@ class ModelGatewayTest(unittest.IsolatedAsyncioTestCase):
         self.assertLessEqual(delays[0], 30)
 
     def test_effective_parameters_cannot_replace_authoritative_request_fields(self):
-        for reserved in ("model", "messages"):
+        for reserved in ("model", "messages", "max_tokens"):
             with self.subTest(reserved=reserved):
                 with self.assertRaises(ValidationError):
                     model_request(effective_parameters={reserved: "changed"})

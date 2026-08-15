@@ -4,13 +4,19 @@ import base64
 import hashlib
 import hmac
 import json
+import os
 import secrets
 import threading
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from decimal import Decimal
-from typing import Callable
+from pathlib import Path
+from tempfile import NamedTemporaryFile
+from typing import Protocol, TypeVar
+
+import fcntl
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -44,6 +50,59 @@ class CapabilityClaims(BaseModel):
     nonce: str
 
 
+_T = TypeVar("_T")
+
+
+class CapabilityBudgetStore(Protocol):
+    def transact(
+        self,
+        key: tuple[str, str],
+        operation: Callable[["_BudgetState"], _T],
+    ) -> _T: ...
+
+
+class InMemoryCapabilityBudgetStore:
+    """Explicitly non-durable store for unit tests and single-process fixtures."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._states: dict[tuple[str, str], _BudgetState] = {}
+
+    def transact(
+        self,
+        key: tuple[str, str],
+        operation: Callable[["_BudgetState"], _T],
+    ) -> _T:
+        with self._lock:
+            return operation(self._states.setdefault(key, _BudgetState()))
+
+
+class FileCapabilityBudgetStore:
+    """Durable, process-safe capability ledger stored under platform data."""
+
+    def __init__(self, root: Path) -> None:
+        self._root = Path(root)
+        self._root.mkdir(parents=True, exist_ok=True, mode=0o700)
+
+    def transact(
+        self,
+        key: tuple[str, str],
+        operation: Callable[["_BudgetState"], _T],
+    ) -> _T:
+        digest = hashlib.sha256(_canonical_json(key)).hexdigest()
+        state_path = self._root / f"{digest}.json"
+        lock_path = self._root / f"{digest}.lock"
+        with lock_path.open("a+b") as lock_file:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            try:
+                state = _read_budget_state(state_path)
+                result = operation(state)
+                _write_budget_state(state_path, state)
+                return result
+            finally:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
 class CapabilitySigner:
     def __init__(
         self,
@@ -51,6 +110,7 @@ class CapabilitySigner:
         *,
         now: Callable[[], int | float] = time.time,
         lease_is_active: Callable[[str, str], bool] | None = None,
+        budget_store: CapabilityBudgetStore | None = None,
         max_lifetime_seconds: int = 300,
         clock_skew_seconds: int = 5,
     ) -> None:
@@ -61,8 +121,7 @@ class CapabilitySigner:
         self._lease_is_active = lease_is_active
         self._max_lifetime_seconds = max_lifetime_seconds
         self._clock_skew_seconds = clock_skew_seconds
-        self._budget_lock = threading.Lock()
-        self._budgets: dict[tuple[str, str], _BudgetState] = {}
+        self._budget_store = budget_store
 
     def issue(self, claims: CapabilityClaims) -> str:
         payload = _canonical_json(claims.model_dump(mode="json"))
@@ -161,18 +220,17 @@ class CapabilitySigner:
         )
         key = (claims.run_id, claims.agent_revision_id)
         reservation = (reserved_tokens, reserved_cost)
-        with self._budget_lock:
-            state = self._budgets.setdefault(key, _BudgetState())
+        def reserve(state: _BudgetState) -> None:
             completed = state.completed.get(request_id)
             if completed is not None:
                 if completed != reservation:
                     raise CapabilityBudgetError("capability request ID was reused")
-                return claims
+                return
             existing = state.reservations.get(request_id)
             if existing is not None:
                 if existing != reservation:
                     raise CapabilityBudgetError("capability request ID was reused")
-                return claims
+                return
             reserved_token_total = sum(item[0] for item in state.reservations.values())
             reserved_cost_total = sum(
                 (item[1] for item in state.reservations.values()), Decimal(0)
@@ -182,6 +240,7 @@ class CapabilitySigner:
             if state.consumed_cost + reserved_cost_total + reserved_cost > claims.max_cost:
                 raise CapabilityBudgetError("capability cost budget exceeded")
             state.reservations[request_id] = reservation
+        self._require_budget_store().transact(key, reserve)
         return claims
 
     def reconcile_usage(
@@ -205,13 +264,12 @@ class CapabilitySigner:
         )
         key = (claims.run_id, claims.agent_revision_id)
         actual = (actual_tokens, actual_cost)
-        with self._budget_lock:
-            state = self._budgets.setdefault(key, _BudgetState())
+        def reconcile(state: _BudgetState) -> None:
             completed = state.completed.get(request_id)
             if completed is not None:
                 if completed != actual:
                     raise CapabilityBudgetError("capability request ID was reused")
-                return claims
+                return
             reservation = state.reservations.get(request_id)
             if reservation is None:
                 raise CapabilityBudgetError("capability usage was not reserved")
@@ -221,7 +279,15 @@ class CapabilitySigner:
             state.consumed_tokens += actual_tokens
             state.consumed_cost += actual_cost
             state.completed[request_id] = actual
+        self._require_budget_store().transact(key, reconcile)
         return claims
+
+    def _require_budget_store(self) -> CapabilityBudgetStore:
+        if self._budget_store is None:
+            raise CapabilityBudgetError(
+                "persistent capability budget store is required"
+            )
+        return self._budget_store
 
     def refresh(
         self,
@@ -254,6 +320,61 @@ class _BudgetState:
     consumed_cost: Decimal = Decimal(0)
     reservations: dict[str, tuple[int, Decimal]] = field(default_factory=dict)
     completed: dict[str, tuple[int, Decimal]] = field(default_factory=dict)
+
+
+def _read_budget_state(path: Path) -> _BudgetState:
+    if not path.exists():
+        return _BudgetState()
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        return _BudgetState(
+            consumed_tokens=int(payload["consumed_tokens"]),
+            consumed_cost=Decimal(payload["consumed_cost"]),
+            reservations={
+                request_id: (int(value[0]), Decimal(value[1]))
+                for request_id, value in payload["reservations"].items()
+            },
+            completed={
+                request_id: (int(value[0]), Decimal(value[1]))
+                for request_id, value in payload["completed"].items()
+            },
+        )
+    except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise CapabilityBudgetError("capability budget ledger is corrupted") from exc
+
+
+def _write_budget_state(path: Path, state: _BudgetState) -> None:
+    payload = _canonical_json(
+        {
+            "completed": {
+                request_id: [tokens, str(cost)]
+                for request_id, (tokens, cost) in sorted(state.completed.items())
+            },
+            "consumed_cost": str(state.consumed_cost),
+            "consumed_tokens": state.consumed_tokens,
+            "reservations": {
+                request_id: [tokens, str(cost)]
+                for request_id, (tokens, cost) in sorted(state.reservations.items())
+            },
+        }
+    )
+    temporary_path: Path | None = None
+    try:
+        with NamedTemporaryFile(dir=path.parent, delete=False) as temporary:
+            temporary_path = Path(temporary.name)
+            temporary.write(payload)
+            temporary.flush()
+            os.fsync(temporary.fileno())
+        os.replace(temporary_path, path)
+        temporary_path = None
+        directory_fd = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
 
 
 def _canonical_json(value: object) -> bytes:

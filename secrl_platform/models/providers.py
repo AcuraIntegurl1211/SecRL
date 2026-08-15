@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import math
 from datetime import datetime, timezone
-from decimal import Decimal
 from email.utils import parsedate_to_datetime
 from typing import Any, Literal, Protocol
 
@@ -47,12 +46,11 @@ class ModelRequest(ProviderModel):
     agent_revision_id: str | None = None
     capability_token: SecretStr | None = Field(default=None, repr=False)
     request_id: str = Field(default_factory=lambda: str(uuid4()))
-    budget_reservation_tokens: int | None = Field(default=None, ge=0)
-    budget_reservation_cost: Decimal | None = Field(default=None, ge=0)
+    max_output_tokens: int | None = Field(default=None, ge=1)
 
     @model_validator(mode="after")
     def reject_reserved_parameters(self) -> "ModelRequest":
-        reserved = {"model", "messages"}
+        reserved = {"model", "messages", "max_tokens"}
         if reserved.intersection(self.requested_parameters):
             raise ValueError("requested parameters contain reserved provider fields")
         if reserved.intersection(self.effective_parameters):
@@ -102,6 +100,8 @@ class OpenAICompatibleProvider:
             "model": request.model,
             "messages": [message.model_dump(mode="json") for message in request.messages],
         }
+        if request.max_output_tokens is not None:
+            payload["max_tokens"] = request.max_output_tokens
         headers = {"Authorization": f"Bearer {self._api_key}"}
         try:
             if self._client is None:
