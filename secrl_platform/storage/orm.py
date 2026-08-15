@@ -332,6 +332,13 @@ class CaseAttemptORM(TimestampedORM, Base):
             "FAILED",
             "CANCELED",
         ),
+        Index(
+            "uq_case_attempt_run_case_number",
+            "run_id",
+            "case_id",
+            "attempt_no",
+            unique=True,
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid4_string)

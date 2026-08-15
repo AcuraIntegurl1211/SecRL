@@ -39,6 +39,14 @@ class DeterministicSmokeAgent:
         self._matches: tuple[str, ...] = ()
 
     @property
+    def model_access(self) -> str:
+        return "none"
+
+    @property
+    def model_gateway_binding(self) -> None:
+        return None
+
+    @property
     def name(self) -> str:
         return "Deterministic Protocol-Smoke Agent"
 

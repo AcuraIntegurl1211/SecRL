@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from decimal import Decimal
 from typing import Any, Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -110,6 +111,7 @@ class UsageSnapshot(AgentProtocolModel):
     completion_tokens: int = Field(default=0, ge=0)
     cached_tokens: int = Field(default=0, ge=0)
     reasoning_tokens: int = Field(default=0, ge=0)
+    estimated_cost: Decimal = Field(default=Decimal(0), ge=0)
 
     @property
     def total(self) -> int:
@@ -117,6 +119,12 @@ class UsageSnapshot(AgentProtocolModel):
 
 
 class AgentRuntime(Protocol):
+    @property
+    def model_access(self) -> Literal["none", "platform_gateway"]: ...
+
+    @property
+    def model_gateway_binding(self) -> str | None: ...
+
     @property
     def name(self) -> str: ...
 

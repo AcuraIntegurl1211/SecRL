@@ -210,6 +210,15 @@ class AgentServiceRuntime:
         )
 
     @property
+    def model_access(self) -> str:
+        return "platform_gateway"
+
+    @property
+    def model_gateway_binding(self) -> str:
+        token = self._config.capability_token.get_secret_value().encode("utf-8")
+        return hashlib.sha256(token).hexdigest()
+
+    @property
     def name(self) -> str:
         return "Agent Service Protocol v1"
 

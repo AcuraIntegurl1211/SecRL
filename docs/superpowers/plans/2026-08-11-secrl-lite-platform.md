@@ -1000,7 +1000,7 @@ git commit -m "feat: add Agent Service Protocol v1 runtime"
 - Create: `tests/platform/test_recovery.py`
 - Create: `tests/e2e/test_protocol_smoke_e2e.py`
 
-- [ ] **Step 1: Write transition tests**
+- [x] **Step 1: Write transition tests**
 
 ```python
 class RunStateTest(unittest.TestCase):
@@ -1016,7 +1016,7 @@ class RunStateTest(unittest.TestCase):
             RunStateMachine("SUCCEEDED").transition("RUNNING")
 ```
 
-- [ ] **Step 2: Implement explicit transition table**
+- [x] **Step 2: Implement explicit transition table**
 
 ```python
 ALLOWED_TRANSITIONS = {
@@ -1032,7 +1032,7 @@ ALLOWED_TRANSITIONS = {
 }
 ```
 
-- [ ] **Step 3: Write an interrupted-case recovery test**
+- [x] **Step 3: Write an interrupted-case recovery test**
 
 Create a task with three smoke cases, inject a crash after artifact write but before database commit on case two, restart the engine, and assert:
 
@@ -1043,15 +1043,15 @@ self.assertEqual(repo.final_result_count(task.id), 3)
 self.assertTrue(store.unreferenced_artifacts())
 ```
 
-- [ ] **Step 4: Implement episode loop**
+- [x] **Step 4: Implement episode loop**
 
 For each Case: create attempt, reset Agent, loop `act -> validate -> execute`, write trajectory artifact, atomically register artifact/result/checkpoint, then honor pause/cancel. Benchmark errors remain result evidence; platform errors choose retry/fail using typed error codes.
 
-- [ ] **Step 5: Add budgets**
+- [x] **Step 5: Add budgets**
 
 Before each model call and new Case, compare accumulated token/cost against TaskSpec. Crossing the hard limit transitions to `BUDGET_EXHAUSTED` after committing the current evidence.
 
-- [ ] **Step 6: Run e2e tests**
+- [x] **Step 6: Run e2e tests**
 
 ```bash
 python -m unittest tests.platform.test_runner tests.platform.test_recovery tests.e2e.test_protocol_smoke_e2e -v
@@ -1059,7 +1059,7 @@ python -m unittest tests.platform.test_runner tests.platform.test_recovery tests
 
 Expected: the 12-case dataset completes without MySQL or LLM, pause/recovery tests pass, and all artifacts verify.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add secrl_platform/runner tests/platform/test_runner.py tests/platform/test_recovery.py tests/e2e/test_protocol_smoke_e2e.py

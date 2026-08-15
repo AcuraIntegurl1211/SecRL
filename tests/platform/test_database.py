@@ -125,6 +125,22 @@ class DatabaseTest(unittest.TestCase):
                 self.assertEqual(session.scalar(text("PRAGMA busy_timeout")), 5000)
             session_factory.kw["bind"].dispose()
 
+    def test_case_attempt_number_is_unique_within_run_and_case(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session_factory = create_engine_and_session(
+                Path(tmp) / "test.sqlite3",
+                create=True,
+            )
+            indexes = inspect(session_factory.kw["bind"]).get_indexes("case_attempt")
+            matching = [
+                index
+                for index in indexes
+                if index["column_names"] == ["run_id", "case_id", "attempt_no"]
+            ]
+            self.assertEqual(len(matching), 1)
+            self.assertTrue(matching[0]["unique"])
+            session_factory.kw["bind"].dispose()
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -55,6 +55,14 @@ class CapabilityRequestAdmission:
     actual: tuple[int, Decimal] | None = None
 
 
+@dataclass(frozen=True)
+class CapabilityBudgetSnapshot:
+    consumed_tokens: int
+    consumed_cost: Decimal
+    reserved_tokens: int
+    reserved_cost: Decimal
+
+
 class CapabilityClaims(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -391,6 +399,37 @@ class CapabilitySigner:
             cancel,
         )
         return claims
+
+    def budget_snapshot(
+        self,
+        token: str,
+        *,
+        expected_run: str | None = None,
+        expected_agent: str | None = None,
+    ) -> CapabilityBudgetSnapshot:
+        claims = self.verify(
+            token,
+            expected_run=expected_run,
+            expected_agent=expected_agent,
+        )
+
+        def read(state: _BudgetState) -> CapabilityBudgetSnapshot:
+            return CapabilityBudgetSnapshot(
+                consumed_tokens=state.consumed_tokens,
+                consumed_cost=state.consumed_cost,
+                reserved_tokens=sum(
+                    reservation[0] for reservation in state.reservations.values()
+                ),
+                reserved_cost=sum(
+                    (reservation[1] for reservation in state.reservations.values()),
+                    Decimal(0),
+                ),
+            )
+
+        return self._require_budget_store().transact(
+            (claims.run_id, claims.agent_revision_id),
+            read,
+        )
 
     def _require_budget_store(self) -> CapabilityBudgetStore:
         if self._budget_store is None:
