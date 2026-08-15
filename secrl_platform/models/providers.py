@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any, Literal, Protocol
 
 import httpx
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
 
 class ProviderModel(BaseModel):
@@ -39,6 +39,8 @@ class ModelRequest(ProviderModel):
     attempt_id: str
     cache_metadata: dict[str, Any] = Field(default_factory=dict)
     max_attempts: int = Field(default=3, ge=1, le=10)
+    agent_revision_id: str | None = None
+    capability_token: SecretStr | None = Field(default=None, repr=False)
 
 
 class ModelResponse(ProviderModel):

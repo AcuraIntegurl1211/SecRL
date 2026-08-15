@@ -1,0 +1,7 @@
+{
+  "agent_revision_id": "builtin-deterministic-smoke-v1",
+  "name": "Deterministic Protocol-Smoke Reference Service",
+  "protocol_version": "1",
+  "runtime": "service",
+  "version": "1.0.0"
+}
