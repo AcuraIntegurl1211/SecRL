@@ -1077,7 +1077,7 @@ git commit -m "feat: run and recover Protocol-Smoke evaluations"
 - Create: `secrl_platform/auth/sessions.py`
 - Create: `tests/platform/test_api.py`
 
-- [ ] **Step 1: Write unauthenticated and lifecycle API tests**
+- [x] **Step 1: Write unauthenticated and lifecycle API tests**
 
 ```python
 class ApiTest(unittest.TestCase):
@@ -1092,7 +1092,7 @@ class ApiTest(unittest.TestCase):
         self.assertRegex(response.json()["task_spec_sha256"], r"^[0-9a-f]{64}$")
 ```
 
-- [ ] **Step 2: Implement app factory and error envelope**
+- [x] **Step 2: Implement app factory and error envelope**
 
 All errors use:
 
@@ -1109,11 +1109,11 @@ All errors use:
 
 Generate request IDs at middleware entry and return them in `X-Request-ID`.
 
-- [ ] **Step 3: Implement single-admin sessions**
+- [x] **Step 3: Implement single-admin sessions**
 
 Use an HttpOnly, SameSite=Strict, Secure-when-HTTPS cookie containing an opaque random session ID. Store only its SHA-256 in SQLite with expiry and CSRF token. State-changing requests require the CSRF header.
 
-- [ ] **Step 4: Add route surface**
+- [x] **Step 4: Add route surface**
 
 Implement:
 
@@ -1143,7 +1143,7 @@ GET /api/v1/compare
 
 Artifact download validates authorization, hash, and path before returning a file response.
 
-- [ ] **Step 5: Run API tests and OpenAPI snapshot**
+- [x] **Step 5: Run API tests and OpenAPI snapshot**
 
 ```bash
 python -m unittest tests.platform.test_api -v
@@ -1152,7 +1152,7 @@ python -c 'from secrl_platform.api.app import create_app; import json; print(jso
 
 Expected: API tests pass and the OpenAPI snapshot contains no secret plaintext response fields.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add secrl_platform/api secrl_platform/auth/sessions.py tests/platform/test_api.py tests/fixtures/platform/openapi-v1.json

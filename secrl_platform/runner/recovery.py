@@ -181,12 +181,14 @@ class RunnerRepository:
                 )
                 session.add(agent)
                 session.flush()
+            frozen_budget = dict(budget or {})
             task_spec = {
                 "name": name,
                 "benchmark_id": manifest.benchmark_id,
                 "dataset_sha256": dataset_ref.sha256,
                 "agent_revision_id": agent_revision.id,
                 "case_ids": [case.id for case in cases],
+                "budget": frozen_budget,
             }
             task = EvaluationTaskORM(
                 name=name,
@@ -195,7 +197,7 @@ class RunnerRepository:
                 agent_revision_id=agent.id,
                 task_spec_json=canonical_json(task_spec),
                 status="QUEUED",
-                budget_json=canonical_json(budget or {}),
+                budget_json=canonical_json(frozen_budget),
             )
             session.add(task)
             session.flush()
