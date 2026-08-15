@@ -11,6 +11,7 @@ from secrl_platform.agents.builtin import DeterministicSmokeAgent
 from secrl_platform.agents.capabilities import (
     CapabilityBudgetError,
     CapabilityClaims,
+    CapabilityRequestCompleted,
     CapabilityScopeError,
     CapabilitySigner,
     ExpiredCapability,
@@ -324,7 +325,7 @@ class AgentServiceTest(unittest.IsolatedAsyncioTestCase):
             resolver=fake_resolver,
             settings=platform_settings(),
         )
-        with self.assertRaises(ValueError):
+        with self.assertRaises(AgentServiceProtocolError):
             await runtime.reset(smoke_episode_context())
 
         https_config = service_config(self.token).model_copy(
@@ -467,6 +468,17 @@ class AgentServiceTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(raised.exception.code, expected)
                 self.assertTrue(raised.exception.transient)
 
+        async def unavailable(_request):
+            raise httpx.ConnectError("refused")
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(unavailable)) as client:
+            with self.assertRaises(AgentServiceError) as raised:
+                await HttpxAgentServiceTransport(client).request(
+                    "GET", "http://127.0.0.1/v1/manifest"
+                )
+        self.assertEqual(raised.exception.code, "UNAVAILABLE")
+        self.assertTrue(raised.exception.transient)
+
     async def test_ambiguous_act_retry_on_later_call_reuses_pending_request(self):
         transport = RecordingTransport(
             {"type": "tool_call", "tool": "search", "arguments": {"query": "alpha"}},
@@ -524,7 +536,7 @@ class AgentServiceTest(unittest.IsolatedAsyncioTestCase):
             now=lambda: 1_000,
             budget_store=InMemoryCapabilityBudgetStore(),
         )
-        token = signer.issue(valid_claims(max_tokens=30))
+        token = signer.issue(valid_claims(max_tokens=95))
 
         class Provider:
             calls = 0
@@ -638,6 +650,96 @@ class AgentServiceTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(CapabilityBudgetError):
             await gateway.complete(request)
         self.assertEqual(provider.calls, 0)
+
+    async def test_gateway_accounts_for_complete_payload_before_dispatch(self):
+        signer = CapabilitySigner(
+            b"g" * 32,
+            now=lambda: 1_000,
+            budget_store=InMemoryCapabilityBudgetStore(),
+        )
+        token = signer.issue(valid_claims(max_tokens=100, max_cost="1"))
+
+        class Provider:
+            calls = 0
+
+            async def complete(self, _request):
+                self.calls += 1
+                return ModelResponse(text="unsafe", usage=Usage(prompt=1_000, completion=1))
+
+        provider = Provider()
+        gateway = ModelGateway(
+            provider=provider,
+            pricing=Pricing(input_per_million=1, output_per_million=1),
+            capability_signer=signer,
+        )
+        request = ModelRequest(
+            provider_adapter_version="v1",
+            model_role="agent",
+            model="fixture",
+            messages=({"role": "user", "content": "hello"},),
+            effective_parameters={
+                "tools": [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "large",
+                            "description": "x" * 2_000,
+                            "parameters": {"type": "object"},
+                        },
+                    }
+                ]
+            },
+            run_id="run-1",
+            case_id="case-1",
+            attempt_id="attempt-1",
+            agent_revision_id=DeterministicSmokeAgent.revision().id,
+            capability_token=token,
+            max_output_tokens=1,
+        )
+
+        with self.assertRaises(CapabilityBudgetError):
+            await gateway.complete(request)
+        self.assertEqual(provider.calls, 0)
+
+    async def test_completed_gateway_request_is_not_dispatched_twice(self):
+        signer = CapabilitySigner(
+            b"h" * 32,
+            now=lambda: 1_000,
+            budget_store=InMemoryCapabilityBudgetStore(),
+        )
+        token = signer.issue(valid_claims(max_tokens=100, max_cost="1"))
+
+        class Provider:
+            calls = 0
+
+            async def complete(self, _request):
+                self.calls += 1
+                return ModelResponse(text="ok", usage=Usage(prompt=1, completion=1))
+
+        provider = Provider()
+        gateway = ModelGateway(
+            provider=provider,
+            pricing=Pricing(input_per_million=1, output_per_million=1),
+            capability_signer=signer,
+        )
+        request = ModelRequest(
+            provider_adapter_version="v1",
+            model_role="agent",
+            model="fixture",
+            messages=({"role": "user", "content": "hello"},),
+            run_id="run-1",
+            case_id="case-1",
+            attempt_id="attempt-1",
+            agent_revision_id=DeterministicSmokeAgent.revision().id,
+            capability_token=token,
+            request_id="replayed-call",
+            max_output_tokens=1,
+        )
+
+        await gateway.complete(request)
+        with self.assertRaises(CapabilityRequestCompleted):
+            await gateway.complete(request)
+        self.assertEqual(provider.calls, 1)
 
 
 if __name__ == "__main__":

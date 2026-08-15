@@ -37,6 +37,13 @@ class CapabilityBudgetError(InvalidCapability):
     pass
 
 
+class CapabilityRequestCompleted(CapabilityBudgetError):
+    def __init__(self, *, actual_tokens: int, actual_cost: Decimal) -> None:
+        super().__init__("capability request has already completed")
+        self.actual_tokens = actual_tokens
+        self.actual_cost = actual_cost
+
+
 class CapabilityClaims(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -223,7 +230,7 @@ class CapabilitySigner:
         def reserve(state: _BudgetState) -> None:
             completed = state.completed.get(request_id)
             if completed is not None:
-                if completed != reservation:
+                if completed.reservation != reservation:
                     raise CapabilityBudgetError("capability request ID was reused")
                 return
             existing = state.reservations.get(request_id)
@@ -242,6 +249,38 @@ class CapabilitySigner:
             state.reservations[request_id] = reservation
         self._require_budget_store().transact(key, reserve)
         return claims
+
+    def completed_usage(
+        self,
+        token: str,
+        *,
+        request_id: str,
+        reserved_tokens: int,
+        reserved_cost: Decimal,
+        expected_run: str | None = None,
+        expected_agent: str | None = None,
+        model_role: str | None = None,
+    ) -> tuple[int, Decimal] | None:
+        claims = self.verify(
+            token,
+            expected_run=expected_run,
+            expected_agent=expected_agent,
+            model_role=model_role,
+        )
+        reservation = (reserved_tokens, reserved_cost)
+
+        def read(state: _BudgetState) -> tuple[int, Decimal] | None:
+            completed = state.completed.get(request_id)
+            if completed is None:
+                return None
+            if completed.reservation != reservation:
+                raise CapabilityBudgetError("capability request ID was reused")
+            return completed.actual
+
+        return self._require_budget_store().transact(
+            (claims.run_id, claims.agent_revision_id),
+            read,
+        )
 
     def reconcile_usage(
         self,
@@ -267,7 +306,7 @@ class CapabilitySigner:
         def reconcile(state: _BudgetState) -> None:
             completed = state.completed.get(request_id)
             if completed is not None:
-                if completed != actual:
+                if completed.actual != actual:
                     raise CapabilityBudgetError("capability request ID was reused")
                 return
             reservation = state.reservations.get(request_id)
@@ -278,8 +317,38 @@ class CapabilitySigner:
             del state.reservations[request_id]
             state.consumed_tokens += actual_tokens
             state.consumed_cost += actual_cost
-            state.completed[request_id] = actual
+            state.completed[request_id] = _CompletedUsage(
+                reservation=reservation,
+                actual=actual,
+            )
         self._require_budget_store().transact(key, reconcile)
+        return claims
+
+    def cancel_reservation(
+        self,
+        token: str,
+        *,
+        request_id: str,
+        expected_run: str | None = None,
+        expected_agent: str | None = None,
+        model_role: str | None = None,
+    ) -> CapabilityClaims:
+        claims = self.verify(
+            token,
+            expected_run=expected_run,
+            expected_agent=expected_agent,
+            model_role=model_role,
+        )
+
+        def cancel(state: _BudgetState) -> None:
+            if request_id in state.completed:
+                raise CapabilityBudgetError("completed capability usage cannot be canceled")
+            state.reservations.pop(request_id, None)
+
+        self._require_budget_store().transact(
+            (claims.run_id, claims.agent_revision_id),
+            cancel,
+        )
         return claims
 
     def _require_budget_store(self) -> CapabilityBudgetStore:
@@ -319,7 +388,13 @@ class _BudgetState:
     consumed_tokens: int = 0
     consumed_cost: Decimal = Decimal(0)
     reservations: dict[str, tuple[int, Decimal]] = field(default_factory=dict)
-    completed: dict[str, tuple[int, Decimal]] = field(default_factory=dict)
+    completed: dict[str, "_CompletedUsage"] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class _CompletedUsage:
+    reservation: tuple[int, Decimal]
+    actual: tuple[int, Decimal]
 
 
 def _read_budget_state(path: Path) -> _BudgetState:
@@ -335,7 +410,7 @@ def _read_budget_state(path: Path) -> _BudgetState:
                 for request_id, value in payload["reservations"].items()
             },
             completed={
-                request_id: (int(value[0]), Decimal(value[1]))
+                request_id: _completed_usage_from_json(value)
                 for request_id, value in payload["completed"].items()
             },
         )
@@ -347,8 +422,14 @@ def _write_budget_state(path: Path, state: _BudgetState) -> None:
     payload = _canonical_json(
         {
             "completed": {
-                request_id: [tokens, str(cost)]
-                for request_id, (tokens, cost) in sorted(state.completed.items())
+                request_id: {
+                    "actual": [completed.actual[0], str(completed.actual[1])],
+                    "reservation": [
+                        completed.reservation[0],
+                        str(completed.reservation[1]),
+                    ],
+                }
+                for request_id, completed in sorted(state.completed.items())
             },
             "consumed_cost": str(state.consumed_cost),
             "consumed_tokens": state.consumed_tokens,
@@ -375,6 +456,20 @@ def _write_budget_state(path: Path, state: _BudgetState) -> None:
     finally:
         if temporary_path is not None:
             temporary_path.unlink(missing_ok=True)
+
+
+def _completed_usage_from_json(value: object) -> _CompletedUsage:
+    if isinstance(value, list) and len(value) == 2:
+        actual = (int(value[0]), Decimal(value[1]))
+        return _CompletedUsage(reservation=actual, actual=actual)
+    if not isinstance(value, dict):
+        raise ValueError("invalid completed capability usage")
+    reservation = value["reservation"]
+    actual = value["actual"]
+    return _CompletedUsage(
+        reservation=(int(reservation[0]), Decimal(reservation[1])),
+        actual=(int(actual[0]), Decimal(actual[1])),
+    )
 
 
 def _canonical_json(value: object) -> bytes:

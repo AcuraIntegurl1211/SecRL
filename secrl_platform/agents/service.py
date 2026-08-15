@@ -146,7 +146,10 @@ class HttpxAgentServiceTransport:
         except httpx.TimeoutException as exc:
             raise AgentServiceTimeout("agent service request timed out") from exc
         except httpx.RequestError as exc:
-            raise AgentServiceError("agent service request failed") from exc
+            raise AgentServiceError(
+                "agent service request failed",
+                code="UNAVAILABLE",
+            ) from exc
         if response.status_code >= 400:
             raise _http_service_error(response)
         if 300 <= response.status_code < 400:
@@ -157,9 +160,13 @@ class HttpxAgentServiceTransport:
         try:
             payload = response.json()
         except ValueError as exc:
-            raise AgentServiceError("agent service returned invalid JSON") from exc
+            raise AgentServiceProtocolError(
+                "agent service returned invalid JSON"
+            ) from exc
         if not isinstance(payload, dict):
-            raise AgentServiceError("agent service response must be an object")
+            raise AgentServiceProtocolError(
+                "agent service response must be an object"
+            )
         return payload
 
 
@@ -338,11 +345,15 @@ class AgentServiceRuntime:
                 "agent service returned an invalid manifest"
             ) from exc
         if manifest.protocol_version != "1":
-            raise AgentServiceError("agent service protocol version is not supported")
+            raise AgentServiceProtocolError(
+                "agent service protocol version is not supported"
+            )
         if manifest.agent_revision_id != self._config.agent_revision_id:
-            raise AgentServiceError("agent service revision does not match registration")
+            raise AgentServiceProtocolError(
+                "agent service revision does not match registration"
+            )
         if manifest_sha256(manifest.model_dump(mode="json")) != self._config.expected_manifest_sha256:
-            raise ValueError("agent service manifest hash mismatch")
+            raise AgentServiceProtocolError("agent service manifest hash mismatch")
         self._manifest_checked = True
 
     def _authorization_headers(self) -> dict[str, str]:

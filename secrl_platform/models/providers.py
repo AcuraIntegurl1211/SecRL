@@ -95,13 +95,7 @@ class OpenAICompatibleProvider:
         self._client = client
 
     async def complete(self, request: ModelRequest) -> ModelResponse:
-        payload = {
-            **request.effective_parameters,
-            "model": request.model,
-            "messages": [message.model_dump(mode="json") for message in request.messages],
-        }
-        if request.max_output_tokens is not None:
-            payload["max_tokens"] = request.max_output_tokens
+        payload = provider_payload(request)
         headers = {"Authorization": f"Bearer {self._api_key}"}
         try:
             if self._client is None:
@@ -140,6 +134,17 @@ class OpenAICompatibleProvider:
             provider_request_id=request_id,
             raw_usage=raw_usage,
         )
+
+
+def provider_payload(request: ModelRequest) -> dict[str, Any]:
+    payload = {
+        **request.effective_parameters,
+        "model": request.model,
+        "messages": [message.model_dump(mode="json") for message in request.messages],
+    }
+    if request.max_output_tokens is not None:
+        payload["max_tokens"] = request.max_output_tokens
+    return payload
 
 
 def _status_error(response: httpx.Response) -> ProviderError:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import math
 from collections.abc import Awaitable, Callable
 from decimal import Decimal
@@ -10,6 +11,7 @@ from pydantic import BaseModel, ConfigDict
 
 from secrl_platform.agents.capabilities import (
     CapabilityBudgetError,
+    CapabilityRequestCompleted,
     CapabilitySigner,
     InvalidCapability,
 )
@@ -19,6 +21,7 @@ from secrl_platform.models.providers import (
     ModelRequest,
     ProviderError,
     Usage,
+    provider_payload,
 )
 
 
@@ -73,6 +76,20 @@ class ModelGateway:
                 raise CapabilityBudgetError(
                     "budgeted model request requires frozen input and output pricing"
                 )
+            completed = self._capability_signer.completed_usage(
+                token,
+                request_id=request.request_id,
+                reserved_tokens=reservation_usage.total,
+                reserved_cost=reservation_cost,
+                expected_run=request.run_id,
+                expected_agent=request.agent_revision_id,
+                model_role=request.model_role,
+            )
+            if completed is not None:
+                raise CapabilityRequestCompleted(
+                    actual_tokens=completed[0],
+                    actual_cost=completed[1],
+                )
             self._capability_signer.reserve_usage(
                 token,
                 request_id=request.request_id,
@@ -87,6 +104,14 @@ class ModelGateway:
                 response = await self._provider.complete(request)
             except ProviderError as exc:
                 if not exc.transient or attempt == request.max_attempts:
+                    if not exc.transient and token is not None:
+                        self._capability_signer.cancel_reservation(
+                            token,
+                            request_id=request.request_id,
+                            expected_run=request.run_id,
+                            expected_agent=request.agent_revision_id,
+                            model_role=request.model_role,
+                        )
                     raise
                 delay = exc.retry_after
                 if delay is None or not math.isfinite(delay):
@@ -121,11 +146,39 @@ class ModelGateway:
 
 
 def _conservative_input_token_bound(request: ModelRequest) -> int:
-    # UTF-8 bytes are a conservative upper bound for supported provider tokenizers,
-    # with fixed framing overhead for each normalized chat message.
-    return 8 + sum(
-        len(message.role.encode("utf-8"))
-        + len(message.content.encode("utf-8"))
-        + 8
-        for message in request.messages
-    )
+    allowed = {
+        "frequency_penalty",
+        "n",
+        "presence_penalty",
+        "response_format",
+        "seed",
+        "stop",
+        "temperature",
+        "tool_choice",
+        "tools",
+        "top_p",
+    }
+    unknown = set(request.effective_parameters).difference(allowed)
+    if unknown:
+        raise CapabilityBudgetError(
+            "budgeted model request contains parameters with unknown budget impact"
+        )
+    output_count = request.effective_parameters.get("n", 1)
+    if not isinstance(output_count, int) or isinstance(output_count, bool) or output_count != 1:
+        raise CapabilityBudgetError(
+            "budgeted model request must produce exactly one completion"
+        )
+    try:
+        canonical_payload = json.dumps(
+            provider_payload(request),
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    except (TypeError, ValueError) as exc:
+        raise CapabilityBudgetError(
+            "budgeted model request payload is not canonical JSON"
+        ) from exc
+    # UTF-8 bytes plus fixed provider framing is a conservative upper bound for
+    # supported tokenizers and includes tools/response schemas/stop sequences.
+    return len(canonical_payload) + 8
