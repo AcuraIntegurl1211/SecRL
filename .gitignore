@@ -424,6 +424,7 @@ __pycache__
 CONFIG_LIST
 *.yml
 *.yaml
+!.github/workflows/*.yml
 *.db
 tables/
 *.egg-info/

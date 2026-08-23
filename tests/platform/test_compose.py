@@ -68,6 +68,23 @@ class ComposePackagingTest(unittest.TestCase):
         web_stage = dockerfile.split("FROM nginx:1.27.4-alpine AS web", 1)[1]
         self.assertIn("USER nginx", web_stage)
 
+    def test_release_gate_workflow_covers_amd64_compose_and_multiarch(self):
+        workflow = ROOT / ".github" / "workflows" / "secrl-lite-release-gate.yml"
+        self.assertTrue(workflow.is_file())
+        source = workflow.read_text()
+        for required in (
+            "runs-on: ubuntu-latest",
+            "linux/amd64",
+            "linux/arm64",
+            "docker compose",
+            "up -d --wait",
+            "Protocol-Smoke",
+            "backup",
+            "npm --prefix web run build",
+            "python -m unittest",
+        ):
+            self.assertIn(required, source)
+
 
 if __name__ == "__main__":
     unittest.main()
