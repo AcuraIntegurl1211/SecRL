@@ -204,7 +204,7 @@ class SecRLAdapter:
             for ordinal, row in enumerate(rows):
                 if not isinstance(row, dict) or not isinstance(row.get("question"), str):
                     raise ValueError(f"invalid question record: {path}:{ordinal}")
-                question_sha = hashlib.sha256(cls._canonical(row["question"]).encode("utf-8")).hexdigest()
+                question_sha = hashlib.sha256(cls._canonical(row).encode("utf-8")).hexdigest()
                 case_id = f"{incident.group(1)}:{ordinal}:{question_sha}"
                 if case_id in records:
                     raise ValueError(f"duplicate case identity: {case_id}")

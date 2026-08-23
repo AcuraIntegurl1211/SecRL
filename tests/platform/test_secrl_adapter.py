@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import tempfile
 import unittest
 from pathlib import Path
@@ -75,6 +76,15 @@ class SecRLImportTest(unittest.TestCase):
         cases = adapter.enumerate_cases(adapter.dataset_ref(), adapter.scope_all())
         self.assertEqual({case.scenario.id for case in cases}, set(SECRL_EXPECTED_SCENARIO_COUNTS))
         self.assertTrue(all(case.public_input["incident"] in SECRL_EXPECTED_SCENARIO_COUNTS for case in cases))
+
+    def test_case_identity_hashes_full_canonical_question_record(self):
+        adapter = SecRLAdapter()
+        case = adapter.enumerate_cases(adapter.dataset_ref(), adapter.scope_all())[0]
+        source = adapter.read_source_artifact(case.id, adapter.restricted_access())
+        canonical = json.dumps(source, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        expected = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+        self.assertEqual(case.public_input["question_sha256"], expected)
+        self.assertTrue(case.id.endswith(expected))
 
     def test_manifest_has_frozen_dataset_hash(self):
         adapter = SecRLAdapter()
