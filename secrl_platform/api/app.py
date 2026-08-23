@@ -196,6 +196,11 @@ def _context(
             if settings is not None
             else None
         ),
+        secrl_runtime_enabled=bool(
+            settings is not None
+            and settings.secrl_runtime_enabled
+            and settings.secrl_mysql_password is not None
+        ),
     )
 
 

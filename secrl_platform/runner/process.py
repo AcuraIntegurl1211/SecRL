@@ -11,7 +11,13 @@ import httpx
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
-from secrl_platform.agents.builtin import DeterministicSmokeAgent
+from secrl_platform.agents.builtin import (
+    BUILTIN_AGENT_IDS,
+    DeterministicSmokeAgent,
+    LegacyGatewayClient,
+    builtin_manifest,
+    create_approved_builtin,
+)
 from secrl_platform.agents.capabilities import (
     CapabilityClaims,
     CapabilitySigner,
@@ -25,7 +31,20 @@ from secrl_platform.agents.service import (
     ServiceConfig,
 )
 from secrl_platform.benchmarks.smoke import ProtocolSmokeAdapter
+from secrl_platform.benchmarks.secrl import (
+    SecRLAdapter,
+    SecRLMySQLQueryExecutor,
+    SecRLRunSpec,
+)
 from secrl_platform.config import Settings
+from secrl_platform.models.gateway import ModelGateway
+from secrl_platform.models.evaluator import (
+    EvaluatorGatewayClient,
+    EvaluatorProfile,
+    SecRLEvaluator,
+    official_secrl_profile,
+)
+from secrl_platform.models.pricing import Pricing
 from secrl_platform.models.providers import (
     DeferredSecretProvider,
     OpenAICompatibleProvider,
@@ -79,6 +98,9 @@ async def run_pending_once(
     agent_service_transport: AgentServiceTransport | None = None,
     agent_service_resolver=None,
     model_provider_resolver=None,
+    secrl_query_executor=None,
+    secrl_evaluator_resolver=None,
+    builtin_runtime_resolver=None,
 ) -> str | None:
     sessions = session_factory or create_engine_and_session(settings.database_path)
     artifacts = artifact_store or LocalArtifactStore(settings.artifact_dir)
@@ -108,11 +130,21 @@ async def run_pending_once(
             agent_service_transport=agent_service_transport,
             agent_service_resolver=agent_service_resolver,
             model_provider_resolver=model_provider_resolver,
+            builtin_runtime_resolver=builtin_runtime_resolver,
+        )
+        adapter = _resolve_adapter(
+            settings=settings,
+            session_factory=sessions,
+            task_id=task_id,
+            run_id=run_id,
+            secrl_query_executor=secrl_query_executor,
+            model_provider_resolver=model_provider_resolver,
+            secrl_evaluator_resolver=secrl_evaluator_resolver,
         )
         engine = RunnerEngine(
             repository=repository,
             artifact_store=artifacts,
-            adapter=ProtocolSmokeAdapter.load_default(),
+            adapter=adapter,
             runtime_factory=runtime_factory,
             model_budget_guard=budget_guard,
         )
@@ -131,6 +163,7 @@ def _resolve_runtime(
     agent_service_transport: AgentServiceTransport | None,
     agent_service_resolver,
     model_provider_resolver,
+    builtin_runtime_resolver,
 ):
     with session_factory() as session:
         task = session.get(EvaluationTaskORM, task_id)
@@ -146,8 +179,9 @@ def _resolve_runtime(
             raise RunnerConfigurationError("task runtime metadata is invalid") from exc
         if task_spec.get("agent_revision_sha256") != agent.sha256:
             raise RunnerConfigurationError("task agent revision hash changed")
+        model_bundle = None
         if task.model_config_revision_id is not None:
-            _resolve_model_provider(
+            model_bundle = _resolve_model_provider(
                 settings=settings,
                 session=session,
                 task_spec=task_spec,
@@ -158,28 +192,73 @@ def _resolve_runtime(
         endpoint = agent.service_endpoint
         service_manifest_sha256 = agent.service_manifest_sha256
         budget = json.loads(task.budget_json)
+        agent_parameters = task_spec.get("agent_parameters", {})
+        limits = task_spec.get("limits", {})
 
     if agent_kind == "BUILT_IN":
         revision = DeterministicSmokeAgent.revision()
-        if agent.sha256 != revision.manifest_sha256 or manifest != revision.manifest:
+        if manifest.agent_id == revision.manifest.agent_id:
+            if agent.sha256 != revision.manifest_sha256 or manifest != revision.manifest:
+                raise RunnerConfigurationError("built-in agent revision is not allowlisted")
+            return DeterministicSmokeAgent, None, None
+        if manifest.agent_id not in BUILTIN_AGENT_IDS:
             raise RunnerConfigurationError("built-in agent revision is not allowlisted")
-        return DeterministicSmokeAgent, None, None
+        approved = builtin_manifest(manifest.agent_id)
+        if agent.sha256 != approved.sha256() or manifest != approved:
+            raise RunnerConfigurationError("built-in agent revision is not allowlisted")
+        if model_bundle is None:
+            raise RunnerConfigurationError("SecRL built-in agent requires a model config")
+        provider, model_name, model_parameters, pricing = model_bundle
+        signer = capability_signer(settings)
+        token = _issue_capability(signer, run_id, manifest.agent_id, budget)
+        gateway = ModelGateway(
+            provider=provider,
+            pricing=Pricing(
+                input_per_million=pricing.get("input_per_million"),
+                output_per_million=pricing.get("output_per_million"),
+            ),
+            capability_signer=signer,
+        )
+        max_output_tokens = model_parameters.get("max_output_tokens") or model_parameters.get("max_tokens")
+        if not isinstance(max_output_tokens, int) or max_output_tokens < 1:
+            raise RunnerConfigurationError("SecRL model requires a positive output token limit")
+        model_client = LegacyGatewayClient(
+            gateway=gateway,
+            model=model_name,
+            capability_token=token,
+            agent_revision_id=manifest.agent_id,
+            max_output_tokens=max_output_tokens,
+        )
+        parameters = dict(agent_parameters)
+        frozen_max_steps = limits.get("max_steps", 15)
+
+        def builtin_factory():
+            if builtin_runtime_resolver is not None:
+                return builtin_runtime_resolver(
+                    manifest.agent_id,
+                    parameters,
+                    model_client,
+                    model_name,
+                )
+            return create_approved_builtin(
+                manifest.agent_id,
+                parameters,
+                model_client=model_client,
+                model_name=model_name,
+                max_steps=frozen_max_steps,
+            )
+
+        return builtin_factory, CapabilityBudgetGuard(
+            signer=signer,
+            token=token,
+            run_id=run_id,
+            agent_revision_id=manifest.agent_id,
+        ), None
 
     if agent_kind != "SERVICE" or endpoint is None or service_manifest_sha256 is None:
         raise RunnerConfigurationError("Agent Service registration is incomplete")
     signer = capability_signer(settings)
-    issued_at = int(time.time())
-    claims = CapabilityClaims(
-        run_id=run_id,
-        agent_revision_id=manifest.agent_id,
-        allowed_model_roles=("agent",),
-        max_tokens=int(budget.get("max_tokens", 0)),
-        max_cost=Decimal(str(budget.get("max_cost", "0"))),
-        issued_at=issued_at,
-        expires_at=issued_at + 300,
-        nonce=secrets.token_urlsafe(18),
-    )
-    token = signer.issue(claims)
+    token = _issue_capability(signer, run_id, manifest.agent_id, budget)
     owned_client = None
     transport = agent_service_transport
     if transport is None:
@@ -215,7 +294,7 @@ def _resolve_model_provider(
     task_spec: dict,
     model_id: str,
     resolver,
-) -> DeferredSecretProvider:
+) -> tuple[DeferredSecretProvider, str, dict, dict]:
     model = session.get(ModelConfigRevisionORM, model_id)
     if (
         model is None
@@ -238,7 +317,7 @@ def _resolve_model_provider(
         raise RunnerConfigurationError("task model credential binding is invalid")
     if model.provider != "openai-compatible":
         raise RunnerConfigurationError("task model provider is not allowlisted")
-    return DeferredSecretProvider(
+    provider = DeferredSecretProvider(
         secret_store=SecretStore(bytes.fromhex(settings.master_key)),
         encrypted_secret=envelope,
         provider_factory=lambda api_key: OpenAICompatibleProvider(
@@ -247,6 +326,142 @@ def _resolve_model_provider(
             allowed_hosts=settings.model_provider_allowlist,
             resolver=resolver,
         ),
+    )
+    return provider, model.model, parameters, pricing
+
+
+def _issue_capability(
+    signer: CapabilitySigner,
+    run_id: str,
+    agent_revision_id: str,
+    budget: dict,
+    *,
+    allowed_model_roles: tuple[str, ...] = ("agent",),
+) -> str:
+    issued_at = int(time.time())
+    return signer.issue(
+        CapabilityClaims(
+            run_id=run_id,
+            agent_revision_id=agent_revision_id,
+            allowed_model_roles=allowed_model_roles,
+            max_tokens=int(budget.get("max_tokens", 0)),
+            max_cost=Decimal(str(budget.get("max_cost", "0"))),
+            issued_at=issued_at,
+            expires_at=issued_at + 300,
+            nonce=secrets.token_urlsafe(18),
+        )
+    )
+
+
+def _resolve_adapter(
+    *,
+    settings: Settings,
+    session_factory: sessionmaker[Session],
+    task_id: str,
+    run_id: str,
+    secrl_query_executor,
+    model_provider_resolver,
+    secrl_evaluator_resolver,
+):
+    with session_factory() as session:
+        task = session.get(EvaluationTaskORM, task_id)
+        run = session.get(RunORM, run_id)
+        if task is None or run is None:
+            raise RunnerConfigurationError("task RunSpec was not found")
+        try:
+            task_spec = json.loads(task.task_spec_json)
+            run_spec = json.loads(run.run_spec_json)
+            budget = json.loads(task.budget_json)
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise RunnerConfigurationError("task RunSpec is invalid") from exc
+        agent = session.get(AgentRevisionORM, task.agent_revision_id)
+        if agent is None:
+            raise RunnerConfigurationError("task agent revision was not found")
+        try:
+            agent_manifest = AgentManifest.model_validate_json(agent.manifest_json)
+        except ValueError as exc:
+            raise RunnerConfigurationError("task agent revision is invalid") from exc
+        model_bundle = None
+        if task.model_config_revision_id is not None:
+            model_bundle = _resolve_model_provider(
+                settings=settings,
+                session=session,
+                task_spec=task_spec,
+                model_id=task.model_config_revision_id,
+                resolver=model_provider_resolver,
+            )
+    if hashlib.sha256(run.run_spec_json.encode("utf-8")).hexdigest() != run.run_spec_sha256:
+        raise RunnerConfigurationError("task RunSpec hash changed")
+    benchmark_id = task_spec.get("benchmark_id")
+    if benchmark_id == "protocol-smoke":
+        return ProtocolSmokeAdapter.load_default()
+    if benchmark_id != "secrl":
+        raise RunnerConfigurationError("task benchmark is not allowlisted")
+    if model_bundle is None:
+        raise RunnerConfigurationError("SecRL evaluator model config is missing")
+    limits = run_spec.get("limits", {})
+    try:
+        frozen_limits = SecRLRunSpec(**limits)
+    except (TypeError, ValueError) as exc:
+        raise RunnerConfigurationError("SecRL RunSpec limits are invalid") from exc
+    executor = secrl_query_executor
+    if executor is None:
+        if not settings.secrl_runtime_enabled or settings.secrl_mysql_password is None:
+            raise RunnerConfigurationError("SecRL runtime is not configured")
+        executor = SecRLMySQLQueryExecutor(
+            user=settings.secrl_mysql_user,
+            password=settings.secrl_mysql_password.get_secret_value(),
+            database=settings.secrl_mysql_database,
+        ).query_sql
+    try:
+        frozen_profile = EvaluatorProfile.model_validate(
+            task_spec["evaluator_profile"]
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise RunnerConfigurationError("SecRL evaluator profile is invalid") from exc
+    expected_profile = official_secrl_profile(
+        formal=True,
+        model_revision=task_spec.get("model_config_sha256", ""),
+    )
+    if frozen_profile != expected_profile:
+        raise RunnerConfigurationError("SecRL evaluator profile is not approved")
+    if secrl_evaluator_resolver is not None:
+        evaluator = secrl_evaluator_resolver(frozen_profile)
+    else:
+        provider, model_name, model_parameters, pricing = model_bundle
+        signer = capability_signer(settings)
+        token = _issue_capability(
+            signer,
+            run_id,
+            agent_manifest.agent_id,
+            budget,
+            allowed_model_roles=("evaluator",),
+        )
+        max_output_tokens = model_parameters.get("max_output_tokens") or model_parameters.get("max_tokens")
+        if not isinstance(max_output_tokens, int) or max_output_tokens < 1:
+            raise RunnerConfigurationError("SecRL evaluator requires a positive output token limit")
+        gateway = ModelGateway(
+            provider=provider,
+            pricing=Pricing(
+                input_per_million=pricing.get("input_per_million"),
+                output_per_million=pricing.get("output_per_million"),
+            ),
+            capability_signer=signer,
+        )
+        evaluator = SecRLEvaluator(
+            frozen_profile,
+            model_client=EvaluatorGatewayClient(
+                gateway=gateway,
+                model=model_name,
+                capability_token=token,
+                agent_revision_id=agent_manifest.agent_id,
+                max_output_tokens=max_output_tokens,
+            ),
+        )
+    return SecRLAdapter(
+        query_executor=executor,
+        run_spec=frozen_limits,
+        evaluator=evaluator,
     )
 
 

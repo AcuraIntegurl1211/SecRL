@@ -85,9 +85,10 @@ class DatabaseTest(unittest.TestCase):
             finally:
                 Base.metadata.remove(future_table)
 
-    def test_schema_has_all_sixteen_lite_tables(self):
+    def test_schema_has_all_lite_tables(self):
         expected = {
             "agent_revision",
+            "analysis_run",
             "app_setting",
             "artifact",
             "attribution",

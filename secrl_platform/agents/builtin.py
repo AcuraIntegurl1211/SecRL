@@ -1,9 +1,26 @@
 from __future__ import annotations
 
+import inspect
+import json
+import re
+import asyncio
+import hashlib
+from dataclasses import dataclass
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any, Callable, Mapping
+
+from pydantic import SecretStr
+
+from secrl_platform.models.gateway import ModelGateway
+from secrl_platform.models.providers import ModelMessage, ModelRequest
+
 from secrl_platform.agents.protocol import (
+    AgentAction,
     AgentManifest,
     AgentRevisionRef,
     EpisodeContext,
+    AgentRuntime,
     UsageSnapshot,
 )
 from secrl_platform.agents.registry import DETERMINISTIC_SMOKE_REVISION_ID
@@ -30,6 +47,412 @@ _QUERY_BY_CASE = {
     "smoke-011": "lambda",
     "smoke-012": "mu",
 }
+
+
+BUILTIN_AGENT_IDS = (
+    "secrl-baseline-v1",
+    "secrl-expel-v1",
+    "secrl-mas-v1",
+    "secrl-prompt-sauce-v1",
+    "secrl-prompt-sauce-reflexion-v1",
+    "secrl-react-v1",
+    "secrl-react-reflexion-v1",
+)
+
+
+class InvalidLegacyAction(ValueError):
+    """Raised when a legacy agent does not produce exactly one action."""
+
+
+def normalize_legacy_action(payload: Any) -> AgentAction:
+    """Convert legacy ``execute[...]``/``submit[...]`` output to AgentAction."""
+    submit_hint = False
+    tuple_result = False
+    if isinstance(payload, tuple) and len(payload) == 2:
+        payload, submit_hint = payload
+        tuple_result = True
+    if isinstance(payload, (ToolCallAction, SubmitAction, YieldAction)):
+        return payload
+    if not isinstance(payload, str):
+        raise InvalidLegacyAction("legacy action must be a string or (string, submit) tuple")
+    raw = payload.strip()
+    if submit_hint:
+        if not raw:
+            raise InvalidLegacyAction("submitted answer cannot be empty")
+        return SubmitAction(type="submit", answer=raw)
+    match = re.fullmatch(r"(execute|submit|yield)\[(.*)\]", raw, flags=re.IGNORECASE | re.DOTALL)
+    if match is None:
+        if tuple_result and raw:
+            return ToolCallAction(type="tool_call", tool="sql_query", arguments={"query": raw})
+        raise InvalidLegacyAction("legacy action must contain exactly one execute[], submit[], or yield[]")
+    kind, body = match.group(1).lower(), match.group(2).strip()
+    if not body or re.search(r"(?:execute|submit|yield)\s*\[", body, flags=re.IGNORECASE):
+        raise InvalidLegacyAction("legacy action contains multiple or empty actions")
+    if kind == "execute":
+        return ToolCallAction(type="tool_call", tool="sql_query", arguments={"query": body})
+    if kind == "submit":
+        return SubmitAction(type="submit", answer=body)
+    return YieldAction(type="yield", reason=body)
+
+
+@dataclass(frozen=True)
+class BuiltinAgentSpec:
+    agent_id: str
+    name: str
+    factory: Callable[[Mapping[str, Any]], Any]
+
+
+def _safe_config(parameters: Mapping[str, Any]) -> dict[str, Any]:
+    forbidden = re.compile(r"(?:api[_-]?key|secret|password|credential|access[_-]?token|auth[_-]?token|bearer)", re.IGNORECASE)
+    def contains_forbidden(value: Any) -> bool:
+        if isinstance(value, Mapping):
+            return any(forbidden.search(str(key)) or contains_forbidden(item) for key, item in value.items())
+        if isinstance(value, (list, tuple)):
+            return any(contains_forbidden(item) for item in value)
+        return False
+
+    if contains_forbidden(parameters):
+        raise ValueError("agent parameters may not contain credentials")
+    return dict(parameters)
+
+
+def _construct_baseline(parameters: Mapping[str, Any]) -> Any:
+    from secgym.agents.baseline_agent import BaselineAgent
+
+    return BaselineAgent(**dict(parameters))
+
+
+def _construct_expel(parameters: Mapping[str, Any]) -> Any:
+    from secgym.agents.expel_agent import ExpelAgent
+
+    return ExpelAgent(**dict(parameters))
+
+
+def _construct_mas(parameters: Mapping[str, Any]) -> Any:
+    from secgym.agents.maset_slave_agent import MultiModelBaselineAgent
+
+    return MultiModelBaselineAgent(**dict(parameters))
+
+
+def _construct_prompt_sauce(parameters: Mapping[str, Any]) -> Any:
+    from secgym.agents.prompt_sauce_agent import PromptSauceAgent
+
+    return PromptSauceAgent(**dict(parameters))
+
+
+def _construct_prompt_sauce_reflexion(parameters: Mapping[str, Any]) -> Any:
+    from secgym.agents.prompt_sauce_reflexion_agent import PromptSauceReflexionAgent
+
+    return PromptSauceReflexionAgent(**dict(parameters))
+
+
+def _construct_react(parameters: Mapping[str, Any]) -> Any:
+    from secgym.agents.react_agent import ReActAgent
+
+    return ReActAgent(**dict(parameters))
+
+
+def _construct_react_reflexion(parameters: Mapping[str, Any]) -> Any:
+    from secgym.agents.react_reflexion_agent import ReActReflexionAgent
+
+    return ReActReflexionAgent(**dict(parameters))
+
+
+BUILTIN_AGENT_SPECS = (
+    BuiltinAgentSpec("secrl-baseline-v1", "BaselineAgent", _construct_baseline),
+    BuiltinAgentSpec("secrl-expel-v1", "ExpelAgent", _construct_expel),
+    BuiltinAgentSpec("secrl-mas-v1", "MultiModelBaselineAgent", _construct_mas),
+    BuiltinAgentSpec("secrl-prompt-sauce-v1", "PromptSauceAgent", _construct_prompt_sauce),
+    BuiltinAgentSpec("secrl-prompt-sauce-reflexion-v1", "PromptSauceReflexionAgent", _construct_prompt_sauce_reflexion),
+    BuiltinAgentSpec("secrl-react-v1", "ReActAgent", _construct_react),
+    BuiltinAgentSpec("secrl-react-reflexion-v1", "ReActReflexionAgent", _construct_react_reflexion),
+)
+_BUILTIN_SPEC_BY_ID = {spec.agent_id: spec for spec in BUILTIN_AGENT_SPECS}
+_COMMON_PARAMETERS = frozenset(
+    {"cache_seed", "temperature", "retry_num", "retry_wait_time"}
+)
+_ALLOWED_PARAMETERS = {
+    "secrl-baseline-v1": _COMMON_PARAMETERS | {"submit_summary"},
+    "secrl-expel-v1": _COMMON_PARAMETERS | {"submit_summary"},
+    "secrl-mas-v1": _COMMON_PARAMETERS | {"submit_summary"},
+    "secrl-prompt-sauce-v1": _COMMON_PARAMETERS,
+    "secrl-prompt-sauce-reflexion-v1": _COMMON_PARAMETERS,
+    "secrl-react-v1": _COMMON_PARAMETERS | {"submit_summary"},
+    "secrl-react-reflexion-v1": _COMMON_PARAMETERS | {"submit_summary"},
+}
+_EXPEL_ASSET_ROOT = Path(__file__).resolve().parents[2] / "secgym" / "agents" / "expel_train"
+
+
+def approved_builtin_spec(agent_id: str) -> BuiltinAgentSpec:
+    try:
+        return _BUILTIN_SPEC_BY_ID[agent_id]
+    except KeyError as exc:
+        raise KeyError(f"unapproved built-in agent: {agent_id}") from exc
+
+
+def normalize_builtin_parameters(
+    agent_id: str,
+    parameters: Mapping[str, Any],
+) -> dict[str, Any]:
+    approved_builtin_spec(agent_id)
+    safe = _safe_config(parameters)
+    unknown = set(safe).difference(_ALLOWED_PARAMETERS[agent_id])
+    if unknown:
+        raise ValueError(
+            f"unsupported built-in agent parameter: {sorted(unknown)[0]}"
+        )
+    for name, value in safe.items():
+        if name in {"cache_seed", "retry_num"}:
+            if isinstance(value, bool) or not isinstance(value, int) or (
+                name == "retry_num" and value < 1
+            ):
+                raise ValueError(f"invalid built-in agent parameter: {name}")
+        elif name in {"temperature", "retry_wait_time"}:
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or (
+                name == "retry_wait_time" and value < 0
+            ):
+                raise ValueError(f"invalid built-in agent parameter: {name}")
+        elif name == "submit_summary" and not isinstance(value, bool):
+            raise ValueError("invalid built-in agent parameter: submit_summary")
+    return safe
+
+
+def create_approved_builtin(
+    agent_id: str,
+    parameters: Mapping[str, Any],
+    *,
+    model_client: Any | None = None,
+    model_name: str | None = None,
+    max_steps: int | None = None,
+) -> "BuiltinAgentAdapter":
+    spec = approved_builtin_spec(agent_id)
+    safe_parameters = normalize_builtin_parameters(agent_id, parameters)
+    if max_steps is not None:
+        if not isinstance(max_steps, int) or max_steps < 1:
+            raise ValueError("built-in agent max_steps must be positive")
+        safe_parameters["max_steps"] = max_steps
+    if model_client is not None:
+        if not model_name:
+            raise ValueError("platform model name is required")
+        gateway_config = [
+            {
+                "model": model_name,
+                "api_key": "platform-gateway-managed",
+                "api_type": "openai",
+            }
+        ]
+        if agent_id == "secrl-mas-v1":
+            safe_parameters["config_list_master"] = list(gateway_config)
+            safe_parameters["config_list_slave"] = list(gateway_config)
+        else:
+            safe_parameters["config_list"] = gateway_config
+    if agent_id == "secrl-expel-v1":
+        safe_parameters["insight_path"] = str(_EXPEL_ASSET_ROOT / "insights.json")
+        safe_parameters["experience_path"] = str(_EXPEL_ASSET_ROOT / "corrects.jsonl")
+    legacy = spec.factory(safe_parameters)
+    return BuiltinAgentAdapter(legacy, model_client=model_client, manifest=builtin_manifest(agent_id))
+
+
+class LegacyGatewayClient:
+    """OpenAIWrapper-shaped bridge that keeps legacy calls inside ModelGateway."""
+
+    def __init__(
+        self,
+        *,
+        gateway: ModelGateway,
+        model: str,
+        capability_token: str,
+        agent_revision_id: str,
+        max_output_tokens: int,
+    ) -> None:
+        self._gateway = gateway
+        self._model = model
+        self._capability_token = SecretStr(capability_token)
+        self._agent_revision_id = agent_revision_id
+        self._max_output_tokens = max_output_tokens
+        self._episode: EpisodeContext | None = None
+        self.total_usage_summary: dict[str, dict[str, int]] = {}
+
+    def bind_episode(self, episode: EpisodeContext) -> None:
+        self._episode = episode
+
+    @property
+    def model_gateway_binding(self) -> str:
+        return hashlib.sha256(
+            self._capability_token.get_secret_value().encode("utf-8")
+        ).hexdigest()
+
+    def clear_usage_summary(self) -> None:
+        self.total_usage_summary = {}
+
+    def create(self, *, messages: list[Mapping[str, Any]], model: str | None = None, **parameters: Any) -> Any:
+        if self._episode is None:
+            raise RuntimeError("legacy model client has no active episode")
+        effective = {
+            key: value
+            for key, value in parameters.items()
+            if key in {"temperature", "stop", "reasoning_effort"} and value is not None
+        }
+        if "reasoning_effort" in effective:
+            effective.pop("reasoning_effort")
+        request = ModelRequest(
+            provider_adapter_version="openai-compatible-v1",
+            model_role="agent",
+            model=model or self._model,
+            messages=tuple(
+                ModelMessage(role=str(item["role"]), content=str(item.get("content", "")))
+                for item in messages
+            ),
+            effective_parameters=effective,
+            run_id=self._episode.run_id,
+            case_id=self._episode.case_id,
+            attempt_id=self._episode.attempt_id,
+            agent_revision_id=self._agent_revision_id,
+            capability_token=self._capability_token,
+            max_output_tokens=self._max_output_tokens,
+        )
+        response = asyncio.run(self._gateway.complete(request))
+        usage = response.usage
+        usage_payload = {
+            "prompt_tokens": usage.prompt if usage is not None else 0,
+            "completion_tokens": usage.completion if usage is not None else 0,
+        }
+        self.total_usage_summary[self._model] = usage_payload
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content=response.text))],
+            usage=SimpleNamespace(as_dict=lambda: usage_payload),
+            model=self._model,
+        )
+
+
+def builtin_manifest(agent_id: str) -> AgentManifest:
+    spec = approved_builtin_spec(agent_id)
+    properties = {}
+    for name in sorted(_ALLOWED_PARAMETERS[agent_id]):
+        if name == "submit_summary":
+            properties[name] = {"type": "boolean"}
+        elif name in {"cache_seed", "retry_num"}:
+            properties[name] = {"type": "integer"}
+        else:
+            properties[name] = {"type": "number"}
+    return AgentManifest(
+        agent_id=agent_id,
+        name=spec.name,
+        version="1.0.0",
+        runtime="built_in",
+        parameter_schema={
+            "type": "object",
+            "additionalProperties": False,
+            "properties": properties,
+        },
+    )
+
+
+class BuiltinAgentAdapter(AgentRuntime):
+    """Async Agent Runtime facade around one approved synchronous SecGym agent."""
+
+    def __init__(
+        self,
+        legacy_agent: Any,
+        *,
+        model_client: Any | None = None,
+        manifest: AgentManifest | None = None,
+    ) -> None:
+        self.legacy_agent = legacy_agent
+        self._model_client = model_client
+        self._manifest = manifest or AgentManifest(
+            agent_id="secrl-legacy",
+            name=str(getattr(legacy_agent, "name", "SecRL legacy agent")),
+            version="1.0.0",
+            runtime="built_in",
+        )
+        self._episode: EpisodeContext | None = None
+        self._closed = False
+        if model_client is not None:
+            for attr in ("client", "master_client", "slave_client"):
+                if hasattr(legacy_agent, attr):
+                    setattr(legacy_agent, attr, model_client)
+
+    @property
+    def model_access(self) -> str:
+        return "platform_gateway"
+
+    @property
+    def model_gateway_binding(self) -> str | None:
+        if self._model_client is None:
+            return None
+        return getattr(self._model_client, "model_gateway_binding", None)
+
+    @property
+    def name(self) -> str:
+        return self._manifest.name
+
+    async def reset(self, episode: EpisodeContext) -> None:
+        self._episode = episode
+        self._closed = False
+        if self._model_client is not None and hasattr(self._model_client, "bind_episode"):
+            self._model_client.bind_episode(episode)
+        public = episode.public_input
+        question_dict = {
+            "context": public.get("context", ""),
+            "question": public.get("question", ""),
+        }
+        reset = getattr(self.legacy_agent, "reset", None)
+        if reset is None:
+            return
+        parameters = inspect.signature(reset).parameters
+        kwargs: dict[str, Any] = {}
+        if "change_seed" in parameters:
+            kwargs["change_seed"] = False
+        if "question_dict" in parameters:
+            kwargs["question_dict"] = question_dict
+        result = await asyncio.to_thread(reset, **kwargs)
+        if inspect.isawaitable(result):
+            await result
+        if self._model_client is not None:
+            for attr in ("client", "master_client", "slave_client"):
+                if hasattr(self.legacy_agent, attr):
+                    setattr(self.legacy_agent, attr, self._model_client)
+
+    async def act(self, observation: Any) -> AgentAction:
+        if self._episode is None or self._closed:
+            raise RuntimeError("agent runtime has no active episode")
+        payload = observation.content if hasattr(observation, "content") else observation
+        text = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
+        result = await asyncio.to_thread(self.legacy_agent.act, text)
+        if inspect.isawaitable(result):
+            result = await result
+        return normalize_legacy_action(result)
+
+    def usage(self) -> UsageSnapshot:
+        value: Any = None
+        method = getattr(self.legacy_agent, "usage", None)
+        if callable(method):
+            value = method()
+        if value is None:
+            value = getattr(self.legacy_agent, "totoal_usage", {})
+        if isinstance(value, UsageSnapshot):
+            return value
+        if not isinstance(value, Mapping):
+            return UsageSnapshot()
+        # Legacy clients use either a flat usage dictionary or one per model.
+        flat: dict[str, int] = {"prompt_tokens": 0, "completion_tokens": 0, "cached_tokens": 0, "reasoning_tokens": 0}
+        values = value.values() if all(isinstance(item, Mapping) for item in value.values()) else (value,)
+        for item in values:
+            for key in flat:
+                raw = item.get(key, 0)
+                if isinstance(raw, (int, float)) and raw >= 0:
+                    flat[key] += int(raw)
+        return UsageSnapshot(**flat)
+
+    async def close(self) -> None:
+        close = getattr(self.legacy_agent, "close", None)
+        if callable(close):
+            result = await asyncio.to_thread(close)
+            if inspect.isawaitable(result):
+                await result
+        self._closed = True
+        self._episode = None
 
 
 class DeterministicSmokeAgent:

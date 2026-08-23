@@ -62,6 +62,8 @@ def _authorized_artifact(
         artifact = session.get(ArtifactORM, artifact_id)
         if artifact is None:
             raise ApiError(404, "ARTIFACT_NOT_FOUND", "Artifact was not found")
+        if artifact.visibility != "PUBLIC":
+            raise ApiError(403, "ARTIFACT_RESTRICTED", "Artifact is restricted")
         store_root = context.artifact_store.root
         resolved_root = store_root.resolve()
         expected = (

@@ -13,6 +13,13 @@ from secrl_platform.api.dependencies import (
 )
 from secrl_platform.api.errors import ApiError
 from secrl_platform.api.schemas import ReviewCreateRequest
+from secrl_platform.analysis.service import (
+    AnalysisRunRepository,
+    HumanReviewRepository,
+    PersistentReviewRecord,
+    RegisteredAnalysisRun,
+    analyze_completed_run,
+)
 from secrl_platform.runner.recovery import RunnerRepository
 from secrl_platform.runner.state import RunStateMachine
 from secrl_platform.storage.orm import (
@@ -147,13 +154,21 @@ def analyze_run(
     id: str,
     _user: LocalUserORM = Depends(require_csrf_user),
     context: ApiContext = Depends(get_context),
-) -> None:
+) -> dict:
     _task_id(context, id)
-    raise ApiError(
-        409,
-        "MILESTONE_NOT_AVAILABLE",
-        "Failure analysis is not available in Milestone 2",
-    )
+    try:
+        record = analyze_completed_run(
+            run_id=id,
+            session_factory=context.session_factory,
+            artifact_store=context.artifact_store,
+        )
+    except KeyError as exc:
+        raise ApiError(404, "RUN_NOT_FOUND", "Run was not found") from exc
+    except ValueError as exc:
+        raise ApiError(409, "ANALYSIS_NOT_READY", "Run cannot be analyzed") from exc
+    except Exception as exc:
+        raise ApiError(500, "ANALYSIS_FAILED", "Failure analysis failed") from exc
+    return _analysis_payload(record)
 
 
 @router.get("/runs/{id}/analysis", tags=["analysis"])
@@ -161,30 +176,54 @@ def get_analysis(
     id: str,
     _user: LocalUserORM = Depends(require_user),
     context: ApiContext = Depends(get_context),
-) -> None:
+) -> list[dict]:
     _task_id(context, id)
-    raise ApiError(
-        409,
-        "MILESTONE_NOT_AVAILABLE",
-        "Failure analysis is not available in Milestone 2",
-    )
+    return [
+        _analysis_payload(record)
+        for record in AnalysisRunRepository(
+            context.session_factory,
+            context.artifact_store,
+        ).history(id)
+    ]
 
 
-@router.post("/attributions/{id}/reviews", tags=["analysis"])
+@router.post("/attributions/{id}/reviews", tags=["analysis"], status_code=201)
 def create_review(
     id: str,
-    _payload: ReviewCreateRequest,
-    _user: LocalUserORM = Depends(require_csrf_user),
+    payload: ReviewCreateRequest,
+    user: LocalUserORM = Depends(require_csrf_user),
     context: ApiContext = Depends(get_context),
-) -> None:
+) -> dict:
+    try:
+        review = HumanReviewRepository(context.session_factory).submit(
+            attribution_id=id,
+            reviewer_user_id=user.id,
+            primary=payload.primary,
+            secondary=payload.secondary,
+            confidence=payload.confidence,
+            evidence=payload.evidence,
+            notes=payload.notes,
+        )
+    except KeyError as exc:
+        raise ApiError(404, "ATTRIBUTION_NOT_FOUND", "Attribution was not found") from exc
+    except ValueError as exc:
+        raise ApiError(422, "INVALID_REVIEW", "Human review is invalid") from exc
+    return _review_payload(review)
+
+
+@router.get("/attributions/{id}/reviews", tags=["analysis"])
+def list_reviews(
+    id: str,
+    _user: LocalUserORM = Depends(require_user),
+    context: ApiContext = Depends(get_context),
+) -> list[dict]:
     with context.session_factory() as session:
         if session.get(AttributionORM, id) is None:
             raise ApiError(404, "ATTRIBUTION_NOT_FOUND", "Attribution was not found")
-    raise ApiError(
-        409,
-        "MILESTONE_NOT_AVAILABLE",
-        "Attribution reviews are not available in Milestone 2",
-    )
+    return [
+        _review_payload(review)
+        for review in HumanReviewRepository(context.session_factory).history(id)
+    ]
 
 
 @router.get("/compare", tags=["compare"])
@@ -204,6 +243,12 @@ def compare(
                 409,
                 "BENCHMARK_REVISION_MISMATCH",
                 "Comparison requires the same Benchmark revision",
+            )
+        if left_task.dataset_version_id != right_task.dataset_version_id:
+            raise ApiError(
+                409,
+                "DATASET_REVISION_MISMATCH",
+                "Comparison requires the same Dataset revision",
             )
         return {
             "left": {"id": left_task.id, "status": left_task.status},
@@ -226,4 +271,32 @@ def _run_payload(run: RunORM, task: EvaluationTaskORM | None) -> dict:
         "status": task.status if task is not None else run.status,
         "checkpoint": run.next_case_index,
         "run_spec_sha256": run.run_spec_sha256,
+    }
+
+
+def _review_payload(review: PersistentReviewRecord) -> dict:
+    return {
+        "id": review.id,
+        "attribution_id": review.attribution_id,
+        "revision": review.revision,
+        "prior_review_id": review.prior_review_id,
+        "reviewer_user_id": review.reviewer_user_id,
+        "primary": review.primary,
+        "secondary": list(review.secondary),
+        "confidence": review.confidence,
+        "evidence": list(review.evidence),
+        "notes": review.notes,
+    }
+
+
+def _analysis_payload(record: RegisteredAnalysisRun) -> dict:
+    return {
+        "id": record.id,
+        "run_id": record.run_id,
+        "revision": record.revision,
+        "taxonomy_version": record.taxonomy_version,
+        "input_manifest_sha256": record.input_manifest_sha256,
+        "output_manifest_sha256": record.output_manifest_sha256,
+        "manifest_artifact_id": record.manifest_artifact_id,
+        "artifact_visibility": "RESTRICTED",
     }
