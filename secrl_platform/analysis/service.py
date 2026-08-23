@@ -11,6 +11,7 @@ import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, Mapping
 
 
@@ -72,7 +73,10 @@ class AnalysisInputs:
         for name, path in paths.items():
             if not path.is_file():
                 raise ValueError(f"analysis input is missing: {name}")
-        return FrozenAnalysisInputs(paths=paths, hashes={name: _sha256(path) for name, path in paths.items()})
+        return FrozenAnalysisInputs(
+            paths=MappingProxyType(dict(paths)),
+            hashes=MappingProxyType({name: _sha256(path) for name, path in paths.items()}),
+        )
 
 
 @dataclass(frozen=True)
@@ -95,6 +99,10 @@ class ReviewRecord:
     confidence: str
     evidence: tuple[str, ...]
     notes: str = ""
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "secondary", tuple(self.secondary))
+        object.__setattr__(self, "evidence", tuple(self.evidence))
 
 
 class HumanReviewStore:

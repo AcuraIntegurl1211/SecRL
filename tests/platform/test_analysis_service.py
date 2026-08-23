@@ -40,6 +40,8 @@ class AnalysisServiceTest(unittest.TestCase):
             root = Path(directory)
             inputs = self._inputs(root)
             frozen = inputs.freeze()
+            with self.assertRaises(TypeError):
+                frozen.hashes["agent"] = "tampered"
             inputs.agent_json.write_text("tampered", encoding="utf-8")
             with self.assertRaises(ValueError):
                 frozen.verify()
@@ -64,9 +66,9 @@ class AnalysisServiceTest(unittest.TestCase):
                 prior_revision=None,
                 reviewer_user_id="reviewer-1",
                 primary="GOLD",
-                secondary=("ANSWER",),
+                secondary=["ANSWER"],
                 confidence="high",
-                evidence=("source hash",),
+                evidence=["source hash"],
                 notes="confirmed",
             )
         )
@@ -85,6 +87,8 @@ class AnalysisServiceTest(unittest.TestCase):
             )
         )
         self.assertEqual(store.history("attr-1"), (first, second))
+        with self.assertRaises(AttributeError):
+            first.secondary.append("LOOP")
         with self.assertRaises(ValueError):
             store.append(second)
 

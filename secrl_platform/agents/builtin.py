@@ -94,7 +94,7 @@ class BuiltinAgentSpec:
 
 
 def _safe_config(parameters: Mapping[str, Any]) -> dict[str, Any]:
-    forbidden = re.compile(r"(?:api[_-]?key|secret|password|credential|token)", re.IGNORECASE)
+    forbidden = re.compile(r"(?:api[_-]?key|secret|password|credential|access[_-]?token|auth[_-]?token|bearer)", re.IGNORECASE)
     def contains_forbidden(value: Any) -> bool:
         if isinstance(value, Mapping):
             return any(forbidden.search(str(key)) or contains_forbidden(item) for key, item in value.items())

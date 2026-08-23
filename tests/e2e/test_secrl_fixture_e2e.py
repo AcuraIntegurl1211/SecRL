@@ -6,6 +6,7 @@ from pathlib import Path
 
 from secrl_platform.benchmarks.secrl import (
     SECRL_DATASET_SHA256,
+    SecRLExcytinEnvironment,
     SecRLRunSpec,
     SecRLAdapter,
     replay_fixture_through_adapter,
@@ -66,6 +67,19 @@ class SecRLFixtureParityTest(unittest.TestCase):
             len(json.dumps([["abcdefghij"]] * 5, ensure_ascii=False)),
         )
         self.assertLessEqual(len(observation.content["result"]), 18)
+
+    def test_existing_excytin_instance_is_wrapped_without_lifecycle_control(self):
+        class ExistingEnvironment:
+            def execute_query(self, query):
+                return {"query": query}
+
+            def close(self):
+                raise AssertionError("adapter must not control environment lifecycle")
+
+        provider = SecRLExcytinEnvironment.from_existing_environment(
+            ExistingEnvironment(), run_spec=SecRLRunSpec()
+        )
+        self.assertEqual(provider.query_sql("incident_134", "SELECT 1"), {"query": "SELECT 1"})
 
 
 if __name__ == "__main__":

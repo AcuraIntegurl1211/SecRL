@@ -126,6 +126,14 @@ class SecRLExcytinEnvironment:
         self._query_executor = query_executor
         self.run_spec = run_spec
 
+    @classmethod
+    def from_existing_environment(cls, environment: Any, *, run_spec: SecRLRunSpec) -> "SecRLExcytinEnvironment":
+        """Wrap an already-created Excytin environment without owning it."""
+        execute_query = getattr(environment, "execute_query", None)
+        if not callable(execute_query):
+            raise TypeError("existing Excytin environment must expose execute_query")
+        return cls(lambda _scenario, query: execute_query(query), run_spec=run_spec)
+
     def query_sql(self, scenario_id: str, query: str) -> Any:
         try:
             return self._query_executor(scenario_id, query)  # type: ignore[misc]
@@ -422,7 +430,7 @@ class SecRLAdapter:
         candidate = query.strip()
         if not candidate:
             raise UnsafeSQL("empty SQL query")
-        if ";" in candidate.rstrip(";") or "--" in candidate or "/*" in candidate or "*/" in candidate:
+        if candidate.count(";") > 1 or ";" in candidate.rstrip(";") or "--" in candidate or "/*" in candidate or "*/" in candidate:
             raise UnsafeSQL("multiple statements and SQL comments are not allowed")
         if not re.match(r"^(?:SELECT|SHOW|EXPLAIN|WITH)\b", candidate, flags=re.IGNORECASE):
             raise UnsafeSQL("only read-only SQL is allowed")

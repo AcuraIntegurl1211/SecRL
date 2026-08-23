@@ -65,6 +65,7 @@ class SecRLImportTest(unittest.TestCase):
             "SELECT LOAD_FILE('/etc/passwd')",
             "SELECT * INTO OUTFILE '/tmp/x' FROM users",
             "SET GLOBAL max_connections=1",
+            "SELECT 1;;",
         ):
             with self.assertRaises(UnsafeSQL):
                 adapter.validate_sql(query)

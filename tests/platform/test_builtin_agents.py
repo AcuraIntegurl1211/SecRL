@@ -84,6 +84,7 @@ class BuiltinAgentAdapterTest(unittest.TestCase):
 
         with self.assertRaises(ValueError):
             _safe_config({"config_list": [{"model": "x", "api_key": "hidden"}]})
+        self.assertEqual(_safe_config({"max_tokens": 10}), {"max_tokens": 10})
 
     def test_reset_passes_question_dict_required_by_expel(self):
         legacy = _FakeLegacyAgent("submit[ok]")
