@@ -26,6 +26,23 @@ class ComposePackagingTest(unittest.TestCase):
         self.assertIn("SECRL_INITIAL_ADMIN_PASSWORD=", env)
         self.assertNotRegex(env, r"(?:sk-|AKIA)[A-Za-z0-9_-]{12,}")
 
+    def test_dockerfiles_install_hashed_dependencies_before_local_package(self):
+        for relative in (
+            "docker/lite/Dockerfile",
+            "docker/agent-service-reference/Dockerfile",
+        ):
+            dockerfile = (ROOT / relative).read_text()
+            self.assertNotIn("-r requirements-platform.txt .", dockerfile, relative)
+            dependency_install = dockerfile.index(
+                "RUN pip install --no-cache-dir -r requirements-platform.txt"
+            )
+            source_copy = dockerfile.index("COPY secrl_platform/")
+            package_install = dockerfile.index(
+                "RUN pip install --no-cache-dir --no-deps ."
+            )
+            self.assertLess(dependency_install, source_copy, relative)
+            self.assertLess(source_copy, package_install, relative)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -9,12 +9,13 @@ FROM python:3.11.11-slim AS runtime
 WORKDIR /app
 ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 PIP_DISABLE_PIP_VERSION_CHECK=1
 COPY requirements-platform.txt requirements.txt setup.py ./
-RUN pip install --no-cache-dir -r requirements-platform.txt .
+RUN pip install --no-cache-dir -r requirements-platform.txt
 COPY secrl_platform/ secrl_platform/
 COPY secgym/ secgym/
 COPY experiments/ experiments/
 COPY alembic/ alembic/
 COPY alembic.ini ./
+RUN pip install --no-cache-dir --no-deps .
 COPY docker/lite/entrypoint.sh /usr/local/bin/secrl-lite-entrypoint
 COPY --from=web-build /src/web/dist /app/web/dist
 RUN chmod 0755 /usr/local/bin/secrl-lite-entrypoint
