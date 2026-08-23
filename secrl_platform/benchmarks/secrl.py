@@ -13,7 +13,7 @@ import re
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import TYPE_CHECKING, Any, Callable, Mapping
 
 from pydantic import Field
 
@@ -36,6 +36,9 @@ from secrl_platform.benchmarks.protocol import (
     YieldAction,
     parse_agent_action,
 )
+
+if TYPE_CHECKING:
+    from secrl_platform.models.evaluator import SecRLEvaluator
 
 
 SECRL_EXPECTED_SCENARIO_COUNTS: dict[str, int] = {
@@ -160,9 +163,11 @@ class SecRLAdapter:
         *,
         query_executor: Callable[[str, str], Any] | Callable[[str], Any] | None = None,
         run_spec: SecRLRunSpec | None = None,
+        evaluator: "SecRLEvaluator | None" = None,
     ) -> None:
         self._source = Path(source or _DEFAULT_DATASET)
         self._query_executor = query_executor
+        self._evaluator = evaluator
         self.run_spec = run_spec or SecRLRunSpec()
         self._access = _RestrictedAccess()
         self._leases: dict[str, str] = {}
@@ -389,6 +394,17 @@ class SecRLAdapter:
         state = self._episodes.get(episode.id)
         if state is None:
             raise KeyError(episode.id)
+        if self._evaluator is not None:
+            result = self._evaluator.evaluate(
+                question=str(state.case.public_input["question"]),
+                gold_answer=state.case.answer,
+                submitted_answer=submission.answer,
+            )
+            return EvaluationResult(
+                reward=result.reward,
+                correct=result.correct,
+                metrics={"official_evaluator": result.reward},
+            )
         correct = _normalize(submission.answer) == _normalize(state.case.answer)
         reward = 1.0 if correct else 0.0
         return EvaluationResult(reward=reward, correct=correct, metrics={"exact_match": reward})
