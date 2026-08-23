@@ -13,6 +13,7 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    UniqueConstraint,
     text,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
@@ -372,6 +373,7 @@ class ArtifactORM(TimestampedORM, Base):
     size_bytes: Mapped[int] = mapped_column(Integer)
     ref_type: Mapped[str] = mapped_column(String(64), index=True)
     ref_id: Mapped[str] = mapped_column(String(36), index=True)
+    visibility: Mapped[str] = mapped_column(String(16), default="PUBLIC")
 
 
 class AttributionORM(TimestampedORM, Base):
@@ -389,15 +391,39 @@ class AttributionORM(TimestampedORM, Base):
 
 class HumanReviewORM(TimestampedORM, Base):
     __tablename__ = "human_review"
+    __table_args__ = (
+        UniqueConstraint("attribution_id", "revision", name="uq_human_review_revision"),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid4_string)
     attribution_id: Mapped[str] = mapped_column(ForeignKey("attribution.id"), index=True)
     revision: Mapped[int] = mapped_column(Integer)
+    prior_review_id: Mapped[str | None] = mapped_column(
+        ForeignKey("human_review.id"), nullable=True
+    )
     label: Mapped[str] = mapped_column(String(128))
+    secondary_json: Mapped[str] = mapped_column(Text, default="[]")
+    confidence: Mapped[str] = mapped_column(String(16), default="medium")
+    evidence_json: Mapped[str] = mapped_column(Text, default="[]")
     notes: Mapped[str] = mapped_column(Text, default="")
     reviewer_user_id: Mapped[str | None] = mapped_column(
         ForeignKey("local_user.id"), nullable=True
     )
+
+
+class AnalysisRunORM(TimestampedORM, Base):
+    __tablename__ = "analysis_run"
+    __table_args__ = (
+        UniqueConstraint("run_id", "revision", name="uq_analysis_run_revision"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid4_string)
+    run_id: Mapped[str] = mapped_column(ForeignKey("run.id"), index=True)
+    revision: Mapped[int] = mapped_column(Integer)
+    taxonomy_version: Mapped[str] = mapped_column(String(128))
+    input_manifest_sha256: Mapped[str] = mapped_column(String(64))
+    output_manifest_sha256: Mapped[str] = mapped_column(String(64))
+    manifest_artifact_id: Mapped[str] = mapped_column(ForeignKey("artifact.id"))
 
 
 class AuditEventORM(Base):

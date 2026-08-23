@@ -30,11 +30,15 @@ from secrl_platform.storage.orm import (
     AgentRevisionORM,
     AppSettingORM,
     ArtifactORM,
+    AttributionORM,
+    AuditEventORM,
     BenchmarkRevisionORM,
     EvaluationTaskORM,
     LocalUserORM,
     ModelConfigRevisionORM,
     RunORM,
+    CaseAttemptORM,
+    HumanReviewORM,
     SecretRefORM,
 )
 
@@ -225,6 +229,22 @@ class ApiTest(unittest.TestCase):
         )
         self.assertEqual(status, "SUCCEEDED")
         self.assertEqual(runtime.max_steps, 7)
+        analyzed = self.client.post(
+            f"/api/v1/runs/{created.json()['run_id']}:analyze",
+            headers=headers,
+        )
+        self.assertEqual(analyzed.status_code, 200, analyzed.text)
+        self.assertEqual(analyzed.json()["taxonomy_version"], "taxonomy_v1")
+        self.assertEqual(analyzed.json()["artifact_visibility"], "RESTRICTED")
+        history = self.client.get(
+            f"/api/v1/runs/{created.json()['run_id']}/analysis"
+        )
+        self.assertEqual(len(history.json()), 1)
+        restricted = self.client.get(
+            f"/api/v1/artifacts/{analyzed.json()['manifest_artifact_id']}"
+        )
+        self.assertEqual(restricted.status_code, 403)
+        self.assertNotIn("170.54.121.63", analyzed.text + history.text + restricted.text)
 
     def test_task_budget_is_validated_and_bound_into_frozen_hash(self):
         self.login()
@@ -919,9 +939,9 @@ class ApiTest(unittest.TestCase):
             session_factory = create_engine_and_session(settings.database_path)
             with session_factory() as session:
                 revision = session.scalar(text("SELECT version_num FROM alembic_version"))
-            self.assertEqual(revision, "0003_agent_service_registration")
+            self.assertEqual(revision, "0004_analysis_review_persistence")
 
-    def test_milestone_three_analysis_is_not_started(self):
+    def test_human_review_api_is_persistent_append_only_and_audited(self):
         self.login()
         headers = {"X-CSRF-Token": self.csrf_token}
         created = self.client.post(
@@ -930,20 +950,56 @@ class ApiTest(unittest.TestCase):
             headers=headers,
         ).json()
 
-        analyze = self.client.post(
-            f"/api/v1/runs/{created['run_id']}:analyze",
+        asyncio.run(
+            run_pending_once(
+                settings=self.settings,
+                session_factory=self.session_factory,
+                artifact_store=self.artifact_store,
+            )
+        )
+        with self.session_factory.begin() as session:
+            attempt = session.query(CaseAttemptORM).filter_by(run_id=created["run_id"]).one()
+            attribution = AttributionORM(
+                case_attempt_id=attempt.id,
+                taxonomy="taxonomy_v1",
+                label="ANSWER",
+                confidence=0.6,
+                evidence_json='["automatic"]',
+            )
+            session.add(attribution)
+            session.flush()
+            attribution_id = attribution.id
+        first = self.client.post(
+            f"/api/v1/attributions/{attribution_id}/reviews",
             headers=headers,
+            json={
+                "primary": "GOLD",
+                "secondary": ["ANSWER"],
+                "confidence": "high",
+                "evidence": ["artifact:abc"],
+                "notes": "confirmed",
+            },
         )
-        analysis = self.client.get(
-            f"/api/v1/runs/{created['run_id']}/analysis"
+        second = self.client.post(
+            f"/api/v1/attributions/{attribution_id}/reviews",
+            headers=headers,
+            json={
+                "primary": "ANSWER",
+                "secondary": [],
+                "confidence": "medium",
+                "evidence": ["artifact:def"],
+                "notes": "revised",
+            },
         )
-
-        self.assertEqual(analyze.status_code, 409)
-        self.assertEqual(analysis.status_code, 409)
-        self.assertEqual(
-            analyze.json()["error"]["code"],
-            "MILESTONE_NOT_AVAILABLE",
-        )
+        history = self.client.get(f"/api/v1/attributions/{attribution_id}/reviews")
+        self.assertEqual(first.status_code, 201, first.text)
+        self.assertEqual(second.status_code, 201, second.text)
+        self.assertEqual(second.json()["prior_review_id"], first.json()["id"])
+        self.assertEqual([item["revision"] for item in history.json()], [1, 2])
+        with self.session_factory() as session:
+            self.assertEqual(session.get(AttributionORM, attribution_id).label, "ANSWER")
+            self.assertEqual(session.query(HumanReviewORM).count(), 2)
+            self.assertEqual(session.query(AuditEventORM).filter_by(action="human_review.append").count(), 2)
 
 
 if __name__ == "__main__":

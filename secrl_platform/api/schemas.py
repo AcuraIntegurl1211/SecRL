@@ -78,5 +78,8 @@ class AgentCreateRequest(ApiModel):
 
 
 class ReviewCreateRequest(ApiModel):
-    label: str = Field(min_length=1, max_length=128)
+    primary: str = Field(min_length=1, max_length=128)
+    secondary: tuple[str, ...] = Field(default_factory=tuple, max_length=32)
+    confidence: Literal["low", "medium", "high"]
+    evidence: tuple[str, ...] = Field(default_factory=tuple, max_length=128)
     notes: str = Field(default="", max_length=4096)

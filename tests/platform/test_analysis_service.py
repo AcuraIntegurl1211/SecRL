@@ -12,6 +12,20 @@ from secrl_platform.analysis.service import (
     FailureAnalysisService,
     HumanReviewStore,
     ReviewRecord,
+    HumanReviewRepository,
+    AnalysisRunRepository,
+)
+from secrl_platform.storage.artifacts import LocalArtifactStore
+from secrl_platform.storage.database import create_engine_and_session
+from secrl_platform.storage.orm import (
+    AnalysisRunORM,
+    ArtifactORM,
+    AttributionORM,
+    AuditEventORM,
+    CaseAttemptORM,
+    CaseRecordORM,
+    HumanReviewORM,
+    LocalUserORM,
 )
 
 
@@ -92,6 +106,75 @@ class AnalysisServiceTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             store.append(second)
 
+    def test_human_review_repository_persists_revision_and_audit_without_mutating_attribution(self):
+        with tempfile.TemporaryDirectory() as directory:
+            sessions = create_engine_and_session(Path(directory) / "reviews.sqlite3", create=True)
+            # Reuse the schema's foreign-key chain from a tiny Protocol-Smoke run.
+            from secrl_platform.agents.builtin import DeterministicSmokeAgent
+            from secrl_platform.benchmarks.smoke import ProtocolSmokeAdapter
+            from secrl_platform.runner.recovery import RunnerRepository
+
+            runner = RunnerRepository(sessions)
+            handle = runner.create_protocol_smoke_run(
+                name="review fixture",
+                adapter=ProtocolSmokeAdapter.load_default(),
+                agent_revision=DeterministicSmokeAgent.revision(),
+                case_ids=("smoke-001",),
+            )
+            with sessions.begin() as session:
+                reviewer = LocalUserORM(username="reviewer", password_hash="not-used", status="ACTIVE")
+                session.add(reviewer)
+                session.flush()
+                reviewer_id = reviewer.id
+                case = session.query(CaseRecordORM).one()
+                attempt = CaseAttemptORM(
+                    run_id=handle.run_id,
+                    case_id=case.id,
+                    attempt_no=1,
+                    status="SUCCEEDED",
+                    is_final=True,
+                )
+                session.add(attempt)
+                session.flush()
+                attribution = AttributionORM(
+                    case_attempt_id=attempt.id,
+                    taxonomy="taxonomy_v1",
+                    label="ANSWER",
+                    confidence=0.7,
+                    evidence_json='["automatic"]',
+                )
+                session.add(attribution)
+                session.flush()
+                attribution_id = attribution.id
+
+            repository = HumanReviewRepository(sessions)
+            first = repository.submit(
+                attribution_id=attribution_id,
+                reviewer_user_id=reviewer_id,
+                primary="GOLD",
+                secondary=("ANSWER",),
+                confidence="high",
+                evidence=("artifact:abc",),
+                notes="confirmed",
+            )
+            second = repository.submit(
+                attribution_id=attribution_id,
+                reviewer_user_id=reviewer_id,
+                primary="ANSWER",
+                secondary=(),
+                confidence="medium",
+                evidence=("artifact:def",),
+                notes="revised",
+            )
+            self.assertEqual((first.revision, second.revision), (1, 2))
+            self.assertEqual(second.prior_review_id, first.id)
+            self.assertEqual(repository.history(attribution_id), (first, second))
+            with sessions() as session:
+                automatic = session.get(AttributionORM, attribution_id)
+                self.assertEqual(automatic.label, "ANSWER")
+                self.assertEqual(session.query(HumanReviewORM).count(), 2)
+                self.assertEqual(session.query(AuditEventORM).filter_by(action="human_review.append").count(), 2)
+
     def test_service_never_constructs_docker_or_shell_commands(self):
         source = Path("secrl_platform/analysis/service.py").read_text(encoding="utf-8")
         self.assertNotIn("docker.from_env", source)
@@ -115,6 +198,61 @@ class AnalysisServiceTest(unittest.TestCase):
             self.assertTrue(run.manifest.path.is_file())
             for artifact in run.outputs:
                 self.assertEqual(artifact.sha256, hashlib.sha256(artifact.path.read_bytes()).hexdigest())
+
+    def test_verified_analysis_is_registered_as_restricted_artifacts_and_sanitized_attribution(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            paths = make_fixture(root)
+            analysis = FailureAnalysisService().run(
+                AnalysisInputs(
+                    agent_json=paths["agent"],
+                    env_json=paths["env"],
+                    question_json=paths["questions"],
+                    taxonomy=paths["taxonomy"],
+                ),
+                incident="incident_5",
+                output_dir=root / "analysis",
+                max_steps=15,
+            )
+            sessions = create_engine_and_session(root / "platform.sqlite3", create=True)
+            from secrl_platform.agents.builtin import DeterministicSmokeAgent
+            from secrl_platform.benchmarks.smoke import ProtocolSmokeAdapter
+            from secrl_platform.runner.recovery import RunnerRepository
+
+            runner = RunnerRepository(sessions)
+            handle = runner.create_protocol_smoke_run(
+                name="analysis fixture",
+                adapter=ProtocolSmokeAdapter.load_default(),
+                agent_revision=DeterministicSmokeAgent.revision(),
+                case_ids=("smoke-001",),
+            )
+            with sessions.begin() as session:
+                case = session.query(CaseRecordORM).one()
+                attempt = CaseAttemptORM(
+                    run_id=handle.run_id,
+                    case_id=case.id,
+                    attempt_no=1,
+                    status="SUCCEEDED",
+                    is_final=True,
+                )
+                session.add(attempt)
+                session.flush()
+                attempt_id = attempt.id
+            store = LocalArtifactStore(root / "artifacts")
+            registered = AnalysisRunRepository(sessions, store).register(
+                run_id=handle.run_id,
+                analysis=analysis,
+                case_attempt_ids=(attempt_id,),
+            )
+            self.assertRegex(registered.input_manifest_sha256, r"^[0-9a-f]{64}$")
+            self.assertEqual(registered.output_manifest_sha256, analysis.manifest.sha256)
+            with sessions() as session:
+                self.assertEqual(session.query(AnalysisRunORM).count(), 1)
+                artifacts = session.query(ArtifactORM).all()
+                automatic = session.query(AttributionORM).one()
+            self.assertTrue(artifacts)
+            self.assertTrue(all(item.visibility == "RESTRICTED" for item in artifacts))
+            self.assertNotIn("server01", automatic.evidence_json)
 
 
 if __name__ == "__main__":
