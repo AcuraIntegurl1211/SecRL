@@ -304,6 +304,7 @@ web/dist/
 web/*.tsbuildinfo
 web/vite.config.js
 web/vite.config.d.ts
+output/playwright/
 
 # Visual Studio 6 build log
 *.plg

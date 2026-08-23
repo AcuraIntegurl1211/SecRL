@@ -123,11 +123,17 @@ def _load_manifest(backup_dir: Path) -> tuple[dict[str, Any], dict[str, Any]]:
 
 
 def _verify_backup(backup_dir: Path) -> tuple[dict[str, Any], dict[str, Any]]:
+    allowed_root = {"manifest.json", "artifact-manifest.json", "secrl-lite.sqlite3", "artifacts"}
+    for child in backup_dir.iterdir():
+        if child.name not in allowed_root or child.is_symlink():
+            raise BackupIntegrityError("backup contains an unexpected root entry")
     manifest, artifact_manifest = _load_manifest(backup_dir)
     database = backup_dir / "secrl-lite.sqlite3"
     if not database.is_file() or database.is_symlink() or _sha256(database) != manifest.get("database_sha256"):
         raise BackupIntegrityError("database hash mismatch")
     artifacts_root = backup_dir / "artifacts"
+    if artifacts_root.is_symlink() or not artifacts_root.is_dir():
+        raise BackupIntegrityError("artifact root is invalid")
     expected_paths: set[Path] = set()
     for entry in artifact_manifest.get("artifacts", []):
         if not isinstance(entry, dict) or not isinstance(entry.get("path"), str):
@@ -137,6 +143,11 @@ def _verify_backup(backup_dir: Path) -> tuple[dict[str, Any], dict[str, Any]]:
             raise BackupIntegrityError("artifact manifest contains duplicates")
         expected_paths.add(relative)
         path = artifacts_root / relative
+        for parent in path.parents:
+            if parent == artifacts_root:
+                break
+            if parent.is_symlink():
+                raise BackupIntegrityError("artifact path contains a symlink")
         if not path.is_file() or path.is_symlink() or path.stat().st_size != entry.get("size") or _sha256(path) != entry.get("sha256"):
             raise BackupIntegrityError("artifact hash mismatch")
     actual_paths = {path.relative_to(artifacts_root) for path in artifacts_root.rglob("*") if path.is_file()}

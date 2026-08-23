@@ -12,6 +12,8 @@ class ComposePackagingTest(unittest.TestCase):
         self.assertIn('profiles: ["incident_34", "secrl-all"]', compose)
         self.assertIn('profiles: ["smoke"]', compose)
         self.assertNotIn("/var/run/docker.sock", compose)
+        self.assertIn("SECRL_MYSQL_ROOT_PASSWORD:-", compose)
+        self.assertIn("SECRL_AGENT_SERVICE_CAPABILITY_SECRET:-", compose)
 
     def test_entrypoint_requires_secrets_and_forwards_shutdown(self):
         entrypoint = (ROOT / "docker/lite/entrypoint.sh").read_text()

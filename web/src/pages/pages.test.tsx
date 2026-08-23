@@ -5,6 +5,7 @@ import { AgentsPage } from "./AgentsPage";
 import { AnalysisReviewPage } from "./AnalysisReviewPage";
 import { BenchmarksPage } from "./BenchmarksPage";
 import { ComparePage } from "./ComparePage";
+import { DashboardPage } from "./DashboardPage";
 import { LoginPage } from "./LoginPage";
 import { ModelsPage } from "./ModelsPage";
 import { NewEvaluationPage } from "./NewEvaluationPage";
@@ -40,6 +41,17 @@ describe("core operational pages", () => {
   ])("renders %s with an operational heading", (Page, heading) => {
     renderPage(<Page />);
     expect(screen.getByRole("heading", { name: heading })).toBeInTheDocument();
+  });
+
+  it("shows queue metrics from the task endpoint", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify([
+      { id: "task-1", name: "Smoke", status: "RUNNING", task_spec: {}, task_spec_sha256: "a".repeat(64) },
+      { id: "task-2", name: "Done", status: "SUCCEEDED", task_spec: {}, task_spec_sha256: "b".repeat(64) },
+    ]), { status: 200 })));
+    renderPage(<DashboardPage />);
+    expect((await screen.findAllByText("1")).length).toBeGreaterThanOrEqual(2);
+    expect(screen.getByText("Active tasks")).toBeInTheDocument();
+    expect(screen.getByText("Completed runs")).toBeInTheDocument();
   });
 
   it("renders a run detail route without loading the whole trajectory", async () => {

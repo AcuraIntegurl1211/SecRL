@@ -2,6 +2,7 @@ import json
 import sqlite3
 import tempfile
 import unittest
+import os
 from pathlib import Path
 
 from secrl_platform.storage.backup import BackupIntegrityError, create_backup, restore_backup
@@ -58,6 +59,20 @@ class BackupRestoreTest(unittest.TestCase):
             manifest_path.write_text(json.dumps(manifest))
             with self.assertRaises(BackupIntegrityError):
                 restore_backup(backup, Path(tmp) / "newer")
+
+    def test_restore_rejects_unexpected_symlink_or_root_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data = Path(tmp) / "data"
+            backup = Path(tmp) / "backup"
+            data.mkdir()
+            self._seed_database(data / "secrl-lite.sqlite3")
+            create_backup(data, backup)
+            (backup / "unexpected.txt").write_text("not part of a backup")
+            with self.assertRaises(BackupIntegrityError):
+                restore_backup(backup, Path(tmp) / "restore-file")
+            os.symlink("/tmp", backup / "evil-link")
+            with self.assertRaises(BackupIntegrityError):
+                restore_backup(backup, Path(tmp) / "restore-link")
 
 
 if __name__ == "__main__":
