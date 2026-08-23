@@ -50,6 +50,24 @@ class ComposePackagingTest(unittest.TestCase):
             self.assertLess(dependency_install, source_copy, relative)
             self.assertLess(source_copy, package_install, relative)
 
+    def test_every_platform_service_has_a_real_healthcheck(self):
+        compose = (ROOT / "compose.yaml").read_text()
+        for service, following in (
+            ("web", "api"),
+            ("api", "runner"),
+            ("runner", "agent-service-reference"),
+            ("agent-service-reference", "smoke"),
+        ):
+            start = compose.index(f"\n  {service}:\n")
+            end = compose.index(f"\n  {following}:\n", start)
+            section = compose[start:end]
+            self.assertIn("healthcheck:", section, service)
+
+    def test_web_final_image_drops_root(self):
+        dockerfile = (ROOT / "docker/lite/Dockerfile").read_text()
+        web_stage = dockerfile.split("FROM nginx:1.27.4-alpine AS web", 1)[1]
+        self.assertIn("USER nginx", web_stage)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -30,4 +30,7 @@ CMD ["secrl-lite", "serve", "--host", "0.0.0.0", "--port", "8080"]
 FROM nginx:1.27.4-alpine AS web
 COPY --from=web-build /src/web/dist /usr/share/nginx/html
 COPY docker/lite/nginx.conf /etc/nginx/conf.d/default.conf
+RUN touch /var/run/nginx.pid \
+    && chown -R nginx:nginx /var/cache/nginx /var/run/nginx.pid /etc/nginx/conf.d /usr/share/nginx/html
+USER nginx
 EXPOSE 8080
