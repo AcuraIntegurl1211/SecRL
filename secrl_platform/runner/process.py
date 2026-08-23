@@ -38,6 +38,12 @@ from secrl_platform.benchmarks.secrl import (
 )
 from secrl_platform.config import Settings
 from secrl_platform.models.gateway import ModelGateway
+from secrl_platform.models.evaluator import (
+    EvaluatorGatewayClient,
+    EvaluatorProfile,
+    SecRLEvaluator,
+    official_secrl_profile,
+)
 from secrl_platform.models.pricing import Pricing
 from secrl_platform.models.providers import (
     DeferredSecretProvider,
@@ -93,6 +99,7 @@ async def run_pending_once(
     agent_service_resolver=None,
     model_provider_resolver=None,
     secrl_query_executor=None,
+    secrl_evaluator_resolver=None,
     builtin_runtime_resolver=None,
 ) -> str | None:
     sessions = session_factory or create_engine_and_session(settings.database_path)
@@ -131,6 +138,8 @@ async def run_pending_once(
             task_id=task_id,
             run_id=run_id,
             secrl_query_executor=secrl_query_executor,
+            model_provider_resolver=model_provider_resolver,
+            secrl_evaluator_resolver=secrl_evaluator_resolver,
         )
         engine = RunnerEngine(
             repository=repository,
@@ -325,13 +334,15 @@ def _issue_capability(
     run_id: str,
     agent_revision_id: str,
     budget: dict,
+    *,
+    allowed_model_roles: tuple[str, ...] = ("agent",),
 ) -> str:
     issued_at = int(time.time())
     return signer.issue(
         CapabilityClaims(
             run_id=run_id,
             agent_revision_id=agent_revision_id,
-            allowed_model_roles=("agent",),
+            allowed_model_roles=allowed_model_roles,
             max_tokens=int(budget.get("max_tokens", 0)),
             max_cost=Decimal(str(budget.get("max_cost", "0"))),
             issued_at=issued_at,
@@ -348,6 +359,8 @@ def _resolve_adapter(
     task_id: str,
     run_id: str,
     secrl_query_executor,
+    model_provider_resolver,
+    secrl_evaluator_resolver,
 ):
     with session_factory() as session:
         task = session.get(EvaluationTaskORM, task_id)
@@ -357,8 +370,25 @@ def _resolve_adapter(
         try:
             task_spec = json.loads(task.task_spec_json)
             run_spec = json.loads(run.run_spec_json)
+            budget = json.loads(task.budget_json)
         except (TypeError, ValueError, json.JSONDecodeError) as exc:
             raise RunnerConfigurationError("task RunSpec is invalid") from exc
+        agent = session.get(AgentRevisionORM, task.agent_revision_id)
+        if agent is None:
+            raise RunnerConfigurationError("task agent revision was not found")
+        try:
+            agent_manifest = AgentManifest.model_validate_json(agent.manifest_json)
+        except ValueError as exc:
+            raise RunnerConfigurationError("task agent revision is invalid") from exc
+        model_bundle = None
+        if task.model_config_revision_id is not None:
+            model_bundle = _resolve_model_provider(
+                settings=settings,
+                session=session,
+                task_spec=task_spec,
+                model_id=task.model_config_revision_id,
+                resolver=model_provider_resolver,
+            )
     if hashlib.sha256(run.run_spec_json.encode("utf-8")).hexdigest() != run.run_spec_sha256:
         raise RunnerConfigurationError("task RunSpec hash changed")
     benchmark_id = task_spec.get("benchmark_id")
@@ -366,6 +396,8 @@ def _resolve_adapter(
         return ProtocolSmokeAdapter.load_default()
     if benchmark_id != "secrl":
         raise RunnerConfigurationError("task benchmark is not allowlisted")
+    if model_bundle is None:
+        raise RunnerConfigurationError("SecRL evaluator model config is missing")
     limits = run_spec.get("limits", {})
     try:
         frozen_limits = SecRLRunSpec(**limits)
@@ -380,7 +412,56 @@ def _resolve_adapter(
             password=settings.secrl_mysql_password.get_secret_value(),
             database=settings.secrl_mysql_database,
         ).query_sql
-    return SecRLAdapter(query_executor=executor, run_spec=frozen_limits)
+    try:
+        frozen_profile = EvaluatorProfile.model_validate(
+            task_spec["evaluator_profile"]
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise RunnerConfigurationError("SecRL evaluator profile is invalid") from exc
+    expected_profile = official_secrl_profile(
+        formal=True,
+        model_revision=task_spec.get("model_config_sha256", ""),
+    )
+    if frozen_profile != expected_profile:
+        raise RunnerConfigurationError("SecRL evaluator profile is not approved")
+    if secrl_evaluator_resolver is not None:
+        evaluator = secrl_evaluator_resolver(frozen_profile)
+    else:
+        provider, model_name, model_parameters, pricing = model_bundle
+        signer = capability_signer(settings)
+        token = _issue_capability(
+            signer,
+            run_id,
+            agent_manifest.agent_id,
+            budget,
+            allowed_model_roles=("evaluator",),
+        )
+        max_output_tokens = model_parameters.get("max_output_tokens") or model_parameters.get("max_tokens")
+        if not isinstance(max_output_tokens, int) or max_output_tokens < 1:
+            raise RunnerConfigurationError("SecRL evaluator requires a positive output token limit")
+        gateway = ModelGateway(
+            provider=provider,
+            pricing=Pricing(
+                input_per_million=pricing.get("input_per_million"),
+                output_per_million=pricing.get("output_per_million"),
+            ),
+            capability_signer=signer,
+        )
+        evaluator = SecRLEvaluator(
+            frozen_profile,
+            model_client=EvaluatorGatewayClient(
+                gateway=gateway,
+                model=model_name,
+                capability_token=token,
+                agent_revision_id=agent_manifest.agent_id,
+                max_output_tokens=max_output_tokens,
+            ),
+        )
+    return SecRLAdapter(
+        query_executor=executor,
+        run_spec=frozen_limits,
+        evaluator=evaluator,
+    )
 
 
 async def _worker_loop(settings: Settings) -> None:

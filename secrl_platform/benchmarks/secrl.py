@@ -243,6 +243,8 @@ class SecRLAdapter:
         self._access = _RestrictedAccess()
         self._leases: dict[str, str] = {}
         self._episodes: dict[str, _Episode] = {}
+        self._restricted_evaluator_artifacts: dict[str, tuple[str, bytes]] = {}
+        self._attempt_context: tuple[str, str, str] | None = None
         self._cases, self._source_sha256 = self._load(self._source)
         counts: dict[str, int] = {}
         for case in self._cases.values():
@@ -499,14 +501,56 @@ class SecRLAdapter:
                 gold_answer=state.case.answer,
                 submitted_answer=submission.answer,
             )
+            raw_text = result.read_raw_response(self._evaluator.restricted_access())
+            attempt_payload = (
+                {
+                    "run_id": self._attempt_context[0],
+                    "case_id": self._attempt_context[1],
+                    "attempt_id": self._attempt_context[2],
+                }
+                if self._attempt_context is not None
+                else None
+            )
+            restricted_payload = self._canonical(
+                {
+                    "attempt": attempt_payload,
+                    "request": result.request.model_dump(mode="json"),
+                    "response": raw_text,
+                    "response_sha256": result.raw_response.sha256,
+                    "usage": result.usage.model_dump(mode="json"),
+                }
+            ).encode("utf-8")
+            self._restricted_evaluator_artifacts[episode.id] = (
+                "evaluator-response",
+                restricted_payload,
+            )
             return EvaluationResult(
                 reward=result.reward,
                 correct=result.correct,
-                metrics={"official_evaluator": result.reward},
+                metrics={
+                    "official_evaluator": result.reward,
+                    "evaluator_prompt_tokens": float(result.usage.prompt_tokens),
+                    "evaluator_completion_tokens": float(result.usage.completion_tokens),
+                    "evaluator_cached_tokens": float(result.usage.cached_tokens),
+                    "evaluator_reasoning_tokens": float(result.usage.reasoning_tokens),
+                    "evaluator_estimated_cost": float(result.usage.estimated_cost),
+                },
             )
         correct = _normalize(submission.answer) == _normalize(state.case.answer)
         reward = 1.0 if correct else 0.0
         return EvaluationResult(reward=reward, correct=correct, metrics={"exact_match": reward})
+
+    def bind_attempt(self, *, run_id: str, case_id: str, attempt_id: str) -> None:
+        self._attempt_context = (run_id, case_id, attempt_id)
+        if self._evaluator is None:
+            return
+        client = getattr(self._evaluator, "_model_client", None)
+        if client is not None and hasattr(client, "bind_attempt"):
+            client.bind_attempt(run_id=run_id, case_id=case_id, attempt_id=attempt_id)
+
+    def take_restricted_artifacts(self, episode: EpisodeRef) -> tuple[tuple[str, bytes], ...]:
+        artifact = self._restricted_evaluator_artifacts.pop(episode.id, None)
+        return (artifact,) if artifact is not None else ()
 
     def close_episode(self, episode: EpisodeRef) -> None:
         if episode.id not in self._episodes:

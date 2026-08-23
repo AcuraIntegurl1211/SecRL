@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import re
 from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any, Callable, Mapping
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 
 from secrl_platform.agents.protocol import UsageSnapshot
+from secrl_platform.models.gateway import ModelGateway
+from secrl_platform.models.providers import ModelMessage, ModelRequest
 
 
 EVALUATOR_PROMPT_TEMPLATE = (
@@ -97,11 +100,67 @@ class EvaluatorResponse:
         return self._raw_text
 
 
-def official_secrl_profile(*, formal: bool = True) -> EvaluatorProfile:
+def official_secrl_profile(
+    *,
+    formal: bool = True,
+    model_revision: str = "static-evaluator-v1",
+) -> EvaluatorProfile:
     return EvaluatorProfile(
+        model_revision=model_revision,
         prompt_template_sha256=EVALUATOR_PROMPT_TEMPLATE_SHA256,
         formal=formal,
     )
+
+
+class EvaluatorGatewayClient:
+    """Synchronous evaluator facade over the async, capability-bound gateway."""
+
+    def __init__(
+        self,
+        *,
+        gateway: ModelGateway,
+        model: str,
+        capability_token: str,
+        agent_revision_id: str,
+        max_output_tokens: int,
+    ) -> None:
+        self._gateway = gateway
+        self._model = model
+        self._capability_token = SecretStr(capability_token)
+        self._agent_revision_id = agent_revision_id
+        self._max_output_tokens = max_output_tokens
+        self._attempt: tuple[str, str, str] | None = None
+
+    def bind_attempt(self, *, run_id: str, case_id: str, attempt_id: str) -> None:
+        self._attempt = (run_id, case_id, attempt_id)
+
+    def complete(self, *, prompt: str, parameters: Mapping[str, Any]) -> dict[str, Any]:
+        if self._attempt is None:
+            raise RuntimeError("evaluator model client has no active attempt")
+        run_id, case_id, attempt_id = self._attempt
+        request = ModelRequest(
+            provider_adapter_version="openai-compatible-v1",
+            model_role="evaluator",
+            model=self._model,
+            messages=(ModelMessage(role="user", content=prompt),),
+            effective_parameters=dict(parameters),
+            run_id=run_id,
+            case_id=case_id,
+            attempt_id=attempt_id,
+            agent_revision_id=self._agent_revision_id,
+            capability_token=self._capability_token,
+            max_output_tokens=self._max_output_tokens,
+            max_attempts=1,
+        )
+        response = asyncio.run(self._gateway.complete(request))
+        usage = response.usage
+        return {
+            "text": response.text,
+            "usage": {
+                "prompt_tokens": usage.prompt if usage is not None else 0,
+                "completion_tokens": usage.completion if usage is not None else 0,
+            },
+        }
 
 
 class SecRLEvaluator:

@@ -424,6 +424,7 @@ def analyze_completed_run(
                 CaseAttemptORM.run_id == run_id,
                 CaseAttemptORM.is_final.is_(True),
                 CaseAttemptORM.status == "SUCCEEDED",
+                ArtifactORM.kind == "trajectory",
             )
             .order_by(CaseRecordORM.ordinal)
         ).all()

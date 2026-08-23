@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import unittest
 
 from secrl_platform.agents.builtin import (
@@ -8,6 +9,7 @@ from secrl_platform.agents.builtin import (
     BuiltinAgentAdapter,
     InvalidLegacyAction,
     normalize_legacy_action,
+    LegacyGatewayClient,
 )
 from secrl_platform.agents.protocol import AgentManifest, EpisodeContext
 from secrl_platform.benchmarks.protocol import Observation, SubmitAction, ToolCallAction
@@ -113,6 +115,21 @@ class BuiltinAgentAdapterTest(unittest.TestCase):
         runtime = BuiltinAgentAdapter(_FakeLegacyAgent("yield[wait]"), manifest=manifest)
         self.assertEqual(runtime.model_access, "platform_gateway")
         self.assertIsNone(runtime.model_gateway_binding)
+
+    def test_platform_gateway_runtime_exposes_capability_binding(self):
+        token = "signed-capability-token"
+        client = LegacyGatewayClient(
+            gateway=object(),
+            model="fixture",
+            capability_token=token,
+            agent_revision_id="secrl-baseline-v1",
+            max_output_tokens=32,
+        )
+        runtime = BuiltinAgentAdapter(_FakeLegacyAgent("submit[ok]"), model_client=client)
+        self.assertEqual(
+            runtime.model_gateway_binding,
+            hashlib.sha256(token.encode("utf-8")).hexdigest(),
+        )
 
 
 if __name__ == "__main__":

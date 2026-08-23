@@ -9,13 +9,48 @@ from pydantic import ValidationError
 from secrl_platform.benchmarks.protocol import Submission
 from secrl_platform.benchmarks.secrl import SecRLAdapter
 from secrl_platform.models.evaluator import (
+    EvaluatorGatewayClient,
     EvaluatorParameterOverride,
     SecRLEvaluator,
     official_secrl_profile,
 )
+from secrl_platform.models.gateway import GatewayResponse
+from secrl_platform.models.providers import Usage
+
+
+class _FakeGateway:
+    def __init__(self):
+        self.requests = []
+
+    async def complete(self, request):
+        self.requests.append(request)
+        return GatewayResponse(
+            text="Analysis: equivalent\nIs_Answer_Correct: True",
+            usage=Usage(prompt=11, completion=3),
+            estimated_cost=None,
+            pricing_profile_sha256="0" * 64,
+        )
 
 
 class SecRLEvaluatorTest(unittest.TestCase):
+    def test_gateway_client_uses_evaluator_role_and_bound_attempt(self):
+        gateway = _FakeGateway()
+        client = EvaluatorGatewayClient(
+            gateway=gateway,
+            model="fixture-model",
+            capability_token="evaluator-capability",
+            agent_revision_id="secrl-baseline-v1",
+            max_output_tokens=64,
+        )
+        client.bind_attempt(run_id="run-1", case_id="case-1", attempt_id="attempt-1")
+
+        response = client.complete(prompt="private evaluator prompt", parameters={"temperature": 0.0, "seed": 41})
+
+        request = gateway.requests[0]
+        self.assertEqual(request.model_role, "evaluator")
+        self.assertEqual((request.run_id, request.case_id, request.attempt_id), ("run-1", "case-1", "attempt-1"))
+        self.assertEqual(response["usage"], {"prompt_tokens": 11, "completion_tokens": 3})
+
     def test_official_model_request_contains_gold_only_in_private_prompt(self):
         prompts = []
 
@@ -84,6 +119,13 @@ class SecRLEvaluatorTest(unittest.TestCase):
         episode = adapter.start_episode(case, lease)
         result = adapter.evaluate(episode.ref, Submission(answer=adapter.gold_for(case.id, adapter.restricted_access())["answer"]))
         self.assertEqual(result.reward, 1.0)
+        restricted = adapter.take_restricted_artifacts(episode.ref)
+        self.assertEqual(len(restricted), 1)
+        self.assertEqual(restricted[0][0], "evaluator-response")
+        self.assertNotIn(
+            adapter.gold_for(case.id, adapter.restricted_access())["answer"],
+            json.dumps(result.model_dump(mode="json")),
+        )
 
 
 if __name__ == "__main__":

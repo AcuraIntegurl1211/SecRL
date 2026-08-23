@@ -89,6 +89,12 @@ def create_task(
     model_id, model_sha256 = _resolve_model_revision(
         context, payload.model_config_revision_id
     )
+    if payload.benchmark_id == "secrl" and model_id is None:
+        raise ApiError(
+            422,
+            "INVALID_TASK_SPEC",
+            "SecRL tasks require a frozen evaluator model config",
+        )
     if revision.manifest.agent_id in BUILTIN_AGENT_IDS:
         if model_id is None:
             raise ApiError(

@@ -9,11 +9,12 @@ from secrl_platform.agents.builtin import builtin_manifest
 from secrl_platform.agents.protocol import AgentRevisionRef, UsageSnapshot
 from secrl_platform.benchmarks.protocol import SubmitAction
 from secrl_platform.benchmarks.secrl import SecRLAdapter, SecRLRunSpec
+from secrl_platform.models.evaluator import SecRLEvaluator, official_secrl_profile
 from secrl_platform.runner.engine import RunnerEngine
 from secrl_platform.runner.recovery import RunnerRepository
 from secrl_platform.storage.artifacts import LocalArtifactStore
 from secrl_platform.storage.database import create_engine_and_session
-from secrl_platform.storage.orm import CaseRecordORM, RunORM
+from secrl_platform.storage.orm import ArtifactORM, CaseAttemptORM, CaseRecordORM, RunORM
 from sqlalchemy import select
 
 
@@ -47,6 +48,13 @@ class SecRLRunnerIntegrationTest(unittest.IsolatedAsyncioTestCase):
             adapter = SecRLAdapter(
                 query_executor=lambda _scenario, _query: ([], True),
                 run_spec=SecRLRunSpec(max_steps=7, max_str_len=4096, max_entry_return=9),
+                evaluator=SecRLEvaluator(
+                    official_secrl_profile(formal=True),
+                    model_client=lambda _prompt, _parameters: {
+                        "text": "Analysis: fixture\nIs_Answer_Correct: True",
+                        "usage": {"prompt_tokens": 13, "completion_tokens": 2},
+                    },
+                ),
             )
             manifest = builtin_manifest("secrl-baseline-v1")
             handle = repository.create_benchmark_run(
@@ -73,9 +81,19 @@ class SecRLRunnerIntegrationTest(unittest.IsolatedAsyncioTestCase):
             with sessions() as session:
                 run = session.get(RunORM, handle.run_id)
                 record = session.scalar(select(CaseRecordORM))
+                attempt = session.scalar(select(CaseAttemptORM))
+                artifacts = session.scalars(select(ArtifactORM).order_by(ArtifactORM.kind)).all()
             self.assertEqual(json.loads(run.run_spec_json)["limits"]["max_str_len"], 4096)
             self.assertEqual(record.external_id, CASE_ID)
             self.assertEqual(json.loads(record.payload_json)["scenario"]["id"], "incident_134")
+            self.assertEqual(
+                [(item.kind, item.visibility) for item in artifacts],
+                [("evaluator-response", "RESTRICTED"), ("trajectory", "PUBLIC")],
+            )
+            metrics = json.loads(attempt.metrics_json)
+            self.assertEqual(metrics["metrics"]["evaluator_prompt_tokens"], 13)
+            self.assertEqual(metrics["metrics"]["evaluator_completion_tokens"], 2)
+            self.assertEqual(metrics["prompt_tokens"], 0)
 
 
 if __name__ == "__main__":

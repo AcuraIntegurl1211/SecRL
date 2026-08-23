@@ -87,7 +87,7 @@ class RunnerEngine:
                         self._repository.model_budget_anchor(task_id, run_id)
                     )
                 budget_baseline = guard.usage() if guard is not None else None
-                trajectory, result, usage, budget_exhausted = await self._run_case(
+                trajectory, result, usage, budget_exhausted, restricted_outputs = await self._run_case(
                     run_id=run_id,
                     stored_case=stored_case,
                     case=case_by_id[stored_case.external_id],
@@ -136,10 +136,16 @@ class RunnerEngine:
                 canonical_json(trajectory).encode("utf-8"),
                 media_type="application/json",
             )
+            restricted_artifacts = tuple(
+                self._artifact_store.put_bytes(kind, content, media_type="application/json")
+                for kind, content in restricted_outputs
+            )
             try:
                 if self._after_artifact_write is not None:
                     self._after_artifact_write(stored_case.external_id, artifact)
                 self._artifact_store.verify(artifact)
+                for restricted_artifact in restricted_artifacts:
+                    self._artifact_store.verify(restricted_artifact)
             except ArtifactIntegrityError:
                 return self._repository.fail_attempt(
                     task_id=task_id,
@@ -159,6 +165,7 @@ class RunnerEngine:
                 run_id=run_id,
                 attempt_id=attempt.id,
                 artifact=artifact,
+                restricted_artifacts=restricted_artifacts,
                 result=result.model_dump(mode="json"),
                 usage=usage,
                 budget_anchor=budget_anchor,
@@ -180,13 +187,21 @@ class RunnerEngine:
         budget_guard: "CapabilityBudgetGuard | None",
         budget_baseline: UsageSnapshot | None,
         max_steps: int,
-    ) -> tuple[dict[str, Any], EvaluationResult, UsageSnapshot, bool]:
+    ) -> tuple[
+        dict[str, Any],
+        EvaluationResult,
+        UsageSnapshot,
+        bool,
+        tuple[tuple[str, bytes], ...],
+    ]:
         lease = self._adapter.prepare_scenario(case.scenario)
         episode = None
         exchanges: list[dict[str, Any]] = []
         result: EvaluationResult | None = None
         usage = UsageSnapshot()
+        agent_usage_captured = False
         budget_exhausted = False
+        restricted_outputs: tuple[tuple[str, bytes], ...] = ()
         runtime_started = False
         heartbeat = asyncio.create_task(self._heartbeat_loop(run_id))
         try:
@@ -202,6 +217,13 @@ class RunnerEngine:
                 tools=tuple(self._adapter.tool_definitions()),
                 max_steps=max_steps,
             )
+            bind_attempt = getattr(self._adapter, "bind_attempt", None)
+            if callable(bind_attempt):
+                bind_attempt(
+                    run_id=run_id,
+                    case_id=stored_case.external_id,
+                    attempt_id=attempt_id,
+                )
             await runtime.reset(context)
             runtime_started = True
             for sequence in range(1, context.max_steps + 1):
@@ -234,7 +256,23 @@ class RunnerEngine:
                 )
                 submission = _submission_for(action)
                 if submission is not None:
-                    result = self._adapter.evaluate(episode, submission)
+                    if budget_guard is not None:
+                        if budget_baseline is None:
+                            raise RuntimeError("model budget baseline is missing")
+                        usage = budget_guard.usage_since(budget_baseline)
+                        agent_usage_captured = True
+                    result = await asyncio.to_thread(
+                        self._adapter.evaluate,
+                        episode,
+                        submission,
+                    )
+                    take_restricted = getattr(
+                        self._adapter,
+                        "take_restricted_artifacts",
+                        None,
+                    )
+                    if callable(take_restricted):
+                        restricted_outputs = tuple(take_restricted(episode))
                     break
                 if next_observation.terminal:
                     result = EvaluationResult(
@@ -262,9 +300,10 @@ class RunnerEngine:
             try:
                 if runtime_started:
                     if budget_guard is not None:
-                        if budget_baseline is None:
-                            raise RuntimeError("model budget baseline is missing")
-                        usage = budget_guard.usage_since(budget_baseline)
+                        if not agent_usage_captured:
+                            if budget_baseline is None:
+                                raise RuntimeError("model budget baseline is missing")
+                            usage = budget_guard.usage_since(budget_baseline)
                     else:
                         usage = runtime.usage()
                         if usage.total or usage.estimated_cost:
@@ -291,7 +330,7 @@ class RunnerEngine:
             "result": result.model_dump(mode="json"),
             "usage": usage.model_dump(mode="json"),
         }
-        return trajectory, result, usage, budget_exhausted
+        return trajectory, result, usage, budget_exhausted, restricted_outputs
 
     async def _heartbeat_loop(self, run_id: str) -> None:
         while True:

@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from secrl_platform.agents.protocol import AgentRevisionRef, UsageSnapshot
 from secrl_platform.benchmarks.protocol import Scope
 from secrl_platform.benchmarks.smoke import ProtocolSmokeAdapter
+from secrl_platform.models.evaluator import official_secrl_profile
 from secrl_platform.runner.state import RunStateMachine
 from secrl_platform.storage.artifacts import ArtifactRef, LocalArtifactStore
 from secrl_platform.storage.orm import (
@@ -215,6 +216,11 @@ class RunnerRepository:
                     raise ValueError("model config hash is required")
                 task_spec["model_config_revision_id"] = model_config_revision_id
                 task_spec["model_config_sha256"] = model_config_sha256
+            if manifest.benchmark_id == "secrl":
+                task_spec["evaluator_profile"] = official_secrl_profile(
+                    formal=True,
+                    model_revision=model_config_sha256 or "static-evaluator-v1",
+                ).model_dump(mode="json")
             task = EvaluationTaskORM(
                 name=name,
                 benchmark_revision_id=benchmark.id,
@@ -378,6 +384,7 @@ class RunnerRepository:
         run_id: str,
         attempt_id: str,
         artifact: ArtifactRef,
+        restricted_artifacts: tuple[ArtifactRef, ...] = (),
         result: dict[str, Any],
         usage: UsageSnapshot,
         budget_anchor: UsageSnapshot | None,
@@ -411,6 +418,26 @@ class RunnerRepository:
                     ref_id=attempt.id,
                 )
             )
+            for restricted_artifact in restricted_artifacts:
+                restricted_path = (
+                    Path("sha256")
+                    / restricted_artifact.sha256[:2]
+                    / restricted_artifact.sha256[2:4]
+                    / restricted_artifact.sha256
+                )
+                if tuple(restricted_artifact.path.parts[-4:]) != restricted_path.parts:
+                    raise ValueError("restricted artifact path is not canonical for its digest")
+                session.add(
+                    ArtifactORM(
+                        storage_key=str(restricted_path),
+                        kind=restricted_artifact.kind,
+                        sha256=restricted_artifact.sha256,
+                        size_bytes=restricted_artifact.size,
+                        ref_type="case_attempt",
+                        ref_id=attempt.id,
+                        visibility="RESTRICTED",
+                    )
+                )
             metrics = {
                 **result,
                 "prompt_tokens": usage.prompt_tokens,

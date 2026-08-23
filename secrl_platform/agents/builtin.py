@@ -4,6 +4,7 @@ import inspect
 import json
 import re
 import asyncio
+import hashlib
 from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any, Callable, Mapping
@@ -221,6 +222,12 @@ class LegacyGatewayClient:
     def bind_episode(self, episode: EpisodeContext) -> None:
         self._episode = episode
 
+    @property
+    def model_gateway_binding(self) -> str:
+        return hashlib.sha256(
+            self._capability_token.get_secret_value().encode("utf-8")
+        ).hexdigest()
+
     def clear_usage_summary(self) -> None:
         self.total_usage_summary = {}
 
@@ -305,8 +312,10 @@ class BuiltinAgentAdapter(AgentRuntime):
         return "platform_gateway"
 
     @property
-    def model_gateway_binding(self) -> None:
-        return None
+    def model_gateway_binding(self) -> str | None:
+        if self._model_client is None:
+            return None
+        return getattr(self._model_client, "model_gateway_binding", None)
 
     @property
     def name(self) -> str:

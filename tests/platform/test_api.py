@@ -20,6 +20,7 @@ from secrl_platform.auth.sessions import SessionStore
 from secrl_platform.benchmarks.smoke import ProtocolSmokeAdapter
 from secrl_platform.config import Settings
 from secrl_platform.models.secrets import encrypted_secret_from_json
+from secrl_platform.models.evaluator import SecRLEvaluator
 from secrl_platform.runner.process import capability_signer, run_pending_once
 from secrl_platform.runner.recovery import RunnerRepository
 from secrl_platform.storage.artifacts import LocalArtifactStore
@@ -194,6 +195,10 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(task_spec["dataset_sha256"], secrl["dataset"]["sha256"])
         self.assertEqual(task_spec["agent_parameters"], {"retry_num": 2})
         self.assertEqual(
+            task_spec["evaluator_profile"]["model_revision"],
+            model.json()["sha256"],
+        )
+        self.assertEqual(
             run_spec["limits"],
             {"max_steps": 7, "max_str_len": 4096, "max_entry_return": 9},
         )
@@ -225,6 +230,13 @@ class ApiTest(unittest.TestCase):
                 model_provider_resolver=lambda _host, _port: ("93.184.216.34",),
                 secrl_query_executor=lambda _scenario, _query: ([], True),
                 builtin_runtime_resolver=lambda *_args: runtime,
+                secrl_evaluator_resolver=lambda profile: SecRLEvaluator(
+                    profile,
+                    model_client=lambda _prompt, _parameters: {
+                        "text": "Analysis: fixture\nIs_Answer_Correct: True",
+                        "usage": {"prompt_tokens": 5, "completion_tokens": 2},
+                    },
+                ),
             )
         )
         self.assertEqual(status, "SUCCEEDED")
