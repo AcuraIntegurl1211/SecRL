@@ -11,6 +11,9 @@ from fastapi.testclient import TestClient
 from examples.agent_service.app import create_app as create_agent_service_app
 from secrl_platform.api.app import create_app
 from secrl_platform.agents.builtin import DeterministicSmokeAgent
+from secrl_platform.agents.builtin import builtin_manifest
+from secrl_platform.agents.protocol import UsageSnapshot
+from secrl_platform.benchmarks.protocol import SubmitAction
 from secrl_platform.agents.service import HttpxAgentServiceTransport, manifest_sha256
 from secrl_platform.auth.passwords import hash_password
 from secrl_platform.auth.sessions import SessionStore
@@ -80,6 +83,8 @@ class ApiTest(unittest.TestCase):
             master_key="00" * 32,
             session_secret="s" * 32,
             model_provider_allowlist=("models.invalid",),
+            secrl_runtime_enabled=True,
+            secrl_mysql_password="test-only-readonly-password",
         )
         self.app = create_app(
             settings=self.settings,
@@ -129,6 +134,97 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(response.status_code, 201, response.text)
         self.assertRegex(response.json()["task_spec_sha256"], r"^[0-9a-f]{64}$")
         self.assertRegex(response.json()["run_id"], r"^[0-9a-f-]{36}$")
+
+    def test_secrl_builtin_agent_and_task_are_persisted_with_frozen_limits(self):
+        self.login()
+        headers = {"X-CSRF-Token": self.csrf_token}
+        registered = self.client.post(
+            "/api/v1/agents",
+            json={"kind": "BUILT_IN", "revision_id": "secrl-baseline-v1"},
+            headers=headers,
+        )
+        self.assertEqual(registered.status_code, 201, registered.text)
+        model = self.client.post(
+            "/api/v1/models",
+            json={
+                "name": "SecRL fixture model",
+                "provider": "openai-compatible",
+                "endpoint": "https://models.invalid/v1",
+                "model": "fixture-model",
+                "parameters": {"max_output_tokens": 64, "temperature": 0},
+                "pricing": {"input_per_million": "1", "output_per_million": "2"},
+            },
+            headers={**headers, "X-Model-API-Key": "encrypted-test-key"},
+        )
+        self.assertEqual(model.status_code, 201, model.text)
+        benchmark = self.client.get("/api/v1/benchmarks")
+        self.assertEqual(benchmark.status_code, 200)
+        secrl = next(
+            item for item in benchmark.json()
+            if item["manifest"]["benchmark_id"] == "secrl"
+        )
+        self.assertEqual(secrl["manifest"]["case_count"], 589)
+        case_id = "incident_134:0:f85431d5ee76a2f65908ea5dc308418ff5328582d4ee45c0b73b80eaa0dd5ec7"
+        created = self.client.post(
+            "/api/v1/tasks",
+            json={
+                "name": "SecRL integration",
+                "benchmark_id": "secrl",
+                "agent_revision_id": registered.json()["id"],
+                "model_config_revision_id": model.json()["id"],
+                "case_ids": [case_id],
+                "max_steps": 7,
+                "max_str_len": 4096,
+                "max_entry_return": 9,
+                "agent_parameters": {"retry_num": 2},
+                "budget": {"max_tokens": 100000, "max_cost": "100"},
+            },
+            headers=headers,
+        )
+        self.assertEqual(created.status_code, 201, created.text)
+        with self.session_factory() as session:
+            task = session.get(EvaluationTaskORM, created.json()["id"])
+            run = session.get(RunORM, created.json()["run_id"])
+            task_spec = json.loads(task.task_spec_json)
+            run_spec = json.loads(run.run_spec_json)
+        self.assertEqual(task_spec["dataset_sha256"], secrl["dataset"]["sha256"])
+        self.assertEqual(task_spec["agent_parameters"], {"retry_num": 2})
+        self.assertEqual(
+            run_spec["limits"],
+            {"max_steps": 7, "max_str_len": 4096, "max_entry_return": 9},
+        )
+        self.assertEqual(builtin_manifest("secrl-baseline-v1").sha256(), registered.json()["sha256"])
+
+        class Runtime:
+            model_access = "none"
+            model_gateway_binding = None
+            name = "integration-runtime"
+
+            async def reset(self, episode):
+                self.max_steps = episode.max_steps
+
+            async def act(self, _observation):
+                return SubmitAction(type="submit", answer="170.54.121.63")
+
+            def usage(self):
+                return UsageSnapshot()
+
+            async def close(self):
+                return None
+
+        runtime = Runtime()
+        status = asyncio.run(
+            run_pending_once(
+                settings=self.settings,
+                session_factory=self.session_factory,
+                artifact_store=self.artifact_store,
+                model_provider_resolver=lambda _host, _port: ("93.184.216.34",),
+                secrl_query_executor=lambda _scenario, _query: ([], True),
+                builtin_runtime_resolver=lambda *_args: runtime,
+            )
+        )
+        self.assertEqual(status, "SUCCEEDED")
+        self.assertEqual(runtime.max_steps, 7)
 
     def test_task_budget_is_validated_and_bound_into_frozen_hash(self):
         self.login()
@@ -372,7 +468,7 @@ class ApiTest(unittest.TestCase):
         self.assertFalse(created_model.json()["credential_configured"])
         self.assertEqual(created_agent.status_code, 201, created_agent.text)
         self.assertEqual(checked.json()["status"], "valid")
-        self.assertEqual(len(benchmarks.json()), 1)
+        self.assertEqual(len(benchmarks.json()), 2)
         self.assertNotIn("secret", json.dumps(created_model.json()).lower())
 
     def test_model_key_is_encrypted_and_api_task_is_runner_executable(self):

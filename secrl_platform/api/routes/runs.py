@@ -205,6 +205,12 @@ def compare(
                 "BENCHMARK_REVISION_MISMATCH",
                 "Comparison requires the same Benchmark revision",
             )
+        if left_task.dataset_version_id != right_task.dataset_version_id:
+            raise ApiError(
+                409,
+                "DATASET_REVISION_MISMATCH",
+                "Comparison requires the same Dataset revision",
+            )
         return {
             "left": {"id": left_task.id, "status": left_task.status},
             "right": {"id": right_task.id, "status": right_task.status},

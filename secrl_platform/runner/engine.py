@@ -20,7 +20,6 @@ from secrl_platform.benchmarks.protocol import (
     SubmitAction,
     ToolCallAction,
 )
-from secrl_platform.benchmarks.smoke import ProtocolSmokeAdapter
 from secrl_platform.models.providers import ProviderError
 from secrl_platform.runner.recovery import RunnerRepository, StoredCase
 from secrl_platform.storage.artifacts import (
@@ -40,7 +39,7 @@ class RunnerEngine:
         *,
         repository: RunnerRepository,
         artifact_store: LocalArtifactStore,
-        adapter: ProtocolSmokeAdapter,
+        adapter: Any,
         runtime_factory: Callable[[], AgentRuntime],
         after_artifact_write: Callable[[str, ArtifactRef], None] | None = None,
         model_budget_guard: "CapabilityBudgetGuard | None" = None,
@@ -58,6 +57,7 @@ class RunnerEngine:
             return status
         cases = self._repository.cases(task_id, run_id)
         task_budget = self._repository.budget_spec(task_id)
+        run_limits = self._repository.run_limits(task_id, run_id)
         case_by_id = {
             case.id: case
             for case in self._adapter.enumerate_cases(
@@ -95,6 +95,7 @@ class RunnerEngine:
                     runtime=runtime,
                     budget_guard=guard,
                     budget_baseline=budget_baseline,
+                    max_steps=run_limits["max_steps"],
                 )
                 budget_anchor = guard.usage() if guard is not None else None
             except (AgentServiceError, ProviderError) as exc:
@@ -178,6 +179,7 @@ class RunnerEngine:
         runtime: AgentRuntime,
         budget_guard: "CapabilityBudgetGuard | None",
         budget_baseline: UsageSnapshot | None,
+        max_steps: int,
     ) -> tuple[dict[str, Any], EvaluationResult, UsageSnapshot, bool]:
         lease = self._adapter.prepare_scenario(case.scenario)
         episode = None
@@ -198,7 +200,7 @@ class RunnerEngine:
                 attempt_id=attempt_id,
                 public_input=case.public_input,
                 tools=tuple(self._adapter.tool_definitions()),
-                max_steps=32,
+                max_steps=max_steps,
             )
             await runtime.reset(context)
             runtime_started = True

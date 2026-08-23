@@ -54,6 +54,9 @@ SECRL_EXPECTED_SCENARIO_COUNTS: dict[str, int] = {
 }
 SECRL_EXPECTED_CASE_COUNT = sum(SECRL_EXPECTED_SCENARIO_COUNTS.values())
 SECRL_DATASET_SHA256 = "cc1fd79db8627768611b8b230c23d5cb11c19b50ad25f3810dba3fe8adef8e8f"
+SECRL_INCIDENT_SERVICES = {
+    incident: incident.replace("_", "-") for incident in SECRL_EXPECTED_SCENARIO_COUNTS
+}
 _DEFAULT_DATASET = Path(__file__).resolve().parents[2] / "secgym" / "questions" / "o1" / "test"
 
 
@@ -146,6 +149,62 @@ class SecRLExcytinEnvironment:
 
     def health(self) -> Mapping[str, str]:
         return {"status": "ready", "provider": "excytin-fixed-service"}
+
+
+class SecRLMySQLQueryExecutor:
+    """Read-only connector for already-running Compose Incident services."""
+
+    def __init__(
+        self,
+        *,
+        user: str,
+        password: str,
+        database: str,
+        connect: Callable[..., Any] | None = None,
+    ) -> None:
+        if not user or not password or not database:
+            raise ValueError("SecRL read-only database credentials are required")
+        self._user = user
+        self._password = password
+        self._database = database
+        self._connect = connect
+
+    def __repr__(self) -> str:
+        return "SecRLMySQLQueryExecutor(read_only=True)"
+
+    def query_sql(self, scenario_id: str, query: str) -> tuple[Any, bool]:
+        try:
+            host = SECRL_INCIDENT_SERVICES[scenario_id]
+        except KeyError as exc:
+            raise ValueError("unknown SecRL Incident service") from exc
+        connect = self._connect
+        if connect is None:
+            from mysql.connector import connect as mysql_connect
+
+            connect = mysql_connect
+        connection = None
+        cursor = None
+        try:
+            connection = connect(
+                host=host,
+                port=3306,
+                user=self._user,
+                password=self._password,
+                database=self._database,
+                connection_timeout=10,
+            )
+            cursor = connection.cursor()
+            cursor.execute("SET SESSION TRANSACTION READ ONLY")
+            cursor.execute("SET SESSION MAX_EXECUTION_TIME=30000")
+            cursor.execute(query)
+            return cursor.fetchall(), True
+        except Exception as exc:
+            return f"{exc.__class__.__name__}", False
+        finally:
+            if cursor is not None:
+                cursor.close()
+            if connection is not None:
+                connection.close()
 
 
 @dataclass

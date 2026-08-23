@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from decimal import Decimal
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -23,6 +23,10 @@ class TaskCreateRequest(ApiModel):
     model_config_revision_id: str | None = None
     case_ids: tuple[str, ...] = Field(min_length=1)
     budget: BudgetSpec = Field(default_factory=BudgetSpec)
+    max_steps: int = Field(default=32, ge=1, le=10_000)
+    max_str_len: int = Field(default=100_000, ge=1, le=10_000_000)
+    max_entry_return: int = Field(default=15, ge=1, le=1_000_000)
+    agent_parameters: dict[str, Any] = Field(default_factory=dict)
 
 
 class TaskCreateResponse(ApiModel):

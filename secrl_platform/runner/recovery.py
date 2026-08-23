@@ -82,21 +82,34 @@ class RunnerRepository:
     def heartbeat_interval(self) -> float:
         return max(self._lease_seconds / 3, 0.1)
 
-    def create_protocol_smoke_run(
+    def create_benchmark_run(
         self,
         *,
         name: str,
-        adapter: ProtocolSmokeAdapter,
+        adapter: Any,
         agent_revision: AgentRevisionRef,
         case_ids: tuple[str, ...] | None = None,
         budget: dict[str, Any] | None = None,
         model_config_revision_id: str | None = None,
         model_config_sha256: str | None = None,
+        run_limits: dict[str, int] | None = None,
+        agent_parameters: dict[str, Any] | None = None,
     ) -> RunHandle:
         scope = Scope(case_ids=case_ids) if case_ids is not None else Scope.all()
         cases = adapter.enumerate_cases(adapter.dataset_ref(), scope)
         if not cases:
             raise ValueError("runner task scope must include at least one case")
+        scenario_ids = {case.scenario.id for case in cases}
+        if len(scenario_ids) != 1:
+            raise ValueError("one run may contain cases from exactly one scenario")
+        frozen_limits = dict(
+            run_limits
+            or {"max_steps": 32, "max_str_len": 100_000, "max_entry_return": 15}
+        )
+        if set(frozen_limits) != {"max_steps", "max_str_len", "max_entry_return"}:
+            raise ValueError("run limits are incomplete")
+        if any(not isinstance(value, int) or value < 1 for value in frozen_limits.values()):
+            raise ValueError("run limits must be positive integers")
         manifest = adapter.manifest()
         with self._session_factory.begin() as session:
             benchmark_sha256 = _sha256(
@@ -137,12 +150,14 @@ class RunnerRepository:
                     manifest_json=canonical_json(
                         dataset_ref.model_dump(mode="json")
                     ),
-                    split="all",
+                    split=str(getattr(manifest, "dataset_split", "all")),
                     status="PUBLISHED",
                     sha256=dataset_ref.sha256,
                 )
                 session.add(dataset)
                 session.flush()
+            elif dataset.benchmark_revision_id != benchmark.id:
+                raise ValueError("dataset revision is bound to a different benchmark revision")
             scenario = ScenarioORM(
                 dataset_version_id=dataset.id,
                 external_id=cases[0].scenario.id,
@@ -192,6 +207,8 @@ class RunnerRepository:
                 "agent_revision_sha256": agent_revision.manifest_sha256,
                 "case_ids": [case.id for case in cases],
                 "budget": frozen_budget,
+                "limits": frozen_limits,
+                "agent_parameters": dict(agent_parameters or {}),
             }
             if model_config_revision_id is not None:
                 if model_config_sha256 is None:
@@ -213,6 +230,7 @@ class RunnerRepository:
             run_spec = {
                 "task_spec": task_spec,
                 "scenario_id": cases[0].scenario.id,
+                "limits": frozen_limits,
             }
             run_spec_json = canonical_json(run_spec)
             run = RunORM(
@@ -230,6 +248,46 @@ class RunnerRepository:
             session.add(run)
             session.flush()
             return RunHandle(task_id=task.id, run_id=run.id)
+
+    def create_protocol_smoke_run(
+        self,
+        *,
+        name: str,
+        adapter: ProtocolSmokeAdapter,
+        agent_revision: AgentRevisionRef,
+        case_ids: tuple[str, ...] | None = None,
+        budget: dict[str, Any] | None = None,
+        model_config_revision_id: str | None = None,
+        model_config_sha256: str | None = None,
+    ) -> RunHandle:
+        return self.create_benchmark_run(
+            name=name,
+            adapter=adapter,
+            agent_revision=agent_revision,
+            case_ids=case_ids,
+            budget=budget,
+            model_config_revision_id=model_config_revision_id,
+            model_config_sha256=model_config_sha256,
+            run_limits={"max_steps": 32, "max_str_len": 100_000, "max_entry_return": 15},
+        )
+
+    def run_limits(self, task_id: str, run_id: str) -> dict[str, int]:
+        with self._session_factory() as session:
+            _task, run = self._get_task_run(session, task_id, run_id)
+            actual = hashlib.sha256(run.run_spec_json.encode("utf-8")).hexdigest()
+            if actual != run.run_spec_sha256:
+                raise ValueError("frozen RunSpec hash mismatch")
+            payload = json.loads(run.run_spec_json)
+        limits = payload.get("limits")
+        if not isinstance(limits, dict) or set(limits) != {
+            "max_steps",
+            "max_str_len",
+            "max_entry_return",
+        }:
+            raise ValueError("frozen RunSpec limits are invalid")
+        if any(not isinstance(value, int) or value < 1 for value in limits.values()):
+            raise ValueError("frozen RunSpec limits are invalid")
+        return dict(limits)
 
     def prepare_for_run(self, task_id: str, run_id: str) -> str:
         with self._session_factory.begin() as session:

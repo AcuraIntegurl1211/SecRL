@@ -8,7 +8,11 @@ import httpx
 from fastapi import APIRouter, Depends, Request
 from sqlalchemy import select
 
-from secrl_platform.agents.builtin import DeterministicSmokeAgent
+from secrl_platform.agents.builtin import (
+    BUILTIN_AGENT_IDS,
+    DeterministicSmokeAgent,
+    builtin_manifest,
+)
 from secrl_platform.agents.protocol import AgentManifest
 from secrl_platform.agents.service import (
     AgentServiceEndpointPolicy,
@@ -26,6 +30,7 @@ from secrl_platform.api.dependencies import (
 from secrl_platform.api.errors import ApiError
 from secrl_platform.api.schemas import AgentCreateRequest, ModelCreateRequest
 from secrl_platform.benchmarks.smoke import ProtocolSmokeAdapter
+from secrl_platform.benchmarks.secrl import SecRLAdapter
 from secrl_platform.models.providers import validate_model_endpoint
 from secrl_platform.models.secrets import encrypted_secret_to_json
 from secrl_platform.storage.orm import (
@@ -210,8 +215,14 @@ async def create_agent(
                 session.flush()
             return _agent_payload(existing)
 
-    revision = DeterministicSmokeAgent.revision()
-    if payload.revision_id != revision.id:
+    smoke_revision = DeterministicSmokeAgent.revision()
+    if payload.revision_id == smoke_revision.id:
+        manifest = smoke_revision.manifest
+        digest = smoke_revision.manifest_sha256
+    elif payload.revision_id in BUILTIN_AGENT_IDS:
+        manifest = builtin_manifest(payload.revision_id)
+        digest = manifest.sha256()
+    else:
         raise ApiError(
             422,
             "AGENT_REVISION_NOT_ALLOWLISTED",
@@ -219,17 +230,15 @@ async def create_agent(
         )
     with context.session_factory.begin() as session:
         existing = session.scalar(
-            select(AgentRevisionORM).where(
-                AgentRevisionORM.sha256 == revision.manifest_sha256
-            )
+            select(AgentRevisionORM).where(AgentRevisionORM.sha256 == digest)
         )
         if existing is None:
             existing = AgentRevisionORM(
-                name=revision.manifest.name,
+                name=manifest.name,
                 kind="BUILT_IN",
-                manifest_json=canonical_json(revision.manifest.model_dump(mode="json")),
-                parameter_schema_json=canonical_json(revision.manifest.parameter_schema),
-                sha256=revision.manifest_sha256,
+                manifest_json=canonical_json(manifest.model_dump(mode="json")),
+                parameter_schema_json=canonical_json(manifest.parameter_schema),
+                sha256=digest,
             )
             session.add(existing)
             session.flush()
@@ -252,11 +261,18 @@ async def check_agent(
         stored_manifest = json.loads(agent.manifest_json)
         sha256 = agent.sha256
     if kind == "BUILT_IN":
-        revision = DeterministicSmokeAgent.revision()
-        if (
-            sha256 != revision.manifest_sha256
-            or stored_manifest != revision.manifest.model_dump(mode="json")
-        ):
+        smoke_revision = DeterministicSmokeAgent.revision()
+        agent_id = stored_manifest.get("agent_id")
+        if agent_id == smoke_revision.manifest.agent_id:
+            expected_manifest = smoke_revision.manifest
+            expected_sha256 = smoke_revision.manifest_sha256
+        elif agent_id in BUILTIN_AGENT_IDS:
+            expected_manifest = builtin_manifest(agent_id)
+            expected_sha256 = expected_manifest.sha256()
+        else:
+            expected_manifest = None
+            expected_sha256 = None
+        if expected_manifest is None or sha256 != expected_sha256 or stored_manifest != expected_manifest.model_dump(mode="json"):
             raise ApiError(
                 409,
                 "AGENT_REVISION_INVALID",
@@ -287,12 +303,13 @@ async def check_agent(
 
 @router.get("/benchmarks", tags=["benchmarks"])
 def list_benchmarks(_user: LocalUserORM = Depends(require_user)) -> list[dict]:
-    adapter = ProtocolSmokeAdapter.load_default()
+    adapters = (ProtocolSmokeAdapter.load_default(), SecRLAdapter())
     return [
         {
             "manifest": adapter.manifest().model_dump(mode="json"),
             "dataset": adapter.dataset_ref().model_dump(mode="json"),
         }
+        for adapter in adapters
     ]
 
 

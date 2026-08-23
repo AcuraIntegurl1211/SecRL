@@ -25,6 +25,7 @@ class ApiContext:
     agent_service_transport: AgentServiceTransport | None
     agent_service_resolver: Callable[[str, int], object] | None
     secret_store: SecretStore | None
+    secrl_runtime_enabled: bool
 
 
 def get_context(request: Request) -> ApiContext:

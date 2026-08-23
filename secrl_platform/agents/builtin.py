@@ -3,8 +3,15 @@ from __future__ import annotations
 import inspect
 import json
 import re
+import asyncio
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Any, Callable, Mapping
+
+from pydantic import SecretStr
+
+from secrl_platform.models.gateway import ModelGateway
+from secrl_platform.models.providers import ModelMessage, ModelRequest
 
 from secrl_platform.agents.protocol import (
     AgentAction,
@@ -110,43 +117,43 @@ def _safe_config(parameters: Mapping[str, Any]) -> dict[str, Any]:
 def _construct_baseline(parameters: Mapping[str, Any]) -> Any:
     from secgym.agents.baseline_agent import BaselineAgent
 
-    return BaselineAgent(**_safe_config(parameters))
+    return BaselineAgent(**dict(parameters))
 
 
 def _construct_expel(parameters: Mapping[str, Any]) -> Any:
     from secgym.agents.expel_agent import ExpelAgent
 
-    return ExpelAgent(**_safe_config(parameters))
+    return ExpelAgent(**dict(parameters))
 
 
 def _construct_mas(parameters: Mapping[str, Any]) -> Any:
     from secgym.agents.maset_slave_agent import MultiModelBaselineAgent
 
-    return MultiModelBaselineAgent(**_safe_config(parameters))
+    return MultiModelBaselineAgent(**dict(parameters))
 
 
 def _construct_prompt_sauce(parameters: Mapping[str, Any]) -> Any:
     from secgym.agents.prompt_sauce_agent import PromptSauceAgent
 
-    return PromptSauceAgent(**_safe_config(parameters))
+    return PromptSauceAgent(**dict(parameters))
 
 
 def _construct_prompt_sauce_reflexion(parameters: Mapping[str, Any]) -> Any:
     from secgym.agents.prompt_sauce_reflexion_agent import PromptSauceReflexionAgent
 
-    return PromptSauceReflexionAgent(**_safe_config(parameters))
+    return PromptSauceReflexionAgent(**dict(parameters))
 
 
 def _construct_react(parameters: Mapping[str, Any]) -> Any:
     from secgym.agents.react_agent import ReActAgent
 
-    return ReActAgent(**_safe_config(parameters))
+    return ReActAgent(**dict(parameters))
 
 
 def _construct_react_reflexion(parameters: Mapping[str, Any]) -> Any:
     from secgym.agents.react_reflexion_agent import ReActReflexionAgent
 
-    return ReActReflexionAgent(**_safe_config(parameters))
+    return ReActReflexionAgent(**dict(parameters))
 
 
 BUILTIN_AGENT_SPECS = (
@@ -173,10 +180,88 @@ def create_approved_builtin(
     parameters: Mapping[str, Any],
     *,
     model_client: Any | None = None,
+    model_name: str | None = None,
 ) -> "BuiltinAgentAdapter":
     spec = approved_builtin_spec(agent_id)
-    legacy = spec.factory(parameters)
+    safe_parameters = _safe_config(parameters)
+    if model_client is not None:
+        if not model_name:
+            raise ValueError("platform model name is required")
+        safe_parameters["config_list"] = [
+            {
+                "model": model_name,
+                "api_key": "platform-gateway-managed",
+                "api_type": "openai",
+            }
+        ]
+    legacy = spec.factory(safe_parameters)
     return BuiltinAgentAdapter(legacy, model_client=model_client, manifest=builtin_manifest(agent_id))
+
+
+class LegacyGatewayClient:
+    """OpenAIWrapper-shaped bridge that keeps legacy calls inside ModelGateway."""
+
+    def __init__(
+        self,
+        *,
+        gateway: ModelGateway,
+        model: str,
+        capability_token: str,
+        agent_revision_id: str,
+        max_output_tokens: int,
+    ) -> None:
+        self._gateway = gateway
+        self._model = model
+        self._capability_token = SecretStr(capability_token)
+        self._agent_revision_id = agent_revision_id
+        self._max_output_tokens = max_output_tokens
+        self._episode: EpisodeContext | None = None
+        self.total_usage_summary: dict[str, dict[str, int]] = {}
+
+    def bind_episode(self, episode: EpisodeContext) -> None:
+        self._episode = episode
+
+    def clear_usage_summary(self) -> None:
+        self.total_usage_summary = {}
+
+    def create(self, *, messages: list[Mapping[str, Any]], model: str | None = None, **parameters: Any) -> Any:
+        if self._episode is None:
+            raise RuntimeError("legacy model client has no active episode")
+        effective = {
+            key: value
+            for key, value in parameters.items()
+            if key in {"temperature", "stop", "reasoning_effort"} and value is not None
+        }
+        if "reasoning_effort" in effective:
+            effective.pop("reasoning_effort")
+        request = ModelRequest(
+            provider_adapter_version="openai-compatible-v1",
+            model_role="agent",
+            model=model or self._model,
+            messages=tuple(
+                ModelMessage(role=str(item["role"]), content=str(item.get("content", "")))
+                for item in messages
+            ),
+            effective_parameters=effective,
+            run_id=self._episode.run_id,
+            case_id=self._episode.case_id,
+            attempt_id=self._episode.attempt_id,
+            agent_revision_id=self._agent_revision_id,
+            capability_token=self._capability_token,
+            max_output_tokens=self._max_output_tokens,
+        )
+        response = asyncio.run(self._gateway.complete(request))
+        usage = response.usage
+        usage_payload = {
+            "prompt_tokens": usage.prompt if usage is not None else 0,
+            "completion_tokens": usage.completion if usage is not None else 0,
+        }
+        self.total_usage_summary[self._model] = usage_payload
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content=response.text))],
+            usage=SimpleNamespace(as_dict=lambda: usage_payload),
+            model=self._model,
+        )
 
 
 def builtin_manifest(agent_id: str) -> AgentManifest:
@@ -230,6 +315,8 @@ class BuiltinAgentAdapter(AgentRuntime):
     async def reset(self, episode: EpisodeContext) -> None:
         self._episode = episode
         self._closed = False
+        if self._model_client is not None and hasattr(self._model_client, "bind_episode"):
+            self._model_client.bind_episode(episode)
         public = episode.public_input
         question_dict = {
             "context": public.get("context", ""),
@@ -238,22 +325,26 @@ class BuiltinAgentAdapter(AgentRuntime):
         reset = getattr(self.legacy_agent, "reset", None)
         if reset is None:
             return
-        try:
-            result = reset(change_seed=False, question_dict=question_dict)
-        except TypeError:
-            try:
-                result = reset(change_seed=False)
-            except TypeError:
-                result = reset()
+        parameters = inspect.signature(reset).parameters
+        kwargs: dict[str, Any] = {}
+        if "change_seed" in parameters:
+            kwargs["change_seed"] = False
+        if "question_dict" in parameters:
+            kwargs["question_dict"] = question_dict
+        result = await asyncio.to_thread(reset, **kwargs)
         if inspect.isawaitable(result):
             await result
+        if self._model_client is not None:
+            for attr in ("client", "master_client", "slave_client"):
+                if hasattr(self.legacy_agent, attr):
+                    setattr(self.legacy_agent, attr, self._model_client)
 
     async def act(self, observation: Any) -> AgentAction:
         if self._episode is None or self._closed:
             raise RuntimeError("agent runtime has no active episode")
         payload = observation.content if hasattr(observation, "content") else observation
         text = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
-        result = self.legacy_agent.act(text)
+        result = await asyncio.to_thread(self.legacy_agent.act, text)
         if inspect.isawaitable(result):
             result = await result
         return normalize_legacy_action(result)
@@ -282,7 +373,7 @@ class BuiltinAgentAdapter(AgentRuntime):
     async def close(self) -> None:
         close = getattr(self.legacy_agent, "close", None)
         if callable(close):
-            result = close()
+            result = await asyncio.to_thread(close)
             if inspect.isawaitable(result):
                 await result
         self._closed = True

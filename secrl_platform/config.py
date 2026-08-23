@@ -1,7 +1,7 @@
 from functools import cached_property
 from pathlib import Path
 
-from pydantic import Field, field_validator
+from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -20,6 +20,10 @@ class Settings(BaseSettings):
     runner_poll_seconds: float = 1.0
     agent_service_allowlist: tuple[str, ...] = DEFAULT_AGENT_SERVICE_ALLOWLIST
     model_provider_allowlist: tuple[str, ...] = DEFAULT_MODEL_PROVIDER_ALLOWLIST
+    secrl_runtime_enabled: bool = False
+    secrl_mysql_user: str = "benchmark_ro"
+    secrl_mysql_password: SecretStr | None = None
+    secrl_mysql_database: str = "env_monitor_db"
 
     @field_validator("master_key")
     @classmethod
