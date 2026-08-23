@@ -33,6 +33,18 @@ paths, database hash, artifact list and every artifact hash before replacing
 an empty target. Tampered, incomplete, newer-version and path-traversal
 backups are rejected without modifying the target.
 
+PowerShell operators can invoke the same container-native commands without the
+POSIX wrapper scripts:
+
+```powershell
+docker compose exec api secrl-lite backup /data/backups/manual
+docker compose exec api secrl-lite restore /data/backups/manual /data/restored-manual
+```
+
+Restore requires an empty destination and an exactly compatible Lite platform
+and backup schema version. The copied staging directory is hash-verified again
+immediately before its atomic rename, closing the verification/copy race.
+
 ## Disk and logs
 
 Use `docker compose logs --tail=200 api runner` for operational diagnostics.

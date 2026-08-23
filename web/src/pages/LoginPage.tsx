@@ -10,7 +10,7 @@ export function LoginPage() {
   const [pending, setPending] = useState(false);
   async function submit(event: FormEvent) {
     event.preventDefault(); setError(null); setPending(true);
-    try { const result = await apiFetch<{ csrf_token: string }>("/api/v1/auth/login", { method: "POST", json: { username, password } }); setCsrfToken(result.csrf_token); setPassword(""); navigate("/"); }
+    try { const result = await apiFetch<{ csrf_token: string; password_change_required: boolean }>("/api/v1/auth/login", { method: "POST", json: { username, password } }); setCsrfToken(result.csrf_token); setPassword(""); navigate(result.password_change_required ? "/change-password" : "/"); }
     catch (reason) { setError(reason instanceof ApiClientError ? reason.message : "Unable to sign in"); }
     finally { setPending(false); }
   }

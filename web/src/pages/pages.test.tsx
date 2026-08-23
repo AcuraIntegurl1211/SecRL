@@ -5,6 +5,7 @@ import { AgentsPage } from "./AgentsPage";
 import { AnalysisReviewPage } from "./AnalysisReviewPage";
 import { BenchmarksPage } from "./BenchmarksPage";
 import { ComparePage } from "./ComparePage";
+import { ChangePasswordPage } from "./ChangePasswordPage";
 import { DashboardPage } from "./DashboardPage";
 import { LoginPage } from "./LoginPage";
 import { ModelsPage } from "./ModelsPage";
@@ -30,6 +31,17 @@ describe("core operational pages", () => {
     expect(screen.queryByText("secret")).not.toBeInTheDocument();
   });
 
+  it("rotates the initial administrator password before entering the app", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(null, { status: 204 })));
+    const user = userEvent.setup();
+    render(<MemoryRouter initialEntries={["/change-password"]}><Routes><Route path="/change-password" element={<ChangePasswordPage />} /><Route path="/" element={<h1>Dashboard ready</h1>} /></Routes></MemoryRouter>);
+    await user.type(screen.getByLabelText("Current password"), "temporary password");
+    await user.type(screen.getByLabelText("New password"), "a new strong password");
+    await user.type(screen.getByLabelText("Confirm new password"), "a new strong password");
+    await user.click(screen.getByRole("button", { name: "Change password" }));
+    expect(await screen.findByRole("heading", { name: "Dashboard ready" })).toBeInTheDocument();
+  });
+
   it.each([
     [ModelsPage, "Models"],
     [AgentsPage, "Agents"],
@@ -44,7 +56,7 @@ describe("core operational pages", () => {
   });
 
   it("shows queue metrics from the task endpoint", async () => {
-    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify([
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => new Response(JSON.stringify(String(input).endsWith("/health") ? { status: "ok" } : [
       { id: "task-1", name: "Smoke", status: "RUNNING", task_spec: {}, task_spec_sha256: "a".repeat(64) },
       { id: "task-2", name: "Done", status: "SUCCEEDED", task_spec: {}, task_spec_sha256: "b".repeat(64) },
     ]), { status: 200 })));
@@ -52,6 +64,7 @@ describe("core operational pages", () => {
     expect((await screen.findAllByText("1")).length).toBeGreaterThanOrEqual(2);
     expect(screen.getByText("Active tasks")).toBeInTheDocument();
     expect(screen.getByText("Completed runs")).toBeInTheDocument();
+    expect(screen.getAllByText("healthy").length).toBeGreaterThanOrEqual(1);
   });
 
   it("renders a run detail route without loading the whole trajectory", async () => {

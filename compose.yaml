@@ -8,6 +8,7 @@ x-platform-env: &platform-env
   SECRL_INITIAL_ADMIN_PASSWORD: ${SECRL_INITIAL_ADMIN_PASSWORD:?Set SECRL_INITIAL_ADMIN_PASSWORD in .env}
   SECRL_AGENT_SERVICE_CAPABILITY_SECRET: ${SECRL_AGENT_SERVICE_CAPABILITY_SECRET:-}
   SECRL_AGENT_SERVICE_ALLOWLIST: '["agent-service-reference"]'
+  FORWARDED_ALLOW_IPS: "*"
 
 x-mysql: &mysql
   image: mysql:9.0@sha256:92dc869678019f65d761155dacac660a904f6245bfe1b7997da0a73b2bfc68c9
@@ -27,6 +28,11 @@ x-mysql: &mysql
     timeout: 5s
     retries: 12
   cap_drop: ["ALL"]
+  deploy:
+    resources:
+      limits:
+        cpus: "2.0"
+        memory: 2G
 
 services:
   web:

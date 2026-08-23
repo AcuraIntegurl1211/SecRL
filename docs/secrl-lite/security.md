@@ -18,6 +18,13 @@ clears the model password field after submission. Gold, evaluator-private
 inputs, capability tokens and database credentials are absent from Agent
 payloads, public response schemas and public artifacts.
 
+The deployment-created administrator must change its initial password before
+other authenticated API routes are enabled. When an HTTPS reverse proxy fronts
+the localhost-only Web service, it must set `X-Forwarded-Proto: https`; Nginx
+preserves that value and the internal API trusts proxy headers only because the
+API port is not published outside the private Compose network. The resulting
+session cookie is marked `Secure`.
+
 ## Network
 
 Agent Service registration and model provider validation enforce allowlists,

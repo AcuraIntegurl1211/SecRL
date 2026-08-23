@@ -8,6 +8,7 @@ import { AgentsPage } from "../pages/AgentsPage";
 import { AnalysisReviewPage } from "../pages/AnalysisReviewPage";
 import { BenchmarksPage } from "../pages/BenchmarksPage";
 import { ComparePage } from "../pages/ComparePage";
+import { ChangePasswordPage } from "../pages/ChangePasswordPage";
 import { LoginPage } from "../pages/LoginPage";
 import { ModelsPage } from "../pages/ModelsPage";
 import { NewEvaluationPage } from "../pages/NewEvaluationPage";
@@ -31,6 +32,7 @@ export function AuthGate() {
 
 export const router = createBrowserRouter([
   { path: "/login", element: <LoginPage /> },
+  { path: "/change-password", element: <ChangePasswordPage /> },
   {
     element: <AuthGate />,
     children: [

@@ -511,7 +511,7 @@ class ApiTest(unittest.TestCase):
             with self.subTest(forbidden=forbidden):
                 self.assertNotIn(forbidden, document)
 
-    def test_openapi_contains_complete_milestone_two_route_surface(self):
+    def test_openapi_contains_complete_lite_route_surface(self):
         paths = set(self.app.openapi()["paths"])
 
         self.assertEqual(
@@ -519,11 +519,13 @@ class ApiTest(unittest.TestCase):
             {
                 "/api/v1/auth/login",
                 "/api/v1/auth/logout",
+                "/api/v1/auth/password",
                 "/api/v1/health",
                 "/api/v1/models",
                 "/api/v1/agents",
                 "/api/v1/agents/{id}:check",
                 "/api/v1/benchmarks",
+                "/api/v1/benchmarks/{benchmark_id}/cases",
                 "/api/v1/tasks",
                 "/api/v1/runs/{id}",
                 "/api/v1/runs/{id}:pause",
@@ -605,6 +607,52 @@ class ApiTest(unittest.TestCase):
                     )
                 )
             )
+
+    def test_initial_admin_must_rotate_password_before_using_api(self):
+        with self.session_factory.begin() as session:
+            user = session.scalar(select(LocalUserORM))
+            session.add(
+                AppSettingORM(
+                    key=f"auth.password_change_required.{user.id}",
+                    value_json="true",
+                )
+            )
+
+        login = self.login()
+        self.assertTrue(login.json()["password_change_required"])
+        blocked = self.client.get("/api/v1/tasks")
+        self.assertEqual(blocked.status_code, 403)
+        self.assertEqual(
+            blocked.json()["error"]["code"], "PASSWORD_CHANGE_REQUIRED"
+        )
+
+        changed = self.client.post(
+            "/api/v1/auth/password",
+            headers={"X-CSRF-Token": self.csrf_token},
+            json={
+                "current_password": "correct horse battery staple",
+                "new_password": "new correct horse battery staple",
+            },
+        )
+        self.assertEqual(changed.status_code, 204, changed.text)
+        self.assertEqual(self.client.get("/api/v1/tasks").status_code, 200)
+        self.client.post(
+            "/api/v1/auth/logout", headers={"X-CSRF-Token": self.csrf_token}
+        )
+        old_login = self.client.post(
+            "/api/v1/auth/login",
+            json={"username": "admin", "password": "correct horse battery staple"},
+        )
+        new_login = self.client.post(
+            "/api/v1/auth/login",
+            json={
+                "username": "admin",
+                "password": "new correct horse battery staple",
+            },
+        )
+        self.assertEqual(old_login.status_code, 401)
+        self.assertEqual(new_login.status_code, 200)
+        self.assertFalse(new_login.json()["password_change_required"])
 
     def test_model_agent_and_benchmark_resources_are_safe_and_frozen(self):
         self.login()

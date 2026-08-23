@@ -32,6 +32,20 @@ class ComposePackagingTest(unittest.TestCase):
         self.assertIn("SECRL_INITIAL_ADMIN_USERNAME:", platform_environment)
         self.assertIn("SECRL_AGENT_SERVICE_CAPABILITY_SECRET:", platform_environment)
 
+    def test_https_proxy_headers_reach_api_cookie_policy(self):
+        compose = (ROOT / "compose.yaml").read_text()
+        nginx = (ROOT / "docker" / "lite" / "nginx.conf").read_text()
+
+        self.assertIn('FORWARDED_ALLOW_IPS: "*"', compose)
+        self.assertIn("$http_x_forwarded_proto", nginx)
+        self.assertNotIn("proxy_set_header X-Forwarded-Proto $scheme;", nginx)
+
+    def test_incident_profiles_have_resource_limits(self):
+        compose = (ROOT / "compose.yaml").read_text()
+        mysql = compose.split("services:", 1)[0]
+        self.assertIn("resources:", mysql)
+        self.assertIn("memory:", mysql)
+
     def test_entrypoint_requires_secrets_and_forwards_shutdown(self):
         entrypoint = (ROOT / "docker/lite/entrypoint.sh").read_text()
         self.assertIn("SECRL_MASTER_KEY", entrypoint)

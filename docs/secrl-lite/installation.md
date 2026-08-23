@@ -28,7 +28,35 @@ when that username does not exist. It never prints the password.
 
 Open <http://127.0.0.1:8080> and sign in. The browser receives a strict,
 HttpOnly session cookie and a CSRF token; model credentials are entered only
-for a create request and are cleared from the form after submission.
+for a create request and are cleared from the form after submission. A newly
+created administrator is restricted to the password-change endpoint until the
+initial deployment password has been replaced with a new value of at least 12
+characters.
+
+## macOS and Windows setup boundary
+
+On macOS, run the same Compose commands from Terminal after installing Docker
+Desktop. The repository scripts use POSIX `sh`, relative Compose paths and named
+volumes; they do not require Linux host paths. This release was reviewed and its
+non-Docker frontend/Python configuration was tested on macOS, but Docker was not
+available on that host, so no macOS container smoke is claimed.
+
+On Windows, use Docker Desktop with the WSL2 engine and run Compose from
+PowerShell in the repository directory:
+
+```powershell
+Copy-Item .env.example .env
+# Edit .env and set unique random values; do not paste them into shell history.
+docker compose config --quiet
+docker compose --profile smoke up -d --build --wait
+Invoke-RestMethod http://127.0.0.1:8080/api/v1/health
+docker compose --profile smoke down
+```
+
+Native Windows Python execution is not supported. Linux-only primitives such as
+`fcntl` execute inside the Linux containers supplied by Docker Desktop/WSL2.
+These Windows commands and paths were documentation/configuration reviewed;
+there is no Windows host smoke evidence for this release.
 
 ## Optional profiles
 

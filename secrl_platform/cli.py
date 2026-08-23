@@ -43,9 +43,10 @@ def main() -> int:
         from sqlalchemy import select
 
         from secrl_platform.auth.passwords import hash_password
+        from secrl_platform.auth.sessions import password_change_key
         from secrl_platform.config import Settings
         from secrl_platform.storage.database import create_engine_and_session
-        from secrl_platform.storage.orm import LocalUserORM
+        from secrl_platform.storage.orm import AppSettingORM, LocalUserORM
 
         password = args.password or os.environ.get("SECRL_INITIAL_ADMIN_PASSWORD", "")
         if not password:
@@ -57,11 +58,17 @@ def main() -> int:
                 select(LocalUserORM).where(LocalUserORM.username == args.username)
             )
             if existing is None:
+                existing = LocalUserORM(
+                    username=args.username,
+                    password_hash=hash_password(password),
+                    status="ACTIVE",
+                )
+                session.add(existing)
+                session.flush()
                 session.add(
-                    LocalUserORM(
-                        username=args.username,
-                        password_hash=hash_password(password),
-                        status="ACTIVE",
+                    AppSettingORM(
+                        key=password_change_key(existing.id),
+                        value_json="true",
                     )
                 )
         return 0
