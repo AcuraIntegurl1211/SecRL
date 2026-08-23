@@ -258,6 +258,41 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(restricted.status_code, 403)
         self.assertNotIn("170.54.121.63", analyzed.text + history.text + restricted.text)
 
+    def test_secrl_task_rejects_agent_override_of_frozen_max_steps(self):
+        self.login()
+        headers = {"X-CSRF-Token": self.csrf_token}
+        registered = self.client.post(
+            "/api/v1/agents",
+            json={"kind": "BUILT_IN", "revision_id": "secrl-baseline-v1"},
+            headers=headers,
+        ).json()
+        model = self.client.post(
+            "/api/v1/models",
+            json={
+                "name": "fixture",
+                "provider": "openai-compatible",
+                "endpoint": "https://models.invalid/v1",
+                "model": "fixture",
+                "parameters": {"max_output_tokens": 16},
+                "pricing": {"input_per_million": "1", "output_per_million": "1"},
+            },
+            headers={**headers, "X-Model-API-Key": "encrypted-test-key"},
+        ).json()
+        response = self.client.post(
+            "/api/v1/tasks",
+            json={
+                "name": "invalid override",
+                "benchmark_id": "secrl",
+                "agent_revision_id": registered["id"],
+                "model_config_revision_id": model["id"],
+                "case_ids": ["incident_134:0:f85431d5ee76a2f65908ea5dc308418ff5328582d4ee45c0b73b80eaa0dd5ec7"],
+                "agent_parameters": {"max_steps": 999},
+                "budget": {"max_tokens": 1000, "max_cost": "10"},
+            },
+            headers=headers,
+        )
+        self.assertEqual(response.status_code, 422, response.text)
+
     def test_task_budget_is_validated_and_bound_into_frozen_hash(self):
         self.login()
         headers = {"X-CSRF-Token": self.csrf_token}

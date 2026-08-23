@@ -230,7 +230,7 @@ def _resolve_runtime(
             max_output_tokens=max_output_tokens,
         )
         parameters = dict(agent_parameters)
-        parameters.setdefault("max_steps", limits.get("max_steps", 15))
+        frozen_max_steps = limits.get("max_steps", 15)
 
         def builtin_factory():
             if builtin_runtime_resolver is not None:
@@ -245,6 +245,7 @@ def _resolve_runtime(
                 parameters,
                 model_client=model_client,
                 model_name=model_name,
+                max_steps=frozen_max_steps,
             )
 
         return builtin_factory, CapabilityBudgetGuard(

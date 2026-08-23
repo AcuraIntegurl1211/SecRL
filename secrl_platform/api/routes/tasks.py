@@ -11,6 +11,7 @@ from secrl_platform.agents.builtin import (
     DeterministicSmokeAgent,
     _safe_config,
     builtin_manifest,
+    normalize_builtin_parameters,
 )
 from secrl_platform.agents.protocol import AgentManifest, AgentRevisionRef
 from secrl_platform.api.dependencies import (
@@ -120,7 +121,14 @@ def create_task(
             )
     budget = payload.budget.model_dump(mode="json", exclude_none=True)
     try:
-        parameters = _safe_config(payload.agent_parameters)
+        parameters = (
+            normalize_builtin_parameters(
+                revision.manifest.agent_id,
+                payload.agent_parameters,
+            )
+            if revision.manifest.agent_id in BUILTIN_AGENT_IDS
+            else _safe_config(payload.agent_parameters)
+        )
         handle = RunnerRepository(context.session_factory).create_benchmark_run(
             name=payload.name,
             adapter=adapter,

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import unittest
+from unittest.mock import Mock, patch
 
 from secrl_platform.agents.builtin import (
     BUILTIN_AGENT_IDS,
@@ -10,6 +11,9 @@ from secrl_platform.agents.builtin import (
     InvalidLegacyAction,
     normalize_legacy_action,
     LegacyGatewayClient,
+    BuiltinAgentSpec,
+    create_approved_builtin,
+    normalize_builtin_parameters,
 )
 from secrl_platform.agents.protocol import AgentManifest, EpisodeContext
 from secrl_platform.benchmarks.protocol import Observation, SubmitAction, ToolCallAction
@@ -48,6 +52,46 @@ def _episode() -> EpisodeContext:
 
 
 class BuiltinAgentAdapterTest(unittest.TestCase):
+    def test_unknown_and_runspec_owned_parameters_are_rejected(self):
+        for parameters in (
+            {"unknown": True},
+            {"max_steps": 99},
+            {"config_list": []},
+            {"retry_num": "ten"},
+            {"submit_summary": 1},
+        ):
+            with self.subTest(parameters=parameters):
+                with self.assertRaises(ValueError):
+                    normalize_builtin_parameters("secrl-baseline-v1", parameters)
+
+    def test_multi_model_constructor_receives_both_gateway_managed_configs(self):
+        client = object()
+        constructor = Mock(return_value=_FakeLegacyAgent("submit[ok]"))
+        spec = BuiltinAgentSpec("secrl-mas-v1", "fixture", constructor)
+        with patch.dict("secrl_platform.agents.builtin._BUILTIN_SPEC_BY_ID", {"secrl-mas-v1": spec}):
+            create_approved_builtin(
+                "secrl-mas-v1",
+                {"retry_num": 2},
+                model_client=client,
+                model_name="fixture",
+            )
+        kwargs = constructor.call_args.args[0]
+        self.assertNotIn("config_list", kwargs)
+        self.assertEqual(kwargs["config_list_master"], kwargs["config_list_slave"])
+
+    def test_expel_constructor_uses_only_source_controlled_assets(self):
+        constructor = Mock(return_value=_FakeLegacyAgent("submit[ok]"))
+        spec = BuiltinAgentSpec("secrl-expel-v1", "fixture", constructor)
+        with patch.dict("secrl_platform.agents.builtin._BUILTIN_SPEC_BY_ID", {"secrl-expel-v1": spec}):
+            create_approved_builtin(
+                "secrl-expel-v1",
+                {},
+                model_client=object(),
+                model_name="fixture",
+            )
+        kwargs = constructor.call_args.args[0]
+        self.assertTrue(kwargs["insight_path"].endswith("secgym/agents/expel_train/insights.json"))
+        self.assertTrue(kwargs["experience_path"].endswith("secgym/agents/expel_train/corrects.jsonl"))
     def test_explicit_allowlist_contains_all_approved_secgym_agents(self):
         self.assertEqual(
             set(BUILTIN_AGENT_IDS),

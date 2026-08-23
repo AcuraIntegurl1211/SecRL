@@ -6,6 +6,7 @@ import re
 import asyncio
 import hashlib
 from dataclasses import dataclass
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Callable, Mapping
 
@@ -167,6 +168,19 @@ BUILTIN_AGENT_SPECS = (
     BuiltinAgentSpec("secrl-react-reflexion-v1", "ReActReflexionAgent", _construct_react_reflexion),
 )
 _BUILTIN_SPEC_BY_ID = {spec.agent_id: spec for spec in BUILTIN_AGENT_SPECS}
+_COMMON_PARAMETERS = frozenset(
+    {"cache_seed", "temperature", "retry_num", "retry_wait_time"}
+)
+_ALLOWED_PARAMETERS = {
+    "secrl-baseline-v1": _COMMON_PARAMETERS | {"submit_summary"},
+    "secrl-expel-v1": _COMMON_PARAMETERS | {"submit_summary"},
+    "secrl-mas-v1": _COMMON_PARAMETERS | {"submit_summary"},
+    "secrl-prompt-sauce-v1": _COMMON_PARAMETERS,
+    "secrl-prompt-sauce-reflexion-v1": _COMMON_PARAMETERS,
+    "secrl-react-v1": _COMMON_PARAMETERS | {"submit_summary"},
+    "secrl-react-reflexion-v1": _COMMON_PARAMETERS | {"submit_summary"},
+}
+_EXPEL_ASSET_ROOT = Path(__file__).resolve().parents[2] / "secgym" / "agents" / "expel_train"
 
 
 def approved_builtin_spec(agent_id: str) -> BuiltinAgentSpec:
@@ -176,25 +190,65 @@ def approved_builtin_spec(agent_id: str) -> BuiltinAgentSpec:
         raise KeyError(f"unapproved built-in agent: {agent_id}") from exc
 
 
+def normalize_builtin_parameters(
+    agent_id: str,
+    parameters: Mapping[str, Any],
+) -> dict[str, Any]:
+    approved_builtin_spec(agent_id)
+    safe = _safe_config(parameters)
+    unknown = set(safe).difference(_ALLOWED_PARAMETERS[agent_id])
+    if unknown:
+        raise ValueError(
+            f"unsupported built-in agent parameter: {sorted(unknown)[0]}"
+        )
+    for name, value in safe.items():
+        if name in {"cache_seed", "retry_num"}:
+            if isinstance(value, bool) or not isinstance(value, int) or (
+                name == "retry_num" and value < 1
+            ):
+                raise ValueError(f"invalid built-in agent parameter: {name}")
+        elif name in {"temperature", "retry_wait_time"}:
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or (
+                name == "retry_wait_time" and value < 0
+            ):
+                raise ValueError(f"invalid built-in agent parameter: {name}")
+        elif name == "submit_summary" and not isinstance(value, bool):
+            raise ValueError("invalid built-in agent parameter: submit_summary")
+    return safe
+
+
 def create_approved_builtin(
     agent_id: str,
     parameters: Mapping[str, Any],
     *,
     model_client: Any | None = None,
     model_name: str | None = None,
+    max_steps: int | None = None,
 ) -> "BuiltinAgentAdapter":
     spec = approved_builtin_spec(agent_id)
-    safe_parameters = _safe_config(parameters)
+    safe_parameters = normalize_builtin_parameters(agent_id, parameters)
+    if max_steps is not None:
+        if not isinstance(max_steps, int) or max_steps < 1:
+            raise ValueError("built-in agent max_steps must be positive")
+        safe_parameters["max_steps"] = max_steps
     if model_client is not None:
         if not model_name:
             raise ValueError("platform model name is required")
-        safe_parameters["config_list"] = [
+        gateway_config = [
             {
                 "model": model_name,
                 "api_key": "platform-gateway-managed",
                 "api_type": "openai",
             }
         ]
+        if agent_id == "secrl-mas-v1":
+            safe_parameters["config_list_master"] = list(gateway_config)
+            safe_parameters["config_list_slave"] = list(gateway_config)
+        else:
+            safe_parameters["config_list"] = gateway_config
+    if agent_id == "secrl-expel-v1":
+        safe_parameters["insight_path"] = str(_EXPEL_ASSET_ROOT / "insights.json")
+        safe_parameters["experience_path"] = str(_EXPEL_ASSET_ROOT / "corrects.jsonl")
     legacy = spec.factory(safe_parameters)
     return BuiltinAgentAdapter(legacy, model_client=model_client, manifest=builtin_manifest(agent_id))
 
@@ -273,12 +327,24 @@ class LegacyGatewayClient:
 
 def builtin_manifest(agent_id: str) -> AgentManifest:
     spec = approved_builtin_spec(agent_id)
+    properties = {}
+    for name in sorted(_ALLOWED_PARAMETERS[agent_id]):
+        if name == "submit_summary":
+            properties[name] = {"type": "boolean"}
+        elif name in {"cache_seed", "retry_num"}:
+            properties[name] = {"type": "integer"}
+        else:
+            properties[name] = {"type": "number"}
     return AgentManifest(
         agent_id=agent_id,
         name=spec.name,
         version="1.0.0",
         runtime="built_in",
-        parameter_schema={"type": "object", "additionalProperties": False},
+        parameter_schema={
+            "type": "object",
+            "additionalProperties": False,
+            "properties": properties,
+        },
     )
 
 
