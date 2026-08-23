@@ -775,7 +775,7 @@ git commit -m "feat: add Protocol-Smoke benchmark adapter"
 - Create: `secrl_platform/agents/builtin.py`
 - Create: `tests/platform/test_agent_protocol.py`
 
-- [ ] **Step 1: Write runtime equivalence tests**
+- [x] **Step 1: Write runtime equivalence tests**
 
 ```python
 class AgentRuntimeTest(unittest.IsolatedAsyncioTestCase):
@@ -794,7 +794,7 @@ class AgentRuntimeTest(unittest.IsolatedAsyncioTestCase):
             registry.resolve("agent-revision-id")
 ```
 
-- [ ] **Step 2: Define runtime models and protocol**
+- [x] **Step 2: Define runtime models and protocol**
 
 Implement immutable `AgentManifest`, `AgentRevisionRef`, `EpisodeContext`, `UsageSnapshot`, and:
 
@@ -808,11 +808,11 @@ class AgentRuntime(Protocol):
     async def close(self) -> None: ...
 ```
 
-- [ ] **Step 3: Implement deterministic smoke agent**
+- [x] **Step 3: Implement deterministic smoke agent**
 
 The agent follows a fixed state machine: `search -> read -> submit`. It must not depend on a model, making it suitable for CI and runtime equivalence tests. Built-in adapters expose async methods even when the wrapped research Agent is synchronous, so the runner has one interface for local and HTTP runtimes.
 
-- [ ] **Step 4: Run and commit**
+- [x] **Step 4: Run and commit**
 
 ```bash
 python -m unittest tests.platform.test_agent_protocol -v
@@ -827,7 +827,7 @@ git commit -m "feat: add Agent Runtime v1 contracts"
 - Create: `secrl_platform/auth/passwords.py`
 - Create: `tests/platform/test_secrets.py`
 
-- [ ] **Step 1: Write non-disclosure and round-trip tests**
+- [x] **Step 1: Write non-disclosure and round-trip tests**
 
 ```python
 class SecretStoreTest(unittest.TestCase):
@@ -841,11 +841,11 @@ class SecretStoreTest(unittest.TestCase):
         self.assertEqual(mask_secret("sk-private-value"), "configured")
 ```
 
-- [ ] **Step 2: Implement AES-GCM envelopes**
+- [x] **Step 2: Implement AES-GCM envelopes**
 
 Use a random 96-bit nonce and associated data containing `secret_ref_id`, `owner_id`, provider, and key version. Store nonce, ciphertext, tag, key version, created time, and status. Never define a serializer that exposes decrypted values.
 
-- [ ] **Step 3: Implement Argon2 password hashing**
+- [x] **Step 3: Implement Argon2 password hashing**
 
 ```python
 from argon2 import PasswordHasher
@@ -864,7 +864,7 @@ def verify_password(encoded: str, password: str) -> bool:
 
 Catch the specific Argon2 verification exceptions in final code rather than broad `Exception`.
 
-- [ ] **Step 4: Run and commit**
+- [x] **Step 4: Run and commit**
 
 ```bash
 python -m unittest tests.platform.test_secrets -v
@@ -880,7 +880,7 @@ git commit -m "feat: encrypt model secrets and hash local passwords"
 - Create: `secrl_platform/models/gateway.py`
 - Create: `tests/platform/test_model_gateway.py`
 
-- [ ] **Step 1: Write provider retry and accounting tests**
+- [x] **Step 1: Write provider retry and accounting tests**
 
 ```python
 class ModelGatewayTest(unittest.IsolatedAsyncioTestCase):
@@ -896,19 +896,19 @@ class ModelGatewayTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.estimated_cost, Decimal("0.000014"))
 ```
 
-- [ ] **Step 2: Define normalized request/response types**
+- [x] **Step 2: Define normalized request/response types**
 
 `ModelRequest` includes provider adapter version, model role, messages, requested/effective parameters, timeout, Run/Case/Attempt correlation IDs, and cache metadata. `ModelResponse` preserves raw provider usage plus normalized prompt/completion/cached/reasoning values.
 
-- [ ] **Step 3: Implement OpenAI-compatible adapter first**
+- [x] **Step 3: Implement OpenAI-compatible adapter first**
 
 Use HTTPX with explicit timeout and no automatic unbounded retries. Classify 401/403/404 as permanent, 408/429/5xx as transient, parse `Retry-After`, and cap attempts from ModelConfigRevision.
 
-- [ ] **Step 4: Implement frozen pricing**
+- [x] **Step 4: Implement frozen pricing**
 
 Use `Decimal` only. Missing usage or price returns `estimated_cost=None`, never zero. Store the PricingProfileRevision hash with every calculated cost.
 
-- [ ] **Step 5: Run and commit**
+- [x] **Step 5: Run and commit**
 
 ```bash
 python -m unittest tests.platform.test_model_gateway -v
@@ -925,7 +925,7 @@ git commit -m "feat: add normalized model gateway and cost accounting"
 - Create: `examples/agent_service/manifest.json`
 - Create: `tests/platform/test_agent_service.py`
 
-- [ ] **Step 1: Write idempotency and security tests**
+- [x] **Step 1: Write idempotency and security tests**
 
 ```python
 class AgentServiceTest(unittest.IsolatedAsyncioTestCase):
@@ -948,15 +948,15 @@ class AgentServiceTest(unittest.IsolatedAsyncioTestCase):
             await runtime.act(observation())
 ```
 
-- [ ] **Step 2: Implement endpoint allowlist and manifest handshake**
+- [x] **Step 2: Implement endpoint allowlist and manifest handshake**
 
 Resolve the configured hostname, reject userinfo/fragments, reject hosts outside `Settings.agent_service_allowlist`, fetch `/v1/manifest`, and require protocol version `1` plus the registered manifest SHA-256.
 
-- [ ] **Step 3: Implement session lifecycle**
+- [x] **Step 3: Implement session lifecycle**
 
 Use the approved endpoints and immutable payload models. `AgentServiceRuntime` maintains monotonically increasing sequence numbers, caches the last request/response pair, closes sessions in `finally`, and maps protocol errors to the standard platform error codes.
 
-- [ ] **Step 4: Implement short-lived capability tokens**
+- [x] **Step 4: Implement short-lived capability tokens**
 
 Use an HMAC-SHA256 signed canonical JSON token with claims for Run ID, AgentRevision ID, allowed model roles, maximum token/cost budget, issued-at, expiry, and random nonce. Model Gateway rejects altered, expired, wrong-run, wrong-agent, or over-budget tokens. Add tests for every rejection path; token lifetime defaults to five minutes and is refreshed only while the Run lease is active.
 
@@ -973,15 +973,15 @@ def test_capability_rejects_tamper_expiry_scope_and_budget(self):
         self.signer.authorize_usage(token, additional_tokens=10_001, additional_cost=Decimal("0"))
 ```
 
-- [ ] **Step 5: Add the deterministic reference service**
+- [x] **Step 5: Add the deterministic reference service**
 
 The example server wraps `DeterministicSmokeAgent`. It accepts only a short-lived signed capability token, exposes health/manifest, and implements idempotent `:act` responses.
 
-- [ ] **Step 6: Prove built-in/service equivalence**
+- [x] **Step 6: Prove built-in/service equivalence**
 
 Run the same Protocol-Smoke case through the built-in runtime and ASGI in-memory reference service. Assert identical canonical Action/Observation sequences and reward.
 
-- [ ] **Step 7: Run and commit**
+- [x] **Step 7: Run and commit**
 
 ```bash
 python -m unittest tests.platform.test_agent_service -v
@@ -1000,7 +1000,7 @@ git commit -m "feat: add Agent Service Protocol v1 runtime"
 - Create: `tests/platform/test_recovery.py`
 - Create: `tests/e2e/test_protocol_smoke_e2e.py`
 
-- [ ] **Step 1: Write transition tests**
+- [x] **Step 1: Write transition tests**
 
 ```python
 class RunStateTest(unittest.TestCase):
@@ -1016,7 +1016,7 @@ class RunStateTest(unittest.TestCase):
             RunStateMachine("SUCCEEDED").transition("RUNNING")
 ```
 
-- [ ] **Step 2: Implement explicit transition table**
+- [x] **Step 2: Implement explicit transition table**
 
 ```python
 ALLOWED_TRANSITIONS = {
@@ -1032,7 +1032,7 @@ ALLOWED_TRANSITIONS = {
 }
 ```
 
-- [ ] **Step 3: Write an interrupted-case recovery test**
+- [x] **Step 3: Write an interrupted-case recovery test**
 
 Create a task with three smoke cases, inject a crash after artifact write but before database commit on case two, restart the engine, and assert:
 
@@ -1043,15 +1043,15 @@ self.assertEqual(repo.final_result_count(task.id), 3)
 self.assertTrue(store.unreferenced_artifacts())
 ```
 
-- [ ] **Step 4: Implement episode loop**
+- [x] **Step 4: Implement episode loop**
 
 For each Case: create attempt, reset Agent, loop `act -> validate -> execute`, write trajectory artifact, atomically register artifact/result/checkpoint, then honor pause/cancel. Benchmark errors remain result evidence; platform errors choose retry/fail using typed error codes.
 
-- [ ] **Step 5: Add budgets**
+- [x] **Step 5: Add budgets**
 
 Before each model call and new Case, compare accumulated token/cost against TaskSpec. Crossing the hard limit transitions to `BUDGET_EXHAUSTED` after committing the current evidence.
 
-- [ ] **Step 6: Run e2e tests**
+- [x] **Step 6: Run e2e tests**
 
 ```bash
 python -m unittest tests.platform.test_runner tests.platform.test_recovery tests.e2e.test_protocol_smoke_e2e -v
@@ -1059,7 +1059,7 @@ python -m unittest tests.platform.test_runner tests.platform.test_recovery tests
 
 Expected: the 12-case dataset completes without MySQL or LLM, pause/recovery tests pass, and all artifacts verify.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add secrl_platform/runner tests/platform/test_runner.py tests/platform/test_recovery.py tests/e2e/test_protocol_smoke_e2e.py
@@ -1077,7 +1077,7 @@ git commit -m "feat: run and recover Protocol-Smoke evaluations"
 - Create: `secrl_platform/auth/sessions.py`
 - Create: `tests/platform/test_api.py`
 
-- [ ] **Step 1: Write unauthenticated and lifecycle API tests**
+- [x] **Step 1: Write unauthenticated and lifecycle API tests**
 
 ```python
 class ApiTest(unittest.TestCase):
@@ -1092,7 +1092,7 @@ class ApiTest(unittest.TestCase):
         self.assertRegex(response.json()["task_spec_sha256"], r"^[0-9a-f]{64}$")
 ```
 
-- [ ] **Step 2: Implement app factory and error envelope**
+- [x] **Step 2: Implement app factory and error envelope**
 
 All errors use:
 
@@ -1109,11 +1109,11 @@ All errors use:
 
 Generate request IDs at middleware entry and return them in `X-Request-ID`.
 
-- [ ] **Step 3: Implement single-admin sessions**
+- [x] **Step 3: Implement single-admin sessions**
 
 Use an HttpOnly, SameSite=Strict, Secure-when-HTTPS cookie containing an opaque random session ID. Store only its SHA-256 in SQLite with expiry and CSRF token. State-changing requests require the CSRF header.
 
-- [ ] **Step 4: Add route surface**
+- [x] **Step 4: Add route surface**
 
 Implement:
 
@@ -1143,7 +1143,7 @@ GET /api/v1/compare
 
 Artifact download validates authorization, hash, and path before returning a file response.
 
-- [ ] **Step 5: Run API tests and OpenAPI snapshot**
+- [x] **Step 5: Run API tests and OpenAPI snapshot**
 
 ```bash
 python -m unittest tests.platform.test_api -v
@@ -1152,7 +1152,7 @@ python -c 'from secrl_platform.api.app import create_app; import json; print(jso
 
 Expected: API tests pass and the OpenAPI snapshot contains no secret plaintext response fields.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add secrl_platform/api secrl_platform/auth/sessions.py tests/platform/test_api.py tests/fixtures/platform/openapi-v1.json
