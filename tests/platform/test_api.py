@@ -140,6 +140,39 @@ class ApiTest(unittest.TestCase):
         self.assertRegex(response.json()["task_spec_sha256"], r"^[0-9a-f]{64}$")
         self.assertRegex(response.json()["run_id"], r"^[0-9a-f-]{36}$")
 
+    def test_api_created_smoke_agent_is_runner_executable_and_listed_with_run(self):
+        self.login()
+        headers = {"X-CSRF-Token": self.csrf_token}
+        agent = self.client.post(
+            "/api/v1/agents",
+            json={
+                "kind": "BUILT_IN",
+                "revision_id": "builtin-deterministic-smoke-v1",
+            },
+            headers=headers,
+        )
+        self.assertEqual(agent.status_code, 201, agent.text)
+        payload = valid_smoke_task()
+        payload["agent_revision_id"] = agent.json()["id"]
+        payload["budget"] = {}
+
+        task = self.client.post("/api/v1/tasks", json=payload, headers=headers)
+
+        self.assertEqual(task.status_code, 201, task.text)
+        status = asyncio.run(
+            run_pending_once(
+                settings=self.settings,
+                session_factory=self.session_factory,
+                artifact_store=self.artifact_store,
+            )
+        )
+        self.assertEqual(status, "SUCCEEDED")
+        listed = self.client.get("/api/v1/tasks")
+        listed_task = next(
+            item for item in listed.json() if item["id"] == task.json()["id"]
+        )
+        self.assertEqual(listed_task["run_id"], task.json()["run_id"])
+
     def test_secrl_builtin_agent_and_task_are_persisted_with_frozen_limits(self):
         self.login()
         headers = {"X-CSRF-Token": self.csrf_token}

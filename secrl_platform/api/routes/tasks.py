@@ -30,6 +30,7 @@ from secrl_platform.storage.orm import (
     EvaluationTaskORM,
     LocalUserORM,
     ModelConfigRevisionORM,
+    RunORM,
 )
 
 
@@ -42,8 +43,10 @@ def list_tasks(
     context: ApiContext = Depends(get_context),
 ) -> list[dict]:
     with context.session_factory() as session:
-        tasks = session.scalars(
-            select(EvaluationTaskORM).order_by(
+        tasks = session.execute(
+            select(EvaluationTaskORM, RunORM.id).join(
+                RunORM, RunORM.task_id == EvaluationTaskORM.id
+            ).order_by(
                 EvaluationTaskORM.created_at,
                 EvaluationTaskORM.id,
             )
@@ -51,6 +54,7 @@ def list_tasks(
         return [
             {
                 "id": task.id,
+                "run_id": run_id,
                 "name": task.name,
                 "status": task.status,
                 "task_spec": json.loads(task.task_spec_json),
@@ -58,7 +62,7 @@ def list_tasks(
                     task.task_spec_json.encode("utf-8")
                 ).hexdigest(),
             }
-            for task in tasks
+            for task, run_id in tasks
         ]
 
 
@@ -195,10 +199,16 @@ def _resolve_agent_revision(
     try:
         manifest = AgentManifest.model_validate_json(manifest_json)
         if stored.kind == "BUILT_IN":
-            if manifest.agent_id not in BUILTIN_AGENT_IDS:
+            smoke_revision = DeterministicSmokeAgent.revision()
+            if manifest.agent_id == smoke_revision.manifest.agent_id:
+                approved = smoke_revision.manifest
+                approved_sha256 = smoke_revision.manifest_sha256
+            elif manifest.agent_id in BUILTIN_AGENT_IDS:
+                approved = builtin_manifest(manifest.agent_id)
+                approved_sha256 = approved.sha256()
+            else:
                 raise ValueError("built-in agent is not allowlisted")
-            approved = builtin_manifest(manifest.agent_id)
-            if manifest != approved or digest != approved.sha256():
+            if manifest != approved or digest != approved_sha256:
                 raise ValueError("built-in agent revision changed")
         elif endpoint is None or service_manifest_sha256 is None:
             raise ValueError("Agent Service registration is incomplete")
@@ -211,5 +221,5 @@ def _resolve_agent_revision(
         raise ApiError(
             422,
             "INVALID_TASK_SPEC",
-            "Invalid Agent Service revision",
+            "Invalid agent revision",
         ) from exc
