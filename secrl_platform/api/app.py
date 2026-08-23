@@ -207,8 +207,26 @@ def _context(
 def _upgrade_database(database_path: Path) -> None:
     database_path = Path(database_path)
     database_path.parent.mkdir(parents=True, exist_ok=True)
-    repository_root = Path(__file__).resolve().parents[2]
+    repository_root = _migration_repository_root()
     config = Config(str(repository_root / "alembic.ini"))
     config.set_main_option("script_location", str(repository_root / "alembic"))
     config.set_main_option("sqlalchemy.url", f"sqlite:///{database_path}")
     command.upgrade(config, "head")
+
+
+def _migration_repository_root(
+    *,
+    module_file: Path = Path(__file__),
+    working_directory: Path | None = None,
+) -> Path:
+    candidates = (
+        Path(module_file).resolve().parents[2],
+        Path(working_directory or Path.cwd()).resolve(),
+    )
+    for candidate in candidates:
+        if (
+            (candidate / "alembic.ini").is_file()
+            and (candidate / "alembic" / "env.py").is_file()
+        ):
+            return candidate
+    raise RuntimeError("Alembic migration files are not available")
