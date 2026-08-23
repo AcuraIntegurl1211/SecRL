@@ -1,0 +1,17 @@
+.git
+.gitignore
+.env
+.secrl-lite-data
+data*
+latest_experiments
+final_results*
+failure_analysis_outputs_no_trunc
+final_results_no_trunc
+__pycache__
+*.pyc
+web/node_modules
+web/dist
+tests
+notebooks
+*.sqlite3
+*.db
