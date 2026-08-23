@@ -10,9 +10,22 @@ export function DashboardPage() {
   const [tasks, setTasks] = useState<TaskSummary[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   useEffect(() => {
-    void apiFetch<TaskSummary[]>("/api/v1/tasks")
-      .then(setTasks)
-      .catch((reason) => setError(reason instanceof ApiClientError ? reason.message : "Unable to load dashboard"));
+    let mounted = true;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const load = async () => {
+      try {
+        const next = await apiFetch<TaskSummary[]>("/api/v1/tasks");
+        if (!mounted) return;
+        setTasks(next);
+        if (next.some((task) => ["QUEUED", "RUNNING", "PAUSED", "PAUSE_REQUESTED", "INTERRUPTED"].includes(task.status))) {
+          timer = setTimeout(() => void load(), 5000);
+        }
+      } catch (reason) {
+        if (mounted) setError(reason instanceof ApiClientError ? reason.message : "Unable to load dashboard");
+      }
+    };
+    void load();
+    return () => { mounted = false; if (timer) clearTimeout(timer); };
   }, []);
   const active = (tasks ?? []).filter((task) => ["QUEUED", "RUNNING", "PAUSED", "PAUSE_REQUESTED", "INTERRUPTED"].includes(task.status));
   const completed = (tasks ?? []).filter((task) => task.status === "SUCCEEDED").length;

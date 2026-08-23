@@ -121,4 +121,53 @@ describe("core operational pages", () => {
     await user.click(screen.getByRole("button", { name: "Append review revision" }));
     expect(await screen.findByText("Review revision appended to the audit history.")).toBeInTheDocument();
   });
+
+  it("creates an evaluation with registered runtime IDs and no accidental one-case exhaustion", async () => {
+    let taskBody: Record<string, unknown> | null = null;
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (path.endsWith("/agents")) return new Response(JSON.stringify([{
+        id: "agent-db-1",
+        name: "Deterministic smoke",
+        kind: "BUILT_IN",
+        sha256: "a".repeat(64),
+        manifest: {
+          agent_id: "builtin-deterministic-smoke-v1",
+          parameter_schema: { properties: { retry_num: { type: "integer" } } },
+        },
+      }]), { status: 200 });
+      if (path.endsWith("/models")) return new Response(JSON.stringify([]), { status: 200 });
+      if (path.endsWith("/benchmarks")) return new Response(JSON.stringify([{ manifest: { benchmark_id: "protocol-smoke", name: "Protocol Smoke" }, dataset: { case_count: 1 } }]), { status: 200 });
+      if (path.endsWith("/tasks") && init?.method === "POST") {
+        taskBody = JSON.parse(String(init.body));
+        return new Response(JSON.stringify({ run_id: "run-created" }), { status: 201 });
+      }
+      throw new Error(`unexpected request ${path}`);
+    }));
+    const user = userEvent.setup();
+    renderPage(<NewEvaluationPage />);
+    expect(await screen.findByLabelText("Benchmark revision")).toHaveValue("protocol-smoke");
+    await user.click(screen.getByRole("button", { name: /Continue/ }));
+    expect(screen.getByLabelText("Agent revision")).toHaveValue("agent-db-1");
+    await user.type(screen.getByLabelText("retry_num"), "2");
+    await user.click(screen.getByRole("button", { name: /Continue/ }));
+    await user.click(screen.getByRole("button", { name: /Continue/ }));
+    await user.click(screen.getByRole("button", { name: /Queue evaluation/ }));
+    expect(taskBody).toMatchObject({ agent_revision_id: "agent-db-1", agent_parameters: { retry_num: 2 }, budget: {} });
+  });
+
+  it("does not claim an Agent Service is healthy before a real manifest check", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (path.endsWith("/agents") && !init?.method) return new Response(JSON.stringify([{ id: "service-1", name: "Reference", kind: "SERVICE", endpoint: "http://agent-service-reference:8081", sha256: "a".repeat(64), manifest: {} }]), { status: 200 });
+      if (path.endsWith("/agents/service-1:check") && init?.method === "POST") return new Response(JSON.stringify({ status: "valid" }), { status: 200 });
+      throw new Error(`unexpected request ${path}`);
+    }));
+    const user = userEvent.setup();
+    renderPage(<AgentsPage />);
+    expect(await screen.findByText("Unchecked")).toBeInTheDocument();
+    expect(screen.queryByText("healthy")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Check Reference" }));
+    expect(await screen.findByText("valid")).toBeInTheDocument();
+  });
 });

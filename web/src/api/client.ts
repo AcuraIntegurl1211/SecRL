@@ -87,7 +87,7 @@ export type BenchmarkSummary = {
 
 export type TaskSummary = {
   id: string;
-  run_id?: string;
+  run_id: string;
   name: string;
   status: string;
   task_spec: Record<string, unknown>;
