@@ -91,8 +91,8 @@ class SecRLRunnerIntegrationTest(unittest.IsolatedAsyncioTestCase):
                 [("evaluator-response", "RESTRICTED"), ("trajectory", "PUBLIC")],
             )
             metrics = json.loads(attempt.metrics_json)
-            self.assertEqual(metrics["metrics"]["evaluator_prompt_tokens"], 13)
-            self.assertEqual(metrics["metrics"]["evaluator_completion_tokens"], 2)
+            self.assertEqual(metrics["metrics"]["evaluator_prompt_tokens"], 26)
+            self.assertEqual(metrics["metrics"]["evaluator_completion_tokens"], 4)
             self.assertEqual(metrics["prompt_tokens"], 0)
 
 

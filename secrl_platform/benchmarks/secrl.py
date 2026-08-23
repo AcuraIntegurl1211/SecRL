@@ -497,8 +497,10 @@ class SecRLAdapter:
             raise KeyError(episode.id)
         if self._evaluator is not None:
             result = self._evaluator.evaluate(
+                context=str(state.case.public_input.get("context", "")),
                 question=str(state.case.public_input["question"]),
                 gold_answer=state.case.answer,
+                solution=state.case.source.get("solution"),
                 submitted_answer=submission.answer,
             )
             raw_text = result.read_raw_response(self._evaluator.restricted_access())

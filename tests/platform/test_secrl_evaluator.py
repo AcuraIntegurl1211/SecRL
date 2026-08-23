@@ -4,6 +4,7 @@ import asyncio
 import json
 import unittest
 from pathlib import Path
+import hashlib
 from pydantic import ValidationError
 
 from secrl_platform.benchmarks.protocol import Submission
@@ -33,6 +34,43 @@ class _FakeGateway:
 
 
 class SecRLEvaluatorTest(unittest.TestCase):
+    def test_official_profile_binds_frozen_legacy_evaluator_source(self):
+        source = Path("secgym/evaluator.py").read_bytes()
+        profile = official_secrl_profile(formal=True)
+        self.assertEqual(
+            hashlib.sha256(source).hexdigest(),
+            "b146af231c0b63d7252c5b7852c62f0ba59ab40980b65be5d003cbc2f08d05e2",
+        )
+        self.assertEqual(profile.source_sha256, hashlib.sha256(source).hexdigest())
+        self.assertTrue(profile.answer_reflection)
+        self.assertTrue(profile.solution_reflection)
+        self.assertTrue(profile.step_checking)
+
+    def test_official_solution_reward_matches_legacy_discount_algorithm(self):
+        responses = iter(
+            [
+                "Analysis: wrong\nIs_Answer_Correct: False",
+                "Reflection: checked\nAnalysis: wrong\nIs_Answer_Correct: False",
+                '{"step_0":{"is_step_correct":"True"},"step_1":{"is_step_correct":"True"},"step_2":{"is_step_correct":"False"}}',
+                '{"step_0":{"is_step_correct":"True"},"step_1":{"is_step_correct":"True"},"step_2":{"is_step_correct":"False"}}',
+            ]
+        )
+
+        def model_client(_prompt, _parameters):
+            return {"text": next(responses), "usage": {"prompt_tokens": 1, "completion_tokens": 1}}
+
+        evaluator = SecRLEvaluator(official_secrl_profile(formal=True), model_client=model_client)
+        result = evaluator.evaluate(
+            context="Incident context",
+            question="Which indicators?",
+            gold_answer="gold",
+            solution=("find first", "find second", "submit"),
+            submitted_answer="partial",
+        )
+        self.assertAlmostEqual(result.reward, 0.56)
+        self.assertEqual(result.usage.prompt_tokens, 4)
+        self.assertEqual(result.usage.completion_tokens, 4)
+
     def test_gateway_client_uses_evaluator_role_and_bound_attempt(self):
         gateway = _FakeGateway()
         client = EvaluatorGatewayClient(
@@ -49,7 +87,9 @@ class SecRLEvaluatorTest(unittest.TestCase):
         request = gateway.requests[0]
         self.assertEqual(request.model_role, "evaluator")
         self.assertEqual((request.run_id, request.case_id, request.attempt_id), ("run-1", "case-1", "attempt-1"))
-        self.assertEqual(response["usage"], {"prompt_tokens": 11, "completion_tokens": 3})
+        self.assertEqual(response["usage"]["prompt_tokens"], 11)
+        self.assertEqual(response["usage"]["completion_tokens"], 3)
+        self.assertEqual(response["usage"]["estimated_cost"], "0")
 
     def test_official_model_request_contains_gold_only_in_private_prompt(self):
         prompts = []
