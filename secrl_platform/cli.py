@@ -1,4 +1,5 @@
 import argparse
+from pathlib import Path
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -12,6 +13,11 @@ def build_parser() -> argparse.ArgumentParser:
     init_admin = subparsers.add_parser("init-admin")
     init_admin.add_argument("--username", default="admin")
     init_admin.add_argument("--password", default=None)
+    backup = subparsers.add_parser("backup")
+    backup.add_argument("backup_dir")
+    restore = subparsers.add_parser("restore")
+    restore.add_argument("backup_dir")
+    restore.add_argument("target_dir")
     return parser
 
 
@@ -58,6 +64,20 @@ def main() -> int:
                         status="ACTIVE",
                     )
                 )
+        return 0
+    if args.command == "backup":
+        import os
+
+        from secrl_platform.storage.backup import create_backup
+
+        data_dir = Path(os.environ.get("SECRL_DATA_DIR", "/data"))
+        result = create_backup(data_dir, Path(args.backup_dir))
+        print(result.backup_dir)
+        return 0
+    if args.command == "restore":
+        from secrl_platform.storage.backup import restore_backup
+
+        restore_backup(Path(args.backup_dir), Path(args.target_dir))
         return 0
     from secrl_platform.storage.artifacts import verify_all_artifacts
 
