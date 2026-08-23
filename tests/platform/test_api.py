@@ -173,6 +173,85 @@ class ApiTest(unittest.TestCase):
         )
         self.assertEqual(listed_task["run_id"], task.json()["run_id"])
 
+        cases = self.client.get(f"/api/v1/runs/{task.json()['run_id']}/cases")
+        self.assertEqual(cases.status_code, 200, cases.text)
+        self.assertRegex(
+            cases.json()[0]["trajectory_artifact"]["sha256"],
+            r"^[0-9a-f]{64}$",
+        )
+        trajectory = self.client.get(
+            f"/api/v1/runs/{task.json()['run_id']}/cases/smoke-001/trajectory",
+            params={"step": 0},
+        )
+        self.assertEqual(trajectory.status_code, 200, trajectory.text)
+        self.assertEqual(trajectory.json()["step"], 0)
+        self.assertGreaterEqual(trajectory.json()["total_steps"], 1)
+        self.assertIn(
+            trajectory.json()["exchange"]["action"]["type"],
+            {"tool_call", "submit"},
+        )
+        artifacts = self.client.get(
+            f"/api/v1/runs/{task.json()['run_id']}/artifacts"
+        )
+        self.assertEqual(artifacts.status_code, 200, artifacts.text)
+        self.assertEqual(artifacts.json()[0]["kind"], "trajectory")
+
+    def test_run_attributions_reviews_and_audit_are_queryable(self):
+        self.login()
+        headers = {"X-CSRF-Token": self.csrf_token}
+        task = self.client.post(
+            "/api/v1/tasks",
+            json={**valid_smoke_task(), "budget": {}},
+            headers=headers,
+        ).json()
+        self.assertEqual(
+            asyncio.run(
+                run_pending_once(
+                    settings=self.settings,
+                    session_factory=self.session_factory,
+                    artifact_store=self.artifact_store,
+                )
+            ),
+            "SUCCEEDED",
+        )
+        with self.session_factory.begin() as session:
+            attempt = session.scalar(
+                select(CaseAttemptORM).where(
+                    CaseAttemptORM.run_id == task["run_id"]
+                )
+            )
+            attribution = AttributionORM(
+                case_attempt_id=attempt.id,
+                taxonomy="taxonomy_v1",
+                label="ANSWER",
+                confidence=0.75,
+                evidence_json='["trajectory:step:0"]',
+            )
+            session.add(attribution)
+            session.flush()
+            attribution_id = attribution.id
+
+        attributions = self.client.get(
+            f"/api/v1/runs/{task['run_id']}/attributions"
+        )
+        self.assertEqual(attributions.status_code, 200, attributions.text)
+        self.assertEqual(attributions.json()[0]["id"], attribution_id)
+        review = self.client.post(
+            f"/api/v1/attributions/{attribution_id}/reviews",
+            headers=headers,
+            json={
+                "primary": "ANSWER",
+                "secondary": [],
+                "confidence": "high",
+                "evidence": ["trajectory:step:0"],
+                "notes": "release gate",
+            },
+        )
+        self.assertEqual(review.status_code, 201, review.text)
+        audit = self.client.get(f"/api/v1/runs/{task['run_id']}/audit")
+        self.assertEqual(audit.status_code, 200, audit.text)
+        self.assertEqual(audit.json()[0]["action"], "human_review.append")
+
     def test_secrl_builtin_agent_and_task_are_persisted_with_frozen_limits(self):
         self.login()
         headers = {"X-CSRF-Token": self.csrf_token}
@@ -451,9 +530,13 @@ class ApiTest(unittest.TestCase):
                 "/api/v1/runs/{id}:resume",
                 "/api/v1/runs/{id}:cancel",
                 "/api/v1/runs/{id}/cases",
+                "/api/v1/runs/{id}/cases/{case_id}/trajectory",
                 "/api/v1/runs/{id}/cases/{case_id}:retry",
                 "/api/v1/runs/{id}:analyze",
                 "/api/v1/runs/{id}/analysis",
+                "/api/v1/runs/{id}/attributions",
+                "/api/v1/runs/{id}/artifacts",
+                "/api/v1/runs/{id}/audit",
                 "/api/v1/attributions/{id}/reviews",
                 "/api/v1/artifacts/{id}/metadata",
                 "/api/v1/artifacts/{id}",

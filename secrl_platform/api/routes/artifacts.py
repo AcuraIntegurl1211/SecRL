@@ -31,7 +31,20 @@ def download_artifact(
     _user: LocalUserORM = Depends(require_user),
     context: ApiContext = Depends(get_context),
 ) -> Response:
-    artifact, ref = _authorized_artifact(context, id)
+    artifact, content = read_authorized_artifact(context, id)
+    filename = f"{artifact.kind}-{artifact.sha256}.json"
+    return Response(
+        content=content,
+        media_type="application/json",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+def read_authorized_artifact(
+    context: ApiContext,
+    artifact_id: str,
+) -> tuple[ArtifactORM, bytes]:
+    artifact, ref = _authorized_artifact(context, artifact_id)
     try:
         content = ref.path.read_bytes()
     except OSError as exc:
@@ -46,12 +59,7 @@ def download_artifact(
             "ARTIFACT_INTEGRITY_ERROR",
             "Artifact integrity verification failed",
         )
-    filename = f"{artifact.kind}-{artifact.sha256}.json"
-    return Response(
-        content=content,
-        media_type=ref.media_type,
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
-    )
+    return artifact, content
 
 
 def _authorized_artifact(

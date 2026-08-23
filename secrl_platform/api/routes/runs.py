@@ -12,6 +12,7 @@ from secrl_platform.api.dependencies import (
     require_user,
 )
 from secrl_platform.api.errors import ApiError
+from secrl_platform.api.routes.artifacts import read_authorized_artifact
 from secrl_platform.api.schemas import ReviewCreateRequest
 from secrl_platform.analysis.service import (
     AnalysisRunRepository,
@@ -23,10 +24,13 @@ from secrl_platform.analysis.service import (
 from secrl_platform.runner.recovery import RunnerRepository
 from secrl_platform.runner.state import RunStateMachine
 from secrl_platform.storage.orm import (
+    ArtifactORM,
     AttributionORM,
+    AuditEventORM,
     CaseAttemptORM,
     CaseRecordORM,
     EvaluationTaskORM,
+    HumanReviewORM,
     LocalUserORM,
     RunORM,
 )
@@ -105,6 +109,17 @@ def list_run_cases(
             .where(CaseAttemptORM.run_id == id)
             .order_by(CaseRecordORM.ordinal, CaseAttemptORM.attempt_no)
         ).all()
+        artifacts = {
+            artifact.ref_id: artifact
+            for artifact in session.scalars(
+                select(ArtifactORM).where(
+                    ArtifactORM.ref_id.in_([attempt.id for _case, attempt in rows]),
+                    ArtifactORM.ref_type == "case_attempt",
+                    ArtifactORM.kind == "trajectory",
+                    ArtifactORM.visibility == "PUBLIC",
+                )
+            ).all()
+        }
         return [
             {
                 "case_id": case.external_id,
@@ -114,8 +129,160 @@ def list_run_cases(
                 "is_final": attempt.is_final,
                 "metrics": json.loads(attempt.metrics_json),
                 "error": json.loads(attempt.error_json) if attempt.error_json else None,
+                "trajectory_artifact": (
+                    _artifact_payload(artifacts[attempt.id])
+                    if attempt.id in artifacts
+                    else None
+                ),
             }
             for case, attempt in rows
+        ]
+
+
+@router.get("/runs/{id}/cases/{case_id}/trajectory", tags=["runs"])
+def get_trajectory_step(
+    id: str,
+    case_id: str,
+    step: int = Query(..., ge=0),
+    _user: LocalUserORM = Depends(require_user),
+    context: ApiContext = Depends(get_context),
+) -> dict:
+    _task_id(context, id)
+    with context.session_factory() as session:
+        row = session.execute(
+            select(CaseRecordORM, CaseAttemptORM)
+            .join(CaseAttemptORM, CaseAttemptORM.case_id == CaseRecordORM.id)
+            .where(
+                CaseAttemptORM.run_id == id,
+                CaseRecordORM.external_id == case_id,
+                CaseAttemptORM.is_final.is_(True),
+            )
+            .order_by(CaseAttemptORM.attempt_no.desc())
+            .limit(1)
+        ).first()
+        if row is None:
+            raise ApiError(404, "CASE_NOT_FOUND", "Run case was not found")
+        case, attempt = row
+        artifact = session.scalar(
+            select(ArtifactORM).where(
+                ArtifactORM.ref_type == "case_attempt",
+                ArtifactORM.ref_id == attempt.id,
+                ArtifactORM.kind == "trajectory",
+                ArtifactORM.visibility == "PUBLIC",
+            )
+        )
+        if artifact is None:
+            raise ApiError(404, "TRAJECTORY_NOT_FOUND", "Trajectory was not found")
+        artifact_id = artifact.id
+    artifact, content = read_authorized_artifact(context, artifact_id)
+    try:
+        payload = json.loads(content)
+        exchanges = payload["exchanges"]
+        exchange = exchanges[step]
+    except (IndexError, KeyError, TypeError):
+        raise ApiError(
+            416,
+            "TRAJECTORY_STEP_OUT_OF_RANGE",
+            "Trajectory step is out of range",
+        )
+    except json.JSONDecodeError as exc:
+        raise ApiError(
+            409,
+            "ARTIFACT_INTEGRITY_ERROR",
+            "Trajectory artifact is invalid",
+        ) from exc
+    return {
+        "case_id": case.external_id,
+        "attempt_id": attempt.id,
+        "artifact_id": artifact.id,
+        "artifact_sha256": artifact.sha256,
+        "step": step,
+        "total_steps": len(exchanges),
+        "exchange": exchange,
+    }
+
+
+@router.get("/runs/{id}/artifacts", tags=["runs"])
+def list_run_artifacts(
+    id: str,
+    _user: LocalUserORM = Depends(require_user),
+    context: ApiContext = Depends(get_context),
+) -> list[dict]:
+    _task_id(context, id)
+    with context.session_factory() as session:
+        attempt_ids = select(CaseAttemptORM.id).where(CaseAttemptORM.run_id == id)
+        artifacts = session.scalars(
+            select(ArtifactORM)
+            .where(
+                ArtifactORM.ref_type == "case_attempt",
+                ArtifactORM.ref_id.in_(attempt_ids),
+                ArtifactORM.visibility == "PUBLIC",
+            )
+            .order_by(ArtifactORM.created_at, ArtifactORM.id)
+        ).all()
+        return [_artifact_payload(artifact) for artifact in artifacts]
+
+
+@router.get("/runs/{id}/attributions", tags=["analysis"])
+def list_run_attributions(
+    id: str,
+    _user: LocalUserORM = Depends(require_user),
+    context: ApiContext = Depends(get_context),
+) -> list[dict]:
+    _task_id(context, id)
+    with context.session_factory() as session:
+        rows = session.execute(
+            select(AttributionORM, CaseRecordORM.external_id)
+            .join(CaseAttemptORM, CaseAttemptORM.id == AttributionORM.case_attempt_id)
+            .join(CaseRecordORM, CaseRecordORM.id == CaseAttemptORM.case_id)
+            .where(CaseAttemptORM.run_id == id)
+            .order_by(CaseRecordORM.ordinal, AttributionORM.id)
+        ).all()
+        return [
+            {
+                "id": attribution.id,
+                "case_attempt_id": attribution.case_attempt_id,
+                "case_id": case_id,
+                "taxonomy": attribution.taxonomy,
+                "label": attribution.label,
+                "confidence": attribution.confidence,
+                "evidence": json.loads(attribution.evidence_json),
+            }
+            for attribution, case_id in rows
+        ]
+
+
+@router.get("/runs/{id}/audit", tags=["runs"])
+def list_run_audit(
+    id: str,
+    _user: LocalUserORM = Depends(require_user),
+    context: ApiContext = Depends(get_context),
+) -> list[dict]:
+    _task_id(context, id)
+    with context.session_factory() as session:
+        attribution_ids = select(AttributionORM.id).join(
+            CaseAttemptORM,
+            CaseAttemptORM.id == AttributionORM.case_attempt_id,
+        ).where(CaseAttemptORM.run_id == id)
+        review_ids = select(HumanReviewORM.id).where(
+            HumanReviewORM.attribution_id.in_(attribution_ids)
+        )
+        events = session.scalars(
+            select(AuditEventORM)
+            .where(AuditEventORM.entity_id.in_(review_ids))
+            .order_by(AuditEventORM.created_at, AuditEventORM.id)
+        ).all()
+        return [
+            {
+                "id": event.id,
+                "created_at": event.created_at.isoformat(),
+                "actor_user_id": event.actor_user_id,
+                "action": event.action,
+                "entity_type": event.entity_type,
+                "entity_id": event.entity_id,
+                "payload": json.loads(event.payload_json),
+            }
+            for event in events
         ]
 
 
@@ -271,6 +438,18 @@ def _run_payload(run: RunORM, task: EvaluationTaskORM | None) -> dict:
         "status": task.status if task is not None else run.status,
         "checkpoint": run.next_case_index,
         "run_spec_sha256": run.run_spec_sha256,
+    }
+
+
+def _artifact_payload(artifact: ArtifactORM) -> dict:
+    return {
+        "id": artifact.id,
+        "kind": artifact.kind,
+        "sha256": artifact.sha256,
+        "size_bytes": artifact.size_bytes,
+        "ref_type": artifact.ref_type,
+        "ref_id": artifact.ref_id,
+        "download_url": f"/api/v1/artifacts/{artifact.id}",
     }
 
 

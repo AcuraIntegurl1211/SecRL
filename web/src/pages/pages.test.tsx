@@ -60,4 +60,65 @@ describe("core operational pages", () => {
     expect(await screen.findByRole("heading", { name: "run-1" })).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: "Trajectory" })).toBeInTheDocument();
   });
+
+  it("lazy-loads one trajectory step and public artifacts from the API", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path.endsWith("/runs/run-1")) {
+        return new Response(JSON.stringify({ id: "run-1", task_id: "task-1", status: "SUCCEEDED", checkpoint: 1, run_spec_sha256: "a".repeat(64) }), { status: 200 });
+      }
+      if (path.endsWith("/runs/run-1/cases")) {
+        return new Response(JSON.stringify([{ case_id: "smoke-001", attempt_id: "attempt-1", status: "SUCCEEDED", trajectory_artifact: { id: "artifact-1", sha256: "b".repeat(64) } }]), { status: 200 });
+      }
+      if (path.includes("/cases/smoke-001/trajectory?step=0")) {
+        return new Response(JSON.stringify({ step: 0, total_steps: 2, artifact_sha256: "b".repeat(64), exchange: { action: { type: "tool_call", tool: "echo" }, observation: { ok: true } } }), { status: 200 });
+      }
+      if (path.endsWith("/runs/run-1/artifacts")) {
+        return new Response(JSON.stringify([{ id: "artifact-1", kind: "trajectory", sha256: "b".repeat(64), size_bytes: 128, download_url: "/api/v1/artifacts/artifact-1" }]), { status: 200 });
+      }
+      throw new Error(`unexpected request ${path}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+    render(<MemoryRouter initialEntries={["/runs/run-1"]}><Routes><Route path="/runs/:id" element={<RunDetailPage />} /></Routes></MemoryRouter>);
+    await screen.findByRole("heading", { name: "run-1" });
+
+    await user.click(screen.getByRole("tab", { name: "Trajectory" }));
+
+    expect(await screen.findByText("Step 1 of 2")).toBeInTheDocument();
+    expect(screen.getByText(/tool_call/)).toBeInTheDocument();
+    expect(fetchMock).not.toHaveBeenCalledWith(expect.stringContaining("step=1"), expect.anything());
+    await user.click(screen.getByRole("tab", { name: "Artifacts" }));
+    expect(await screen.findByRole("link", { name: /trajectory/ })).toHaveAttribute("href", "/api/v1/artifacts/artifact-1");
+  });
+
+  it("loads automatic attribution and appends a HumanReview revision", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (path.endsWith("/runs/run-1/analysis")) {
+        return new Response(JSON.stringify([{ id: "analysis-1", revision: 1, taxonomy_version: "taxonomy_v1", output_manifest_sha256: "c".repeat(64) }]), { status: 200 });
+      }
+      if (path.endsWith("/runs/run-1/attributions")) {
+        return new Response(JSON.stringify([{ id: "attribution-1", case_id: "smoke-001", label: "ANSWER", taxonomy: "taxonomy_v1", confidence: 0.75, evidence: ["trajectory:step:0"] }]), { status: 200 });
+      }
+      if (path.endsWith("/attributions/attribution-1/reviews") && init?.method === "POST") {
+        return new Response(JSON.stringify({ id: "review-1", revision: 1 }), { status: 201 });
+      }
+      if (path.endsWith("/attributions/attribution-1/reviews")) {
+        return new Response(JSON.stringify([]), { status: 200 });
+      }
+      throw new Error(`unexpected request ${path}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+    renderPage(<AnalysisReviewPage />);
+    await user.type(screen.getByLabelText("Run ID"), "run-1");
+    await user.click(screen.getByRole("button", { name: "Load analysis" }));
+    expect(await screen.findByText("ANSWER")).toBeInTheDocument();
+    expect(screen.getByText("taxonomy_v1")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /Review ANSWER/ }));
+    await user.type(screen.getByLabelText("Primary label"), "ANSWER");
+    await user.click(screen.getByRole("button", { name: "Append review revision" }));
+    expect(await screen.findByText("Review revision appended to the audit history.")).toBeInTheDocument();
+  });
 });
