@@ -654,6 +654,33 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(len(benchmarks.json()), 2)
         self.assertNotIn("secret", json.dumps(created_model.json()).lower())
 
+    def test_benchmark_case_browser_is_paginated_and_excludes_gold(self):
+        self.login()
+
+        response = self.client.get(
+            "/api/v1/benchmarks/secrl/cases",
+            params={"scenario": "incident_34", "offset": 0, "limit": 5},
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        body = response.json()
+        self.assertEqual(body["benchmark_id"], "secrl")
+        self.assertEqual(body["total"], 82)
+        self.assertEqual(len(body["items"]), 5)
+        for item in body["items"]:
+            self.assertEqual(item["scenario_id"], "incident_34")
+            self.assertIn("question", item["public_input"])
+            self.assertEqual(
+                set(item["public_input"]),
+                {"incident", "ordinal", "context", "question", "question_sha256"},
+            )
+            self.assertEqual(len(item["public_input_sha256"]), 64)
+
+        all_cases = self.client.get(
+            "/api/v1/benchmarks/secrl/cases", params={"offset": 0, "limit": 1}
+        ).json()
+        self.assertEqual(all_cases["total"], 589)
+
     def test_model_key_is_encrypted_and_api_task_is_runner_executable(self):
         self.login()
         headers = {

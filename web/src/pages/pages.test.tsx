@@ -188,4 +188,28 @@ describe("core operational pages", () => {
     expect(screen.getAllByText("Not recorded").length).toBeGreaterThanOrEqual(2);
     expect(screen.getByText("42")).toBeInTheDocument();
   });
+
+  it("browses paginated public Benchmark questions without gold fields", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path.endsWith("/benchmarks")) return new Response(JSON.stringify([{
+        manifest: { benchmark_id: "secrl", name: "SecRL", version: "1.0.0" },
+        dataset: { version: "o1-test", sha256: "a".repeat(64), case_count: 589 },
+      }]), { status: 200 });
+      if (path.includes("/benchmarks/secrl/cases")) return new Response(JSON.stringify({
+        benchmark_id: "secrl", total: 589, offset: 0, limit: 25,
+        items: [{ id: "incident_34:0:hash", scenario_id: "incident_34", ordinal: 0, public_input_sha256: "b".repeat(64), public_input: { question: "Which process opened the connection?", context: "Investigate endpoint telemetry." } }],
+      }), { status: 200 });
+      throw new Error(`unexpected request ${path}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+    renderPage(<BenchmarksPage />);
+    await screen.findByText("SecRL");
+    await user.click(screen.getByRole("button", { name: "Browse SecRL questions" }));
+
+    expect(await screen.findByText("Which process opened the connection?")).toBeInTheDocument();
+    expect(screen.getByText("incident_34 · question 1")).toBeInTheDocument();
+    expect(screen.queryByText("the-secret-answer")).not.toBeInTheDocument();
+  });
 });
