@@ -4,6 +4,7 @@ import tempfile
 import unittest
 import os
 from pathlib import Path
+from unittest.mock import patch
 
 from secrl_platform.storage.backup import BackupIntegrityError, create_backup, restore_backup
 from secrl_platform.storage.artifacts import LocalArtifactStore
@@ -73,6 +74,57 @@ class BackupRestoreTest(unittest.TestCase):
             os.symlink("/tmp", backup / "evil-link")
             with self.assertRaises(BackupIntegrityError):
                 restore_backup(backup, Path(tmp) / "restore-link")
+
+    def test_restore_rejects_incompatible_platform_version(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data = Path(tmp) / "data"
+            backup = Path(tmp) / "backup"
+            data.mkdir()
+            self._seed_database(data / "secrl-lite.sqlite3")
+            create_backup(data, backup)
+            manifest_path = backup / "manifest.json"
+            manifest = json.loads(manifest_path.read_text())
+            manifest["platform_version"] = "999.0.0"
+            manifest_path.write_text(json.dumps(manifest))
+
+            with self.assertRaises(BackupIntegrityError):
+                restore_backup(backup, Path(tmp) / "restore-version")
+
+    def test_restore_reverifies_staged_copy_before_replacing_target(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data = Path(tmp) / "data"
+            backup = Path(tmp) / "backup"
+            target = Path(tmp) / "target"
+            data.mkdir()
+            target.mkdir()
+            self._seed_database(data / "secrl-lite.sqlite3")
+            create_backup(data, backup)
+            from secrl_platform.storage import backup as backup_module
+
+            real_verify = backup_module._verify_backup
+            verification_count = 0
+
+            def tamper_before_second_verification(directory):
+                nonlocal verification_count
+                verification_count += 1
+                if verification_count == 2:
+                    with (Path(directory) / "secrl-lite.sqlite3").open("ab") as handle:
+                        handle.write(b"tampered-after-verification")
+                return real_verify(directory)
+
+            with patch(
+                "secrl_platform.storage.backup._verify_backup",
+                side_effect=tamper_before_second_verification,
+            ):
+                with self.assertRaises(BackupIntegrityError):
+                    restore_backup(backup, target)
+
+            self.assertEqual(list(target.iterdir()), [])
+            self.assertEqual(
+                list(Path(tmp).glob(".target.restore-*")),
+                [],
+                "failed staged restores must be removed",
+            )
 
 
 if __name__ == "__main__":

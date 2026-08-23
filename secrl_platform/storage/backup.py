@@ -16,6 +16,7 @@ from typing import Any
 
 
 BACKUP_SCHEMA_VERSION = 1
+PLATFORM_VERSION = "1.0.0"
 
 
 class BackupIntegrityError(RuntimeError):
@@ -66,7 +67,7 @@ def create_backup(
     data_dir: Path,
     backup_dir: Path,
     *,
-    platform_version: str = "1.0.0",
+    platform_version: str = PLATFORM_VERSION,
 ) -> BackupResult:
     data_dir = Path(data_dir)
     backup_dir = Path(backup_dir)
@@ -117,6 +118,8 @@ def _load_manifest(backup_dir: Path) -> tuple[dict[str, Any], dict[str, Any]]:
         raise BackupIntegrityError("backup manifest is missing or invalid") from exc
     if manifest.get("schema_version") != BACKUP_SCHEMA_VERSION or artifact_manifest.get("schema_version") != BACKUP_SCHEMA_VERSION:
         raise BackupIntegrityError("backup schema version is newer than this platform")
+    if manifest.get("platform_version") != PLATFORM_VERSION:
+        raise BackupIntegrityError("backup platform version is incompatible")
     if _sha256(backup_dir / "artifact-manifest.json") != manifest.get("artifact_manifest_sha256"):
         raise BackupIntegrityError("artifact manifest hash mismatch")
     return manifest, artifact_manifest
@@ -169,9 +172,13 @@ def restore_backup(backup_dir: Path, target_dir: Path) -> BackupResult:
     stage = parent / f".{target_dir.name}.restore-{uuid.uuid4().hex}"
     try:
         shutil.copytree(backup_dir, stage)
+        _verify_backup(stage)
         if target_dir.exists():
             target_dir.rmdir()
         os.replace(stage, target_dir)
+    except BackupIntegrityError:
+        shutil.rmtree(stage, ignore_errors=True)
+        raise
     except (OSError, shutil.Error) as exc:
         shutil.rmtree(stage, ignore_errors=True)
         raise BackupIntegrityError("restore failed without replacing target") from exc
