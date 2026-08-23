@@ -1,8 +1,18 @@
 from pathlib import Path
+import importlib.util
 import unittest
 
 
 ROOT = Path(__file__).resolve().parents[2]
+
+
+def _load_release_gate_module():
+    path = ROOT / "scripts" / "lite-protocol-smoke.py"
+    spec = importlib.util.spec_from_file_location("lite_protocol_smoke", path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
 
 
 class ComposePackagingTest(unittest.TestCase):
@@ -84,6 +94,29 @@ class ComposePackagingTest(unittest.TestCase):
             "python -m unittest",
         ):
             self.assertIn(required, source)
+
+    def test_protocol_smoke_does_not_invoke_secrl_only_failure_analysis(self):
+        module = _load_release_gate_module()
+
+        class Client:
+            def __init__(self):
+                self.paths = []
+
+            def request(self, method, path, payload=None, headers=None):
+                self.paths.append((method, path))
+                return []
+
+        client = Client()
+        module._verify_protocol_analysis_boundary(client, "run-1")
+
+        self.assertEqual(
+            client.paths,
+            [
+                ("GET", "/api/v1/runs/run-1/analysis"),
+                ("GET", "/api/v1/runs/run-1/attributions"),
+                ("GET", "/api/v1/runs/run-1/audit"),
+            ],
+        )
 
 
 if __name__ == "__main__":

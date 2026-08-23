@@ -80,32 +80,9 @@ def main() -> int:
         f"/api/v1/runs/{service_run}/cases/smoke-001/trajectory?step=0",
     )
     artifacts = client.request("GET", f"/api/v1/runs/{service_run}/artifacts")
-    analysis = client.request("POST", f"/api/v1/runs/{service_run}:analyze", {})
-    analysis_history = client.request("GET", f"/api/v1/runs/{service_run}/analysis")
-    attributions = client.request(
-        "GET", f"/api/v1/runs/{service_run}/attributions"
+    analysis_history, attributions, audit = _verify_protocol_analysis_boundary(
+        client, service_run
     )
-    review_revision = None
-    if attributions:
-        attribution = attributions[0]
-        review = client.request(
-            "POST",
-            f"/api/v1/attributions/{attribution['id']}/reviews",
-            {
-                "primary": attribution["label"],
-                "secondary": [],
-                "confidence": "medium",
-                "evidence": attribution["evidence"],
-                "notes": "automated release gate",
-            },
-        )
-        reviews = client.request(
-            "GET", f"/api/v1/attributions/{attribution['id']}/reviews"
-        )
-        if not reviews or reviews[-1]["id"] != review["id"]:
-            raise RuntimeError("HumanReview revision was not queryable")
-        review_revision = review["revision"]
-    audit = client.request("GET", f"/api/v1/runs/{service_run}/audit")
 
     tasks = client.request("GET", "/api/v1/tasks")
     expected = {builtin_task: builtin_run, service_task: service_run}
@@ -118,8 +95,6 @@ def main() -> int:
         raise RuntimeError("deployment health or Agent Service check failed")
     if not cases or not artifacts or trajectory["step"] != 0:
         raise RuntimeError("run result workflow is incomplete")
-    if not analysis_history or analysis_history[-1]["id"] != analysis["id"]:
-        raise RuntimeError("analysis history is incomplete")
 
     print(
         json.dumps(
@@ -131,15 +106,29 @@ def main() -> int:
                 "case_count": len(cases),
                 "trajectory_steps": trajectory["total_steps"],
                 "artifact_count": len(artifacts),
-                "analysis_revision": analysis["revision"],
+                "analysis_count": len(analysis_history),
                 "attribution_count": len(attributions),
-                "review_revision": review_revision,
                 "audit_count": len(audit),
             },
             sort_keys=True,
         )
     )
     return 0
+
+
+def _verify_protocol_analysis_boundary(client: "_Client", run_id: str):
+    """Protocol-Smoke proves transport/runtime behavior, not SecRL analysis.
+
+    Failure analysis is intentionally limited to completed SecRL benchmark runs.
+    The deployment gate still verifies that the three query surfaces are reachable
+    and empty, without manufacturing SecRL-only attribution or review records.
+    """
+    analysis_history = client.request("GET", f"/api/v1/runs/{run_id}/analysis")
+    attributions = client.request("GET", f"/api/v1/runs/{run_id}/attributions")
+    audit = client.request("GET", f"/api/v1/runs/{run_id}/audit")
+    if analysis_history or attributions or audit:
+        raise RuntimeError("Protocol-Smoke unexpectedly contains SecRL analysis data")
+    return analysis_history, attributions, audit
 
 
 def _run_smoke(client: "_Client", name: str, agent_revision_id: str):
