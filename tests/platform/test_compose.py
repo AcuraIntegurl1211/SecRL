@@ -15,6 +15,13 @@ class ComposePackagingTest(unittest.TestCase):
         self.assertIn("SECRL_MYSQL_ROOT_PASSWORD:-", compose)
         self.assertIn("SECRL_AGENT_SERVICE_CAPABILITY_SECRET:-", compose)
 
+    def test_platform_receives_documented_admin_and_capability_settings(self):
+        compose = (ROOT / "compose.yaml").read_text()
+        platform_environment = compose.split("x-mysql:", 1)[0]
+
+        self.assertIn("SECRL_INITIAL_ADMIN_USERNAME:", platform_environment)
+        self.assertIn("SECRL_AGENT_SERVICE_CAPABILITY_SECRET:", platform_environment)
+
     def test_entrypoint_requires_secrets_and_forwards_shutdown(self):
         entrypoint = (ROOT / "docker/lite/entrypoint.sh").read_text()
         self.assertIn("SECRL_MASTER_KEY", entrypoint)

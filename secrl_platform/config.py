@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     port: int = 8080
     runner_poll_seconds: float = 1.0
     agent_service_allowlist: tuple[str, ...] = DEFAULT_AGENT_SERVICE_ALLOWLIST
+    agent_service_capability_secret: SecretStr | None = None
     model_provider_allowlist: tuple[str, ...] = DEFAULT_MODEL_PROVIDER_ALLOWLIST
     secrl_runtime_enabled: bool = False
     secrl_mysql_user: str = "benchmark_ro"
@@ -31,6 +32,24 @@ class Settings(BaseSettings):
         if any(character not in "0123456789abcdefABCDEF" for character in value):
             raise ValueError("master_key must contain exactly 64 hexadecimal characters")
         bytes.fromhex(value)
+        return value
+
+    @field_validator("agent_service_capability_secret", mode="before")
+    @classmethod
+    def validate_agent_service_capability_secret(cls, value):
+        if value is None or value == "":
+            return None
+        encoded = value.get_secret_value() if isinstance(value, SecretStr) else value
+        try:
+            secret = bytes.fromhex(encoded)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "agent_service_capability_secret must be hexadecimal"
+            ) from exc
+        if len(secret) < 32:
+            raise ValueError(
+                "agent_service_capability_secret must contain at least 32 bytes"
+            )
         return value
 
     @cached_property
