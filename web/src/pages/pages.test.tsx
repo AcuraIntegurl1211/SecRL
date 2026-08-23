@@ -170,4 +170,22 @@ describe("core operational pages", () => {
     await user.click(screen.getByRole("button", { name: "Check Reference" }));
     expect(await screen.findByText("valid")).toBeInTheDocument();
   });
+
+  it("renders comparable result metrics instead of a raw status payload", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
+      revision: { benchmark_revision_id: "benchmark-1", dataset_version_id: "dataset-1" },
+      left: { id: "left", status: "SUCCEEDED", benchmark_revision_id: "benchmark-1", dataset_version_id: "dataset-1", metrics: { case_count: 2, success_count: 1, success_rate: 0.5, average_reward: 0.5, average_steps: 2.5, tokens: null, estimated_cost: null, token_cost_available: false, duration_seconds: 1.25 } },
+      right: { id: "right", status: "SUCCEEDED", benchmark_revision_id: "benchmark-1", dataset_version_id: "dataset-1", metrics: { case_count: 2, success_count: 2, success_rate: 1, average_reward: 1, average_steps: 3, tokens: 42, estimated_cost: "0.012", token_cost_available: true, duration_seconds: 2.5 } },
+    }), { status: 200 })));
+    const user = userEvent.setup();
+    renderPage(<ComparePage />);
+    await user.type(screen.getByLabelText("Left task"), "left");
+    await user.type(screen.getByLabelText("Right task"), "right");
+    await user.click(screen.getByRole("button", { name: "Compare" }));
+
+    expect(await screen.findByText(/50\.0%/)).toBeInTheDocument();
+    expect(screen.getByText(/100\.0%/)).toBeInTheDocument();
+    expect(screen.getAllByText("Not recorded").length).toBeGreaterThanOrEqual(2);
+    expect(screen.getByText("42")).toBeInTheDocument();
+  });
 });

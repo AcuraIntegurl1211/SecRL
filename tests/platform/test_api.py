@@ -1047,6 +1047,63 @@ class ApiTest(unittest.TestCase):
             response.json()["error"]["code"], "BENCHMARK_REVISION_MISMATCH"
         )
 
+    def test_compare_returns_completed_metrics_and_marks_missing_usage(self):
+        self.login()
+        headers = {"X-CSRF-Token": self.csrf_token}
+        task_ids = []
+        for name in ("left", "right"):
+            created = self.client.post(
+                "/api/v1/tasks",
+                json={**valid_smoke_task(), "name": name, "budget": {}},
+                headers=headers,
+            )
+            self.assertEqual(created.status_code, 201, created.text)
+            task_ids.append(created.json()["id"])
+            status = asyncio.run(
+                run_pending_once(
+                    settings=self.settings,
+                    session_factory=self.session_factory,
+                    artifact_store=self.artifact_store,
+                )
+            )
+            self.assertEqual(status, "SUCCEEDED")
+
+        response = self.client.get(
+            "/api/v1/compare", params={"left": task_ids[0], "right": task_ids[1]}
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        body = response.json()
+        self.assertEqual(body["revision"]["benchmark_revision_id"], body["left"]["benchmark_revision_id"])
+        for side in ("left", "right"):
+            metrics = body[side]["metrics"]
+            self.assertEqual(metrics["case_count"], 1)
+            self.assertEqual(metrics["success_count"], 1)
+            self.assertEqual(metrics["success_rate"], 1.0)
+            self.assertEqual(metrics["average_reward"], 1.0)
+            self.assertEqual(metrics["average_steps"], 3.0)
+            self.assertIsNone(metrics["tokens"])
+            self.assertIsNone(metrics["estimated_cost"])
+            self.assertFalse(metrics["token_cost_available"])
+            self.assertGreaterEqual(metrics["duration_seconds"], 0)
+
+    def test_compare_rejects_unfinished_tasks(self):
+        self.login()
+        headers = {"X-CSRF-Token": self.csrf_token}
+        left = self.client.post(
+            "/api/v1/tasks", json=valid_smoke_task(), headers=headers
+        ).json()["id"]
+        right = self.client.post(
+            "/api/v1/tasks", json=valid_smoke_task(), headers=headers
+        ).json()["id"]
+
+        response = self.client.get(
+            "/api/v1/compare", params={"left": left, "right": right}
+        )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json()["error"]["code"], "TASK_NOT_COMPLETED")
+
     def test_artifact_download_cannot_swap_bytes_after_verification(self):
         self.login()
         ref = self.artifact_store.put_bytes(

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from decimal import Decimal
 
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy import select
@@ -417,10 +418,82 @@ def compare(
                 "DATASET_REVISION_MISMATCH",
                 "Comparison requires the same Dataset revision",
             )
+        terminal = {"SUCCEEDED", "FAILED", "BUDGET_EXHAUSTED", "CANCELED"}
+        if left_task.status not in terminal or right_task.status not in terminal:
+            raise ApiError(
+                409,
+                "TASK_NOT_COMPLETED",
+                "Comparison requires completed tasks",
+            )
         return {
-            "left": {"id": left_task.id, "status": left_task.status},
-            "right": {"id": right_task.id, "status": right_task.status},
+            "revision": {
+                "benchmark_revision_id": left_task.benchmark_revision_id,
+                "dataset_version_id": left_task.dataset_version_id,
+            },
+            "left": _comparison_payload(session, left_task),
+            "right": _comparison_payload(session, right_task),
         }
+
+
+def _comparison_payload(session, task: EvaluationTaskORM) -> dict:
+    attempts = session.scalars(
+        select(CaseAttemptORM)
+        .join(RunORM, RunORM.id == CaseAttemptORM.run_id)
+        .where(
+            RunORM.task_id == task.id,
+            CaseAttemptORM.is_final.is_(True),
+        )
+        .order_by(CaseAttemptORM.created_at, CaseAttemptORM.id)
+    ).all()
+    metrics = [json.loads(attempt.metrics_json) for attempt in attempts]
+    case_count = len(metrics)
+    success_count = sum(bool(item.get("correct", False)) for item in metrics)
+    rewards = [float(item["reward"]) for item in metrics if "reward" in item]
+    steps = [float(item["steps"]) for item in metrics if "steps" in item]
+    token_cost_available = task.model_config_revision_id is not None
+    tokens = None
+    estimated_cost = None
+    if token_cost_available:
+        tokens = sum(
+            int(item.get("prompt_tokens", 0))
+            + int(item.get("completion_tokens", 0))
+            + int(item.get("evaluator_prompt_tokens", 0))
+            + int(item.get("evaluator_completion_tokens", 0))
+            for item in metrics
+        )
+        estimated_cost = str(
+            sum(
+                (
+                    Decimal(str(item.get("estimated_cost", "0")))
+                    + Decimal(str(item.get("evaluator_estimated_cost", "0")))
+                    for item in metrics
+                ),
+                Decimal("0"),
+            )
+        )
+    duration_seconds = None
+    if task.started_at is not None and task.finished_at is not None:
+        duration_seconds = max(
+            0.0,
+            (task.finished_at - task.started_at).total_seconds(),
+        )
+    return {
+        "id": task.id,
+        "status": task.status,
+        "benchmark_revision_id": task.benchmark_revision_id,
+        "dataset_version_id": task.dataset_version_id,
+        "metrics": {
+            "case_count": case_count,
+            "success_count": success_count,
+            "success_rate": success_count / case_count if case_count else None,
+            "average_reward": sum(rewards) / len(rewards) if rewards else None,
+            "average_steps": sum(steps) / len(steps) if steps else None,
+            "tokens": tokens,
+            "estimated_cost": estimated_cost,
+            "token_cost_available": token_cost_available,
+            "duration_seconds": duration_seconds,
+        },
+    }
 
 
 def _task_id(context: ApiContext, run_id: str) -> str:
