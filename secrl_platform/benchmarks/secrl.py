@@ -106,12 +106,49 @@ class SecRLRunSpec:
         raise TypeError("RunSpec is frozen")
 
 
+class SecRLExcytinEnvironment:
+    """A fixed environment provider owned by the platform, not by the agent.
+
+    Production deployments inject a service client for the already-running
+    Excytin environment.  This class intentionally has no Docker dependency,
+    container lifecycle method, or socket access.
+    """
+
+    def __init__(
+        self,
+        query_executor: Callable[[str, str], Any] | Callable[[str], Any],
+        *,
+        run_spec: SecRLRunSpec,
+    ) -> None:
+        self._query_executor = query_executor
+        self.run_spec = run_spec
+
+    def query_sql(self, scenario_id: str, query: str) -> Any:
+        try:
+            return self._query_executor(scenario_id, query)  # type: ignore[misc]
+        except TypeError:
+            return self._query_executor(query)  # type: ignore[misc]
+
+    def health(self) -> Mapping[str, str]:
+        return {"status": "ready", "provider": "excytin-fixed-service"}
+
+
 @dataclass
 class _Episode:
     ref: EpisodeRef
     case: _Case
     lease_id: str
     steps: int = 0
+
+
+@dataclass(frozen=True)
+class FixtureReplayResult:
+    submitted_answer: str
+    steps: int
+    reward: float
+    observation_hashes: tuple[str, ...]
+    raw_lengths: tuple[int, ...]
+    truncated: tuple[bool, ...]
 
 
 class SecRLAdapter:
@@ -327,14 +364,23 @@ class SecRLAdapter:
                 result = self._query_executor(query)  # type: ignore[misc]
         except Exception:
             return self._error(state, "environment_error")
-        raw = result if isinstance(result, str) else json.dumps(result, ensure_ascii=False, default=str)
-        original_length = len(raw)
-        truncated = original_length > self.run_spec.max_str_len
+        full = result if isinstance(result, str) else result
+        entry_truncated = isinstance(full, (list, tuple)) and len(full) > self.run_spec.max_entry_return
+        if entry_truncated:
+            full = full[: self.run_spec.max_entry_return]
+        raw = full if isinstance(full, str) else json.dumps(full, ensure_ascii=False, default=str)
+        original = result if isinstance(result, str) else json.dumps(result, ensure_ascii=False, default=str)
+        original_length = len(original)
+        truncated = entry_truncated or original_length > self.run_spec.max_str_len
         if truncated:
             raw = raw[: self.run_spec.max_str_len]
         return Observation(
             type="tool_result",
-            content={"result": raw, "original_length": original_length},
+            content={
+                "result": raw,
+                "original_length": original_length,
+                "entry_truncated": entry_truncated,
+            },
             truncated=truncated,
             ref=episode,
         )
@@ -385,3 +431,61 @@ class SecRLAdapter:
 
 def _normalize(value: str) -> str:
     return " ".join(value.casefold().strip().split())
+
+
+def replay_fixture_through_adapter(path: Path) -> FixtureReplayResult:
+    """Replay a checked-in run fixture using only the adapter and fake results."""
+    payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    if payload.get("dataset_sha256") != SECRL_DATASET_SHA256:
+        raise ValueError("fixture dataset hash does not match the frozen SecRL baseline")
+    run_spec = SecRLRunSpec(**payload["run_spec"])
+    query_results = payload.get("query_results", {})
+
+    def fixture_query(_scenario: str, query: str) -> Any:
+        if query not in query_results:
+            raise KeyError(query)
+        return query_results[query]
+
+    adapter = SecRLAdapter(query_executor=fixture_query, run_spec=run_spec)
+    dataset = adapter.dataset_ref()
+    case = next(case for case in adapter.enumerate_cases(dataset, Scope.all()) if case.id == payload["case_id"])
+    lease = adapter.prepare_scenario(case.scenario)
+    episode_start = adapter.start_episode(case, lease)
+    observations: list[Observation] = []
+    for action in payload["actions"]:
+        observation = adapter.execute_action(episode_start.ref, action)
+        observations.append(observation)
+        if observation.terminal:
+            break
+    if not observations or observations[-1].type != "submission":
+        raise ValueError("fixture did not submit an answer")
+    submitted_answer = str(observations[-1].content["answer"])
+    evaluation = adapter.evaluate(episode_start.ref, Submission(answer=submitted_answer))
+    hashes: list[str] = []
+    raw_lengths: list[int] = []
+    truncation: list[bool] = []
+    for observation in observations:
+        normalized = {
+            "type": observation.type,
+            "content": observation.content,
+            "truncated": observation.truncated,
+            "terminal": observation.terminal,
+        }
+        hashes.append(hashlib.sha256(SecRLAdapter._canonical(normalized).encode("utf-8")).hexdigest())
+        if "original_length" in observation.content:
+            raw_lengths.append(int(observation.content["original_length"]))
+        elif observation.type == "submission":
+            raw_lengths.append(len(submitted_answer))
+        else:
+            raw_lengths.append(len(SecRLAdapter._canonical(observation.content)))
+        truncation.append(observation.truncated)
+    adapter.close_episode(episode_start.ref)
+    adapter.release_scenario(lease)
+    return FixtureReplayResult(
+        submitted_answer=submitted_answer,
+        steps=len(observations),
+        reward=evaluation.reward,
+        observation_hashes=tuple(hashes),
+        raw_lengths=tuple(raw_lengths),
+        truncated=tuple(truncation),
+    )

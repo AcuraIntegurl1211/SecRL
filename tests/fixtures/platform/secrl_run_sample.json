@@ -1,0 +1,27 @@
+{
+  "fixture_version": 1,
+  "dataset_sha256": "cc1fd79db8627768611b8b230c23d5cb11c19b50ad25f3810dba3fe8adef8e8f",
+  "case_id": "incident_134:0:b65accf53ed742213de634b9a8a6f7dfacef9c0eaa284243c4ac8be2b4de574d",
+  "scenario_id": "incident_134",
+  "run_spec": {
+    "max_steps": 4,
+    "max_str_len": 1024,
+    "max_entry_return": 2
+  },
+  "query_results": {
+    "SELECT ip FROM SignInLogs": {"rows": [["170.54.121.63"]]}
+  },
+  "actions": [
+    {"type": "tool_call", "tool": "sql_query", "arguments": {"query": "SELECT ip FROM SignInLogs"}},
+    {"type": "submit", "answer": "170.54.121.63"}
+  ],
+  "submitted_answer": "170.54.121.63",
+  "steps": 2,
+  "reward": 1.0,
+  "observation_hashes": [
+    "6c64b16c2732565c5c1ac11cf2d126ce334ed9a14204431a83f85f6f38be842b",
+    "9c2f830b0ac1829e95f68ed758b7ec937d60072dec10adaf6910d3eb73857028"
+  ],
+  "raw_lengths": [29, 13],
+  "truncated": [false, false]
+}
