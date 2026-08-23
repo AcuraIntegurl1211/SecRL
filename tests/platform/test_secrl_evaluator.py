@@ -16,6 +16,31 @@ from secrl_platform.models.evaluator import (
 
 
 class SecRLEvaluatorTest(unittest.TestCase):
+    def test_official_model_request_contains_gold_only_in_private_prompt(self):
+        prompts = []
+
+        def model_client(prompt, _parameters):
+            prompts.append(prompt)
+            return {"text": "Analysis: equivalent\nIs_Answer_Correct: True", "usage": {}}
+
+        evaluator = SecRLEvaluator(official_secrl_profile(formal=True), model_client=model_client)
+        result = evaluator.evaluate(
+            question="Which host?",
+            gold_answer="secret-host",
+            submitted_answer="the same host",
+        )
+        self.assertIn("Golden Answer: secret-host", prompts[0])
+        self.assertNotIn("secret-host", json.dumps(result.request.model_dump(mode="json")))
+        self.assertEqual(result.reward, 1.0)
+
+    def test_malformed_official_response_is_not_silently_exact_matched(self):
+        evaluator = SecRLEvaluator(
+            official_secrl_profile(formal=True),
+            model_client=lambda _prompt, _parameters: {"text": "unparseable", "usage": {}},
+        )
+        with self.assertRaisesRegex(ValueError, "official evaluator response"):
+            evaluator.evaluate(question="q", gold_answer="a", submitted_answer="a")
+
     def test_official_profile_freezes_protocol_inputs(self):
         profile = official_secrl_profile(formal=True)
         self.assertTrue(profile.formal)

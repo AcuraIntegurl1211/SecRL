@@ -64,14 +64,14 @@ class SecRLFixtureParityTest(unittest.TestCase):
         self.assertTrue(observation.content["entry_truncated"])
         self.assertEqual(
             observation.content["original_length"],
-            len(json.dumps([["abcdefghij"]] * 5, ensure_ascii=False)),
+            len(str([["abcdefghij"]] * 5)),
         )
-        self.assertLessEqual(len(observation.content["result"]), 18)
+        self.assertTrue(observation.content["result"].startswith("Retrieved 5 entries."))
 
     def test_existing_excytin_instance_is_wrapped_without_lifecycle_control(self):
         class ExistingEnvironment:
             def execute_query(self, query):
-                return {"query": query}
+                return ([(query,)], True)
 
             def close(self):
                 raise AssertionError("adapter must not control environment lifecycle")
@@ -79,7 +79,37 @@ class SecRLFixtureParityTest(unittest.TestCase):
         provider = SecRLExcytinEnvironment.from_existing_environment(
             ExistingEnvironment(), run_spec=SecRLRunSpec()
         )
-        self.assertEqual(provider.query_sql("incident_134", "SELECT 1"), {"query": "SELECT 1"})
+        self.assertEqual(provider.query_sql("incident_134", "SELECT 1"), ([("SELECT 1",)], True))
+
+        adapter = SecRLAdapter(query_executor=provider.query_sql, run_spec=SecRLRunSpec())
+        case = adapter.enumerate_cases(adapter.dataset_ref(), adapter.scope_all())[0]
+        lease = adapter.prepare_scenario(case.scenario)
+        episode = adapter.start_episode(case, lease)
+        observation = adapter.execute_action(
+            episode.ref,
+            ToolCallAction(type="tool_call", tool="sql_query", arguments={"query": "SELECT 1"}),
+        )
+        self.assertEqual(observation.content["result"], "[('SELECT 1',)]")
+        self.assertTrue(observation.content["query_success"])
+
+    def test_entry_truncation_matches_legacy_excytin_threshold_and_prefix(self):
+        rows = [("abcdefghij",)] * 5
+        adapter = SecRLAdapter(
+            query_executor=lambda _scenario, _query: (rows, True),
+            run_spec=SecRLRunSpec(max_steps=2, max_str_len=18, max_entry_return=2),
+        )
+        case = adapter.enumerate_cases(adapter.dataset_ref(), adapter.scope_all())[0]
+        lease = adapter.prepare_scenario(case.scenario)
+        episode = adapter.start_episode(case, lease)
+        observation = adapter.execute_action(
+            episode.ref,
+            ToolCallAction(type="tool_call", tool="sql_query", arguments={"query": "SELECT 1"}),
+        )
+        self.assertEqual(
+            observation.content["result"],
+            "Retrieved 5 entries. Displaying first 2 entries.\n[('abcdefghij',), ('abcdefghij',)]",
+        )
+        self.assertEqual(observation.content["original_length"], len(str(rows)))
 
 
 if __name__ == "__main__":

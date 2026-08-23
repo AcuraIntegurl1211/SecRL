@@ -4,6 +4,7 @@ import json
 import hashlib
 import tempfile
 import unittest
+import shutil
 from pathlib import Path
 
 from secrl_platform.benchmarks.secrl import (
@@ -101,6 +102,17 @@ class SecRLImportTest(unittest.TestCase):
             report = adapter.validate_dataset(path)
         self.assertFalse(report.valid)
         self.assertTrue(report.errors)
+
+    def test_adapter_refuses_noncanonical_dataset_at_construction(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "test"
+            shutil.copytree(DATASET, target)
+            path = next(target.glob("*.json"))
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            payload[0]["question"] += " tampered"
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "frozen SecRL"):
+                SecRLAdapter(target)
 
     def test_restricted_gold_is_not_serializable_as_public_case(self):
         adapter = SecRLAdapter()

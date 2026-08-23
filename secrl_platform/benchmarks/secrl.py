@@ -8,6 +8,7 @@ process-local capability held by the evaluator.
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import re
 import uuid
@@ -86,7 +87,10 @@ class _Case:
 
 class SecRLManifest(BenchmarkManifest):
     dataset_version: str
+    dataset_split: str
     dataset_sha256: str
+    dataset_schema_version: str
+    case_count: int
 
 
 class SecRLValidationReport(ValidationReport):
@@ -181,6 +185,15 @@ class SecRLAdapter:
         self._leases: dict[str, str] = {}
         self._episodes: dict[str, _Episode] = {}
         self._cases, self._source_sha256 = self._load(self._source)
+        counts: dict[str, int] = {}
+        for case in self._cases.values():
+            counts[case.scenario_id] = counts.get(case.scenario_id, 0) + 1
+        if (
+            len(self._cases) != SECRL_EXPECTED_CASE_COUNT
+            or counts != SECRL_EXPECTED_SCENARIO_COUNTS
+            or self._source_sha256 != SECRL_DATASET_SHA256
+        ):
+            raise ValueError("dataset does not match the frozen SecRL o1-test baseline")
         self._case_order = tuple(self._cases)
 
     @staticmethod
@@ -231,7 +244,10 @@ class SecRLAdapter:
             name="SecRL",
             version="1.0.0",
             dataset_version="o1-test",
+            dataset_split="test",
             dataset_sha256=self._source_sha256,
+            dataset_schema_version="secrl-question-v1",
+            case_count=SECRL_EXPECTED_CASE_COUNT,
         )
 
     def dataset_ref(self) -> DatasetRef:
@@ -371,30 +387,46 @@ class SecRLAdapter:
         if self._query_executor is None:
             return self._error(state, "environment_unavailable")
         try:
-            try:
-                result = self._query_executor(state.case.scenario_id, query)
-            except TypeError:
-                result = self._query_executor(query)  # type: ignore[misc]
+            result = _call_query_executor(
+                self._query_executor,
+                state.case.scenario_id,
+                query,
+            )
         except Exception:
             return self._error(state, "environment_error")
-        full = result if isinstance(result, str) else result
-        entry_truncated = isinstance(full, (list, tuple)) and len(full) > self.run_spec.max_entry_return
+        query_success = True
+        if (
+            isinstance(result, tuple)
+            and len(result) == 2
+            and isinstance(result[1], bool)
+        ):
+            result, query_success = result
+        original = result if isinstance(result, str) else str(result)
+        full = result
+        entry_truncated = (
+            query_success
+            and isinstance(full, (list, tuple))
+            and len(original) > self.run_spec.max_str_len
+            and len(full) > self.run_spec.max_entry_return
+        )
         if entry_truncated:
             full = full[: self.run_spec.max_entry_return]
-        raw = full if isinstance(full, str) else json.dumps(full, ensure_ascii=False, default=str)
-        original = result if isinstance(result, str) else json.dumps(result, ensure_ascii=False, default=str)
+        raw = full if isinstance(full, str) else str(full)
+        if entry_truncated:
+            raw = (
+                f"Retrieved {len(result)} entries. Displaying first "
+                f"{self.run_spec.max_entry_return} entries.\n{raw}"
+            )
         original_length = len(original)
-        truncated = entry_truncated or original_length > self.run_spec.max_str_len
-        if truncated:
-            raw = raw[: self.run_spec.max_str_len]
         return Observation(
             type="tool_result",
             content={
                 "result": raw,
                 "original_length": original_length,
                 "entry_truncated": entry_truncated,
+                "query_success": query_success,
             },
-            truncated=truncated,
+            truncated=entry_truncated,
             ref=episode,
         )
 
@@ -455,6 +487,27 @@ class SecRLAdapter:
 
 def _normalize(value: str) -> str:
     return " ".join(value.casefold().strip().split())
+
+
+def _call_query_executor(executor: Callable[..., Any], scenario_id: str, query: str) -> Any:
+    """Call a one- or two-argument executor without replaying on internal TypeError."""
+    try:
+        signature = inspect.signature(executor)
+    except (TypeError, ValueError):
+        return executor(scenario_id, query)
+    positional = [
+        parameter
+        for parameter in signature.parameters.values()
+        if parameter.kind
+        in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+    ]
+    has_varargs = any(
+        parameter.kind is inspect.Parameter.VAR_POSITIONAL
+        for parameter in signature.parameters.values()
+    )
+    if has_varargs or len(positional) >= 2:
+        return executor(scenario_id, query)
+    return executor(query)
 
 
 def replay_fixture_through_adapter(path: Path) -> FixtureReplayResult:

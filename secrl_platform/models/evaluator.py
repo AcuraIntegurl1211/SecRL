@@ -15,7 +15,10 @@ from secrl_platform.agents.protocol import UsageSnapshot
 
 EVALUATOR_PROMPT_TEMPLATE = (
     "Question: {question}\n"
+    "Golden Answer: {gold_answer}\n"
     "Submitted Answer: {submitted_answer}\n"
+    "The submitted answer may differ in format or case, but must contain the key "
+    "content without an irrelevant enumeration over 15 entries.\n"
     "Return exactly: Analysis: <brief>\\nIs_Answer_Correct: <True|False>"
 )
 EVALUATOR_PROMPT_TEMPLATE_SHA256 = hashlib.sha256(EVALUATOR_PROMPT_TEMPLATE.encode("utf-8")).hexdigest()
@@ -133,12 +136,16 @@ class SecRLEvaluator:
             "seed": self.profile.seed,
         }
         effective.update(requested)
-        prompt = EVALUATOR_PROMPT_TEMPLATE.format(question=question, submitted_answer=submitted_answer)
+        prompt = EVALUATOR_PROMPT_TEMPLATE.format(
+            question=question,
+            gold_answer=gold_answer,
+            submitted_answer=submitted_answer,
+        )
         prompt_sha = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
         raw_text, usage = self._evaluate_response(prompt, question, gold_answer, submitted_answer, effective)
         decision = _parse_decision(raw_text)
         if decision is None:
-            decision = _normalize(submitted_answer) == _normalize(gold_answer)
+            raise ValueError("official evaluator response did not match parser contract")
         correct = bool(decision)
         request = EvaluatorRequest(
             question_sha256=hashlib.sha256(question.encode("utf-8")).hexdigest(),

@@ -19,7 +19,7 @@
   "steps": 2,
   "reward": 1.0,
   "observation_hashes": [
-    "6c64b16c2732565c5c1ac11cf2d126ce334ed9a14204431a83f85f6f38be842b",
+    "b9f950bf7e893ef91ae2f0daecbb1b1ae72b353aacf39ad3fd2427e9ee44247d",
     "9c2f830b0ac1829e95f68ed758b7ec937d60072dec10adaf6910d3eb73857028"
   ],
   "raw_lengths": [29, 13],
