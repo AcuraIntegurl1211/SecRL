@@ -52,7 +52,9 @@ class ComposePackagingTest(unittest.TestCase):
         mysql = compose.split("services:", 1)[0]
 
         self.assertIn('cap_drop: ["ALL"]', mysql)
-        self.assertIn('cap_add: ["CHOWN", "SETGID", "SETUID"]', mysql)
+        self.assertIn(
+            'cap_add: ["CHOWN", "DAC_OVERRIDE", "SETGID", "SETUID"]', mysql
+        )
 
     def test_agent_service_is_network_isolated_from_incidents(self):
         compose = (ROOT / "compose.yaml").read_text()

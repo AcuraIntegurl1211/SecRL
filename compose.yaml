@@ -28,7 +28,7 @@ x-mysql: &mysql
     timeout: 5s
     retries: 12
   cap_drop: ["ALL"]
-  cap_add: ["CHOWN", "SETGID", "SETUID"]
+  cap_add: ["CHOWN", "DAC_OVERRIDE", "SETGID", "SETUID"]
   networks:
     - incident
   deploy:
