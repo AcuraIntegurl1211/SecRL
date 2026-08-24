@@ -73,5 +73,7 @@ label { display: grid; gap: 6px; font-size: 12px; font-weight: 650; color: #4258
   .metric-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .metric-value { border-right: 0; margin-right: 0; border-bottom: 1px solid #e1e7eb; }.metric-value:nth-child(odd) { border-right: 1px solid #e1e7eb; padding-right: 14px; }.metric-value:nth-child(n+3) { border-bottom: 0; }
   .split-grid { grid-template-columns: 1fr; gap: 22px; }
+  .tabs { flex-wrap: wrap; overflow-x: visible; }
+  .tabs button { padding-inline: 10px; }
   .form-grid, .review-layout { grid-template-columns: 1fr; }.form-grid .span-2 { grid-column: auto; }.resource-row { align-items: flex-start; flex-direction: column; gap: 9px; padding: 15px 0; }.resource-meta { width: 100%; justify-content: space-between; }.stepper { overflow-x: auto; grid-template-columns: repeat(4, minmax(125px, 1fr)); }.compare-form { grid-template-columns: 1fr; }.compare-form > svg { display: none; }.compare-form .button { width: 100%; }.summary-list > div { grid-template-columns: 110px 1fr; }
 }
