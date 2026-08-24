@@ -57,6 +57,7 @@ services:
     restart: unless-stopped
     networks:
       - control
+      - ingress
 
   api:
     build:
@@ -196,3 +197,4 @@ networks:
     internal: true
   incident:
   egress:
+  ingress:
