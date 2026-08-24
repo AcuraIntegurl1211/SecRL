@@ -10,12 +10,30 @@ from alembic import command
 from alembic.config import Config
 from sqlalchemy import Column, Integer, Table, inspect, text
 
+from secrl_platform.api import app as api_app
 from secrl_platform.storage.database import create_engine_and_session
 from secrl_platform.storage.orm import Base, EvaluationTaskORM
 from secrl_platform.storage.repositories import TaskRepository
 
 
 class DatabaseTest(unittest.TestCase):
+    def test_migration_root_falls_back_to_container_working_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "alembic").mkdir()
+            (root / "alembic" / "env.py").write_text("# fixture\n")
+            (root / "alembic.ini").write_text("[alembic]\n")
+            resolver = getattr(api_app, "_migration_repository_root", None)
+            self.assertIsNotNone(resolver)
+            installed_module = root / "site-packages/secrl_platform/api/app.py"
+            self.assertEqual(
+                resolver(
+                    module_file=installed_module,
+                    working_directory=root,
+                ),
+                root.resolve(),
+            )
+
     def test_only_one_task_can_be_claimed(self):
         with tempfile.TemporaryDirectory() as tmp:
             session_factory = create_engine_and_session(

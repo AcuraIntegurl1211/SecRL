@@ -5,7 +5,7 @@ import json
 import uuid
 
 import httpx
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy import select
 
 from secrl_platform.agents.builtin import (
@@ -31,6 +31,7 @@ from secrl_platform.api.errors import ApiError
 from secrl_platform.api.schemas import AgentCreateRequest, ModelCreateRequest
 from secrl_platform.benchmarks.smoke import ProtocolSmokeAdapter
 from secrl_platform.benchmarks.secrl import SecRLAdapter
+from secrl_platform.benchmarks.protocol import Scope
 from secrl_platform.models.providers import validate_model_endpoint
 from secrl_platform.models.secrets import encrypted_secret_to_json
 from secrl_platform.storage.orm import (
@@ -303,14 +304,69 @@ async def check_agent(
 
 @router.get("/benchmarks", tags=["benchmarks"])
 def list_benchmarks(_user: LocalUserORM = Depends(require_user)) -> list[dict]:
-    adapters = (ProtocolSmokeAdapter.load_default(), SecRLAdapter())
-    return [
-        {
-            "manifest": adapter.manifest().model_dump(mode="json"),
-            "dataset": adapter.dataset_ref().model_dump(mode="json"),
-        }
-        for adapter in adapters
-    ]
+    return [_benchmark_payload(adapter) for adapter in _benchmark_adapters()]
+
+
+@router.get("/benchmarks/{benchmark_id}/cases", tags=["benchmarks"])
+def list_benchmark_cases(
+    benchmark_id: str,
+    offset: int = Query(0, ge=0),
+    limit: int = Query(25, ge=1, le=100),
+    scenario: str | None = Query(None, min_length=1, max_length=256),
+    _user: LocalUserORM = Depends(require_user),
+) -> dict:
+    adapter = next(
+        (
+            candidate
+            for candidate in _benchmark_adapters()
+            if candidate.manifest().benchmark_id == benchmark_id
+        ),
+        None,
+    )
+    if adapter is None:
+        raise ApiError(404, "BENCHMARK_NOT_FOUND", "Benchmark revision was not found")
+    cases = adapter.enumerate_cases(adapter.dataset_ref(), Scope.all())
+    if scenario is not None:
+        cases = [case for case in cases if case.scenario.id == scenario]
+    items = []
+    for index, case in enumerate(cases[offset : offset + limit], start=offset):
+        public_input = dict(case.public_input)
+        items.append(
+            {
+                "id": case.id,
+                "scenario_id": case.scenario.id,
+                "ordinal": int(public_input.get("ordinal", index)),
+                "public_input": public_input,
+                "public_input_sha256": hashlib.sha256(
+                    canonical_json(public_input).encode("utf-8")
+                ).hexdigest(),
+            }
+        )
+    return {
+        "benchmark_id": benchmark_id,
+        "dataset_sha256": adapter.dataset_ref().sha256,
+        "total": len(cases),
+        "offset": offset,
+        "limit": limit,
+        "items": items,
+    }
+
+
+def _benchmark_adapters():
+    return (ProtocolSmokeAdapter.load_default(), SecRLAdapter())
+
+
+def _benchmark_payload(adapter) -> dict:
+    manifest = adapter.manifest().model_dump(mode="json")
+    dataset_ref = adapter.dataset_ref().model_dump(mode="json", exclude={"source"})
+    dataset = {
+        **dataset_ref,
+        "case_count": manifest.get("case_count")
+        or len(adapter.enumerate_cases(adapter.dataset_ref(), Scope.all())),
+        "split": manifest.get("dataset_split"),
+        "schema_version": manifest.get("dataset_schema_version"),
+    }
+    return {"manifest": manifest, "dataset": dataset}
 
 
 def _model_payload(model: ModelConfigRevisionORM) -> dict:

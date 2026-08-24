@@ -1368,7 +1368,7 @@ git commit -m "feat: integrate versioned failure analysis and review"
 - Create: `web/src/components/HealthBadge.tsx`
 - Create: `web/src/components/MetricValue.tsx`
 
-- [ ] **Step 1: Add frontend test/build scripts**
+- [x] **Step 1: Add frontend test/build scripts**
 
 `web/package.json` scripts:
 
@@ -1385,19 +1385,19 @@ git commit -m "feat: integrate versioned failure analysis and review"
 
 Use React Router, TanStack Query, React Hook Form, Zod, and Lucide React. Pin exact versions in the generated lockfile.
 
-- [ ] **Step 2: Write navigation test**
+- [x] **Step 2: Write navigation test**
 
 Render `AppShell` with a memory router and assert Dashboard, Models, Agents, Benchmarks, New Evaluation, Runs, Analysis, and Compare navigation targets are present with accessible names.
 
-- [ ] **Step 3: Implement typed API client**
+- [x] **Step 3: Implement typed API client**
 
 Generate TypeScript API types from `tests/fixtures/platform/openapi-v1.json`. `apiFetch()` always sends credentials and CSRF for mutations, parses the common error envelope, and never logs request bodies containing secrets.
 
-- [ ] **Step 4: Implement the operational shell**
+- [x] **Step 4: Implement the operational shell**
 
 Use a fixed-width responsive sidebar on desktop and a drawer on mobile. Keep content unframed except for repeated result items and modals. Use Lucide icons with tooltips for icon-only controls.
 
-- [ ] **Step 5: Run and commit**
+- [x] **Step 5: Run and commit**
 
 ```bash
 npm --prefix web ci
@@ -1423,7 +1423,7 @@ Expected: tests and production build pass with no TypeScript errors.
 - Create: `web/src/pages/ComparePage.tsx`
 - Create: `web/src/pages/pages.test.tsx`
 
-- [ ] **Step 1: Write workflow tests**
+- [x] **Step 1: Write workflow tests**
 
 Mock the API and test:
 
@@ -1436,23 +1436,23 @@ Mock the API and test:
 7. Submit a HumanReview revision.
 8. Compare two same-Benchmark tasks and reject a cross-Benchmark reward chart.
 
-- [ ] **Step 2: Implement dashboard and configuration pages**
+- [x] **Step 2: Implement dashboard and configuration pages**
 
 Dashboard polls summarized status every five seconds only while a task is active. Models uses a password input that clears after submission. Agents shows runtime type, revision hash, protocol and health. Benchmarks shows DatasetVersion and manifest integrity.
 
-- [ ] **Step 3: Implement task creation**
+- [x] **Step 3: Implement task creation**
 
 Use four compact steps: Scope, Runtime, Reliability, Budget/Review. Render Agent parameters from JSON Schema. Show validation errors next to their fields and a final immutable-spec summary.
 
-- [ ] **Step 4: Implement run and trajectory views**
+- [x] **Step 4: Implement run and trajectory views**
 
 Use stable table/grid dimensions, server pagination, lazy artifact ranges, and tabs for Overview, Cases, Trajectory, Analysis, Artifacts, Audit. Long SQL and observations use code blocks with explicit expand controls.
 
-- [ ] **Step 5: Implement analysis/review and compare**
+- [x] **Step 5: Implement analysis/review and compare**
 
 Review keeps automatic candidate read-only and appends a review revision. Compare requires identical BenchmarkRevision/DatasetVersion for reward charts; token/cost metadata identifies missing values rather than treating them as zero.
 
-- [ ] **Step 6: Run and commit**
+- [x] **Step 6: Run and commit**
 
 ```bash
 npm --prefix web test
@@ -1472,7 +1472,7 @@ git commit -m "feat: add Lite evaluation management pages"
 - Create: `.env.example`
 - Modify: `.gitignore`
 
-- [ ] **Step 1: Add a multi-stage platform image**
+- [x] **Step 1: Add a multi-stage platform image**
 
 Stages:
 
@@ -1482,7 +1482,7 @@ Stages:
 
 Do not copy `.env`, result directories, local SQLite, API keys, or `data_anonymized` into the image.
 
-- [ ] **Step 2: Add entrypoint checks**
+- [x] **Step 2: Add entrypoint checks**
 
 `entrypoint.sh` must:
 
@@ -1495,11 +1495,11 @@ start the API and one runner child
 forward SIGTERM and wait for both children
 ```
 
-- [ ] **Step 3: Define Compose profiles**
+- [x] **Step 3: Define Compose profiles**
 
 Publish Web as `127.0.0.1:${SECRL_PORT:-8080}:8080`. Add `smoke`, one profile per Incident, `secrl-all`, and `agent-service-reference`. MySQL services have no host ports, use read-only source mounts during init, named data volumes, health checks, resource limits, and pinned multi-architecture image digests.
 
-- [ ] **Step 4: Add environment example**
+- [x] **Step 4: Add environment example**
 
 `.env.example` contains names and safe defaults only:
 
@@ -1512,7 +1512,7 @@ SECRL_INITIAL_ADMIN_PASSWORD=
 SECRL_DATA_ANONYMIZED_DIR=
 ```
 
-- [ ] **Step 5: Build and smoke test**
+- [x] **Step 5: Build and smoke test**
 
 ```bash
 docker compose --profile smoke build
@@ -1523,7 +1523,7 @@ docker compose --profile smoke down
 
 Expected: health is `ok`, Protocol-Smoke dependencies are healthy, and persistent `/data` survives restart.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add docker compose.yaml .env.example .gitignore
@@ -1538,11 +1538,11 @@ git commit -m "build: package SecRL Lite with Docker Compose"
 - Modify: `secrl_platform/cli.py`
 - Create: `tests/platform/test_backup_restore.py`
 
-- [ ] **Step 1: Write round-trip test**
+- [x] **Step 1: Write round-trip test**
 
 Create a completed Protocol-Smoke run, back up SQLite using the SQLite online backup API, copy content-addressed artifacts, restore into an empty data directory, and assert identical TaskSpec/RunSpec/artifact hashes.
 
-- [ ] **Step 2: Implement backup manifest**
+- [x] **Step 2: Implement backup manifest**
 
 Each backup contains:
 
@@ -1556,11 +1556,11 @@ Each backup contains:
 }
 ```
 
-- [ ] **Step 3: Implement safe restore**
+- [x] **Step 3: Implement safe restore**
 
 Restore only into an empty target, verify every hash before replacing the live directory, and refuse a schema version newer than the running platform.
 
-- [ ] **Step 4: Run and commit**
+- [x] **Step 4: Run and commit**
 
 ```bash
 python -m unittest tests.platform.test_backup_restore -v
@@ -1578,7 +1578,7 @@ git commit -m "feat: back up and restore Lite platform data"
 - Create: `docs/secrl-lite/security.md`
 - Modify: `README.md`
 
-- [ ] **Step 1: Run all Python tests on Python 3.11**
+- [x] **Step 1: Run all Python tests on Python 3.11**
 
 ```bash
 python -m unittest discover -s tests -v
@@ -1586,7 +1586,7 @@ python -m unittest discover -s tests -v
 
 Expected: all platform and existing failure-analysis tests pass. If the full discovery count differs by checkout, record the exact count in the verification report.
 
-- [ ] **Step 2: Run frontend checks**
+- [x] **Step 2: Run frontend checks**
 
 ```bash
 npm --prefix web ci
@@ -1597,27 +1597,27 @@ npm --prefix web run build
 
 Expected: all commands exit 0.
 
-- [ ] **Step 3: Run Protocol-Smoke Compose e2e**
+- [x] **Step 3: Run Protocol-Smoke Compose e2e**
 
 Create a model-free task using the deterministic built-in Agent, then repeat with the reference Agent Service. Expected: 12/12 results, identical Action/Observation sequence hashes, verified artifacts, and no MySQL dependency.
 
-- [ ] **Step 4: Run one SecRL fixture e2e on Ubuntu arm64**
+- [x] **Step 4: Run one SecRL fixture e2e on Ubuntu arm64**
 
 Start one Incident profile, run the approved small fixture, and compare reward, steps, SQL result hashes, truncation flags, Agent/evaluator usage separation, and failure-analysis output against the frozen baseline.
 
-- [ ] **Step 5: Verify browser layout with Playwright**
+- [x] **Step 5: Verify browser layout with Playwright**
 
 Capture desktop `1440x900` and mobile `390x844` screenshots for Dashboard, New Evaluation, Run Detail, Analysis Review, and Compare. Assert no horizontal overflow, overlapping text, clipped controls, blank charts, or eagerly loaded full trajectories.
 
-- [ ] **Step 6: Verify secret and network boundaries**
+- [x] **Step 6: Verify secret and network boundaries**
 
 Search API responses, logs, SQLite text columns, exported artifacts, and Docker inspect output for the test API key. Expected: zero matches. Verify Agent Service cannot resolve/connect to Incident MySQL and no platform container mounts Docker Socket.
 
-- [ ] **Step 7: Write operator documentation**
+- [x] **Step 7: Write operator documentation**
 
 Document exact install, Incident profile selection, model setup, Agent Service registration, backup/restore, log locations, disk cleanup, upgrade, and migration triggers to the full platform.
 
-- [ ] **Step 8: Commit final verification evidence**
+- [x] **Step 8: Commit final verification evidence**
 
 ```bash
 git add docs/secrl-lite README.md tests/fixtures/platform/verification

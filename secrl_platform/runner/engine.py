@@ -166,7 +166,10 @@ class RunnerEngine:
                 attempt_id=attempt.id,
                 artifact=artifact,
                 restricted_artifacts=restricted_artifacts,
-                result=result.model_dump(mode="json"),
+                result={
+                    **result.model_dump(mode="json"),
+                    "steps": len(trajectory["exchanges"]),
+                },
                 usage=usage,
                 budget_anchor=budget_anchor,
                 budget_exhausted=budget_exhausted,

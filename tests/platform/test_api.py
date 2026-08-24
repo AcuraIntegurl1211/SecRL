@@ -9,7 +9,7 @@ import httpx
 from fastapi.testclient import TestClient
 
 from examples.agent_service.app import create_app as create_agent_service_app
-from secrl_platform.api.app import create_app
+from secrl_platform.api.app import _safe_exception_context, create_app
 from secrl_platform.agents.builtin import DeterministicSmokeAgent
 from secrl_platform.agents.builtin import builtin_manifest
 from secrl_platform.agents.protocol import UsageSnapshot
@@ -117,6 +117,37 @@ class ApiTest(unittest.TestCase):
         self.csrf_token = response.json()["csrf_token"]
         return response
 
+    def test_internal_error_diagnostics_never_include_exception_message(self):
+        marker = "sk-never-log-this-value"
+        try:
+            raise RuntimeError(marker)
+        except RuntimeError as error:
+            context = _safe_exception_context(error)
+
+        self.assertEqual(context["exception_type"], "RuntimeError")
+        self.assertTrue(any("test_api.py:" in frame for frame in context["frames"]))
+        self.assertNotIn(marker, json.dumps(context))
+
+    def test_internal_error_boundary_does_not_reraise_or_log_exception_message(self):
+        marker = "sk-never-log-this-value"
+
+        def fail_safely():
+            raise RuntimeError(marker)
+
+        self.app.add_api_route("/api/v1/test-internal-error", fail_safely)
+        with self.assertLogs("secrl_platform.api", level="ERROR") as captured:
+            response = self.client.get("/api/v1/test-internal-error")
+
+        self.assertEqual(response.status_code, 500)
+        self.assertEqual(response.json()["error"]["code"], "INTERNAL_ERROR")
+        self.assertNotIn(marker, response.text)
+        self.assertNotIn(marker, "\n".join(captured.output))
+
+    def test_alembic_does_not_disable_runtime_loggers(self):
+        env_source = (Path(__file__).resolve().parents[2] / "alembic" / "env.py").read_text()
+
+        self.assertIn("disable_existing_loggers=False", env_source)
+
     def test_secret_endpoint_requires_login(self):
         response = self.client.get("/api/v1/models")
 
@@ -139,6 +170,118 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(response.status_code, 201, response.text)
         self.assertRegex(response.json()["task_spec_sha256"], r"^[0-9a-f]{64}$")
         self.assertRegex(response.json()["run_id"], r"^[0-9a-f-]{36}$")
+
+    def test_api_created_smoke_agent_is_runner_executable_and_listed_with_run(self):
+        self.login()
+        headers = {"X-CSRF-Token": self.csrf_token}
+        agent = self.client.post(
+            "/api/v1/agents",
+            json={
+                "kind": "BUILT_IN",
+                "revision_id": "builtin-deterministic-smoke-v1",
+            },
+            headers=headers,
+        )
+        self.assertEqual(agent.status_code, 201, agent.text)
+        payload = valid_smoke_task()
+        payload["agent_revision_id"] = agent.json()["id"]
+        payload["budget"] = {}
+
+        task = self.client.post("/api/v1/tasks", json=payload, headers=headers)
+
+        self.assertEqual(task.status_code, 201, task.text)
+        status = asyncio.run(
+            run_pending_once(
+                settings=self.settings,
+                session_factory=self.session_factory,
+                artifact_store=self.artifact_store,
+            )
+        )
+        self.assertEqual(status, "SUCCEEDED")
+        listed = self.client.get("/api/v1/tasks")
+        listed_task = next(
+            item for item in listed.json() if item["id"] == task.json()["id"]
+        )
+        self.assertEqual(listed_task["run_id"], task.json()["run_id"])
+
+        cases = self.client.get(f"/api/v1/runs/{task.json()['run_id']}/cases")
+        self.assertEqual(cases.status_code, 200, cases.text)
+        self.assertRegex(
+            cases.json()[0]["trajectory_artifact"]["sha256"],
+            r"^[0-9a-f]{64}$",
+        )
+        trajectory = self.client.get(
+            f"/api/v1/runs/{task.json()['run_id']}/cases/smoke-001/trajectory",
+            params={"step": 0},
+        )
+        self.assertEqual(trajectory.status_code, 200, trajectory.text)
+        self.assertEqual(trajectory.json()["step"], 0)
+        self.assertGreaterEqual(trajectory.json()["total_steps"], 1)
+        self.assertIn(
+            trajectory.json()["exchange"]["action"]["type"],
+            {"tool_call", "submit"},
+        )
+        artifacts = self.client.get(
+            f"/api/v1/runs/{task.json()['run_id']}/artifacts"
+        )
+        self.assertEqual(artifacts.status_code, 200, artifacts.text)
+        self.assertEqual(artifacts.json()[0]["kind"], "trajectory")
+
+    def test_run_attributions_reviews_and_audit_are_queryable(self):
+        self.login()
+        headers = {"X-CSRF-Token": self.csrf_token}
+        task = self.client.post(
+            "/api/v1/tasks",
+            json={**valid_smoke_task(), "budget": {}},
+            headers=headers,
+        ).json()
+        self.assertEqual(
+            asyncio.run(
+                run_pending_once(
+                    settings=self.settings,
+                    session_factory=self.session_factory,
+                    artifact_store=self.artifact_store,
+                )
+            ),
+            "SUCCEEDED",
+        )
+        with self.session_factory.begin() as session:
+            attempt = session.scalar(
+                select(CaseAttemptORM).where(
+                    CaseAttemptORM.run_id == task["run_id"]
+                )
+            )
+            attribution = AttributionORM(
+                case_attempt_id=attempt.id,
+                taxonomy="taxonomy_v1",
+                label="ANSWER",
+                confidence=0.75,
+                evidence_json='["trajectory:step:0"]',
+            )
+            session.add(attribution)
+            session.flush()
+            attribution_id = attribution.id
+
+        attributions = self.client.get(
+            f"/api/v1/runs/{task['run_id']}/attributions"
+        )
+        self.assertEqual(attributions.status_code, 200, attributions.text)
+        self.assertEqual(attributions.json()[0]["id"], attribution_id)
+        review = self.client.post(
+            f"/api/v1/attributions/{attribution_id}/reviews",
+            headers=headers,
+            json={
+                "primary": "ANSWER",
+                "secondary": [],
+                "confidence": "high",
+                "evidence": ["trajectory:step:0"],
+                "notes": "release gate",
+            },
+        )
+        self.assertEqual(review.status_code, 201, review.text)
+        audit = self.client.get(f"/api/v1/runs/{task['run_id']}/audit")
+        self.assertEqual(audit.status_code, 200, audit.text)
+        self.assertEqual(audit.json()[0]["action"], "human_review.append")
 
     def test_secrl_builtin_agent_and_task_are_persisted_with_frozen_limits(self):
         self.login()
@@ -399,7 +542,7 @@ class ApiTest(unittest.TestCase):
             with self.subTest(forbidden=forbidden):
                 self.assertNotIn(forbidden, document)
 
-    def test_openapi_contains_complete_milestone_two_route_surface(self):
+    def test_openapi_contains_complete_lite_route_surface(self):
         paths = set(self.app.openapi()["paths"])
 
         self.assertEqual(
@@ -407,20 +550,26 @@ class ApiTest(unittest.TestCase):
             {
                 "/api/v1/auth/login",
                 "/api/v1/auth/logout",
+                "/api/v1/auth/password",
                 "/api/v1/health",
                 "/api/v1/models",
                 "/api/v1/agents",
                 "/api/v1/agents/{id}:check",
                 "/api/v1/benchmarks",
+                "/api/v1/benchmarks/{benchmark_id}/cases",
                 "/api/v1/tasks",
                 "/api/v1/runs/{id}",
                 "/api/v1/runs/{id}:pause",
                 "/api/v1/runs/{id}:resume",
                 "/api/v1/runs/{id}:cancel",
                 "/api/v1/runs/{id}/cases",
+                "/api/v1/runs/{id}/cases/{case_id}/trajectory",
                 "/api/v1/runs/{id}/cases/{case_id}:retry",
                 "/api/v1/runs/{id}:analyze",
                 "/api/v1/runs/{id}/analysis",
+                "/api/v1/runs/{id}/attributions",
+                "/api/v1/runs/{id}/artifacts",
+                "/api/v1/runs/{id}/audit",
                 "/api/v1/attributions/{id}/reviews",
                 "/api/v1/artifacts/{id}/metadata",
                 "/api/v1/artifacts/{id}",
@@ -490,6 +639,52 @@ class ApiTest(unittest.TestCase):
                 )
             )
 
+    def test_initial_admin_must_rotate_password_before_using_api(self):
+        with self.session_factory.begin() as session:
+            user = session.scalar(select(LocalUserORM))
+            session.add(
+                AppSettingORM(
+                    key=f"auth.password_change_required.{user.id}",
+                    value_json="true",
+                )
+            )
+
+        login = self.login()
+        self.assertTrue(login.json()["password_change_required"])
+        blocked = self.client.get("/api/v1/tasks")
+        self.assertEqual(blocked.status_code, 403)
+        self.assertEqual(
+            blocked.json()["error"]["code"], "PASSWORD_CHANGE_REQUIRED"
+        )
+
+        changed = self.client.post(
+            "/api/v1/auth/password",
+            headers={"X-CSRF-Token": self.csrf_token},
+            json={
+                "current_password": "correct horse battery staple",
+                "new_password": "new correct horse battery staple",
+            },
+        )
+        self.assertEqual(changed.status_code, 204, changed.text)
+        self.assertEqual(self.client.get("/api/v1/tasks").status_code, 200)
+        self.client.post(
+            "/api/v1/auth/logout", headers={"X-CSRF-Token": self.csrf_token}
+        )
+        old_login = self.client.post(
+            "/api/v1/auth/login",
+            json={"username": "admin", "password": "correct horse battery staple"},
+        )
+        new_login = self.client.post(
+            "/api/v1/auth/login",
+            json={
+                "username": "admin",
+                "password": "new correct horse battery staple",
+            },
+        )
+        self.assertEqual(old_login.status_code, 401)
+        self.assertEqual(new_login.status_code, 200)
+        self.assertFalse(new_login.json()["password_change_required"])
+
     def test_model_agent_and_benchmark_resources_are_safe_and_frozen(self):
         self.login()
         headers = {"X-CSRF-Token": self.csrf_token}
@@ -537,6 +732,33 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(checked.json()["status"], "valid")
         self.assertEqual(len(benchmarks.json()), 2)
         self.assertNotIn("secret", json.dumps(created_model.json()).lower())
+
+    def test_benchmark_case_browser_is_paginated_and_excludes_gold(self):
+        self.login()
+
+        response = self.client.get(
+            "/api/v1/benchmarks/secrl/cases",
+            params={"scenario": "incident_34", "offset": 0, "limit": 5},
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        body = response.json()
+        self.assertEqual(body["benchmark_id"], "secrl")
+        self.assertEqual(body["total"], 82)
+        self.assertEqual(len(body["items"]), 5)
+        for item in body["items"]:
+            self.assertEqual(item["scenario_id"], "incident_34")
+            self.assertIn("question", item["public_input"])
+            self.assertEqual(
+                set(item["public_input"]),
+                {"incident", "ordinal", "context", "question", "question_sha256"},
+            )
+            self.assertEqual(len(item["public_input_sha256"]), 64)
+
+        all_cases = self.client.get(
+            "/api/v1/benchmarks/secrl/cases", params={"offset": 0, "limit": 1}
+        ).json()
+        self.assertEqual(all_cases["total"], 589)
 
     def test_model_key_is_encrypted_and_api_task_is_runner_executable(self):
         self.login()
@@ -930,6 +1152,63 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(
             response.json()["error"]["code"], "BENCHMARK_REVISION_MISMATCH"
         )
+
+    def test_compare_returns_completed_metrics_and_marks_missing_usage(self):
+        self.login()
+        headers = {"X-CSRF-Token": self.csrf_token}
+        task_ids = []
+        for name in ("left", "right"):
+            created = self.client.post(
+                "/api/v1/tasks",
+                json={**valid_smoke_task(), "name": name, "budget": {}},
+                headers=headers,
+            )
+            self.assertEqual(created.status_code, 201, created.text)
+            task_ids.append(created.json()["id"])
+            status = asyncio.run(
+                run_pending_once(
+                    settings=self.settings,
+                    session_factory=self.session_factory,
+                    artifact_store=self.artifact_store,
+                )
+            )
+            self.assertEqual(status, "SUCCEEDED")
+
+        response = self.client.get(
+            "/api/v1/compare", params={"left": task_ids[0], "right": task_ids[1]}
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        body = response.json()
+        self.assertEqual(body["revision"]["benchmark_revision_id"], body["left"]["benchmark_revision_id"])
+        for side in ("left", "right"):
+            metrics = body[side]["metrics"]
+            self.assertEqual(metrics["case_count"], 1)
+            self.assertEqual(metrics["success_count"], 1)
+            self.assertEqual(metrics["success_rate"], 1.0)
+            self.assertEqual(metrics["average_reward"], 1.0)
+            self.assertEqual(metrics["average_steps"], 3.0)
+            self.assertIsNone(metrics["tokens"])
+            self.assertIsNone(metrics["estimated_cost"])
+            self.assertFalse(metrics["token_cost_available"])
+            self.assertGreaterEqual(metrics["duration_seconds"], 0)
+
+    def test_compare_rejects_unfinished_tasks(self):
+        self.login()
+        headers = {"X-CSRF-Token": self.csrf_token}
+        left = self.client.post(
+            "/api/v1/tasks", json=valid_smoke_task(), headers=headers
+        ).json()["id"]
+        right = self.client.post(
+            "/api/v1/tasks", json=valid_smoke_task(), headers=headers
+        ).json()["id"]
+
+        response = self.client.get(
+            "/api/v1/compare", params={"left": left, "right": right}
+        )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json()["error"]["code"], "TASK_NOT_COMPLETED")
 
     def test_artifact_download_cannot_swap_bytes_after_verification(self):
         self.login()

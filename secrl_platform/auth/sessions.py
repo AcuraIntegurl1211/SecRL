@@ -16,6 +16,11 @@ from secrl_platform.storage.repositories import canonical_json
 
 SESSION_COOKIE = "secrl_session"
 CSRF_HEADER = "X-CSRF-Token"
+PASSWORD_CHANGE_KEY_PREFIX = "auth.password_change_required."
+
+
+def password_change_key(user_id: str) -> str:
+    return f"{PASSWORD_CHANGE_KEY_PREFIX}{user_id}"
 
 
 @dataclass(frozen=True)

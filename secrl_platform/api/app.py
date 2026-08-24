@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+import traceback
 import uuid
 from collections.abc import Callable
 from contextlib import asynccontextmanager
@@ -27,6 +29,9 @@ from secrl_platform.config import (
 from secrl_platform.models.secrets import SecretStore
 from secrl_platform.storage.artifacts import LocalArtifactStore
 from secrl_platform.storage.database import create_engine_and_session
+
+
+logger = logging.getLogger("secrl_platform.api")
 
 
 def create_app(
@@ -74,7 +79,21 @@ def create_app(
     @app.middleware("http")
     async def request_id_middleware(request: Request, call_next):
         request.state.request_id = str(uuid.uuid4())
-        response = await call_next(request)
+        try:
+            response = await call_next(request)
+        except Exception as error:
+            diagnostic = _safe_exception_context(error)
+            logger.error(
+                "Unhandled API error request_id=%s exception_type=%s frames=%s",
+                request.state.request_id,
+                diagnostic["exception_type"],
+                ">".join(diagnostic["frames"]),
+            )
+            normalized = ApiError(500, "INTERNAL_ERROR", "Internal server error")
+            response = JSONResponse(
+                status_code=normalized.status_code,
+                content=error_payload(normalized, request.state.request_id),
+            )
         response.headers["X-Request-ID"] = request.state.request_id
         return response
 
@@ -97,14 +116,6 @@ def create_app(
     async def http_error_handler(request: Request, error: StarletteHTTPException):
         code = "NOT_FOUND" if error.status_code == 404 else "HTTP_ERROR"
         normalized = ApiError(error.status_code, code, "Request could not be completed")
-        return JSONResponse(
-            status_code=normalized.status_code,
-            content=error_payload(normalized, request.state.request_id),
-        )
-
-    @app.exception_handler(Exception)
-    async def internal_error_handler(request: Request, _error: Exception):
-        normalized = ApiError(500, "INTERNAL_ERROR", "Internal server error")
         return JSONResponse(
             status_code=normalized.status_code,
             content=error_payload(normalized, request.state.request_id),
@@ -166,6 +177,17 @@ def create_app(
     return app
 
 
+def _safe_exception_context(error: Exception) -> dict[str, object]:
+    frames = traceback.extract_tb(error.__traceback__)[-12:]
+    return {
+        "exception_type": type(error).__name__,
+        "frames": tuple(
+            f"{Path(frame.filename).name}:{frame.lineno}:{frame.name}"
+            for frame in frames
+        ),
+    }
+
+
 def _context(
     session_factory: sessionmaker[Session],
     artifact_store: LocalArtifactStore,
@@ -207,8 +229,26 @@ def _context(
 def _upgrade_database(database_path: Path) -> None:
     database_path = Path(database_path)
     database_path.parent.mkdir(parents=True, exist_ok=True)
-    repository_root = Path(__file__).resolve().parents[2]
+    repository_root = _migration_repository_root()
     config = Config(str(repository_root / "alembic.ini"))
     config.set_main_option("script_location", str(repository_root / "alembic"))
     config.set_main_option("sqlalchemy.url", f"sqlite:///{database_path}")
     command.upgrade(config, "head")
+
+
+def _migration_repository_root(
+    *,
+    module_file: Path = Path(__file__),
+    working_directory: Path | None = None,
+) -> Path:
+    candidates = (
+        Path(module_file).resolve().parents[2],
+        Path(working_directory or Path.cwd()).resolve(),
+    )
+    for candidate in candidates:
+        if (
+            (candidate / "alembic.ini").is_file()
+            and (candidate / "alembic" / "env.py").is_file()
+        ):
+            return candidate
+    raise RuntimeError("Alembic migration files are not available")

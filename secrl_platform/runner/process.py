@@ -81,9 +81,13 @@ class RunnerProcess:
 
 
 def capability_signer(settings: Settings) -> CapabilitySigner:
-    key = hashlib.sha256(
-        b"secrl-lite-capability-v1\0" + settings.session_secret.encode("utf-8")
-    ).digest()
+    configured_secret = settings.agent_service_capability_secret
+    if configured_secret is None:
+        key = hashlib.sha256(
+            b"secrl-lite-capability-v1\0" + settings.session_secret.encode("utf-8")
+        ).digest()
+    else:
+        key = bytes.fromhex(configured_secret.get_secret_value())
     return CapabilitySigner(
         key,
         budget_store=FileCapabilityBudgetStore(settings.data_dir / "capability-ledger"),

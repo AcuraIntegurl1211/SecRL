@@ -4,14 +4,20 @@ from dataclasses import dataclass
 from collections.abc import Callable
 
 from fastapi import Depends, Request
+from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
 from secrl_platform.api.errors import ApiError
 from secrl_platform.agents.service import AgentServiceTransport
-from secrl_platform.auth.sessions import CSRF_HEADER, SESSION_COOKIE, SessionStore
+from secrl_platform.auth.sessions import (
+    CSRF_HEADER,
+    SESSION_COOKIE,
+    SessionStore,
+    password_change_key,
+)
 from secrl_platform.models.secrets import SecretStore
 from secrl_platform.storage.artifacts import LocalArtifactStore
-from secrl_platform.storage.orm import LocalUserORM
+from secrl_platform.storage.orm import AppSettingORM, LocalUserORM
 
 
 @dataclass(frozen=True)
@@ -36,6 +42,15 @@ def require_user(
     request: Request,
     context: ApiContext = Depends(get_context),
 ) -> LocalUserORM:
+    user = require_session_user(request, context)
+    _require_rotated_password(context, user)
+    return user
+
+
+def require_session_user(
+    request: Request,
+    context: ApiContext = Depends(get_context),
+) -> LocalUserORM:
     user = context.sessions.authenticate(request.cookies.get(SESSION_COOKIE))
     if user is None:
         raise ApiError(401, "AUTHENTICATION_REQUIRED", "Authentication is required")
@@ -43,6 +58,15 @@ def require_user(
 
 
 def require_csrf_user(
+    request: Request,
+    context: ApiContext = Depends(get_context),
+) -> LocalUserORM:
+    user = require_csrf_session_user(request, context)
+    _require_rotated_password(context, user)
+    return user
+
+
+def require_csrf_session_user(
     request: Request,
     context: ApiContext = Depends(get_context),
 ) -> LocalUserORM:
@@ -56,3 +80,18 @@ def require_csrf_user(
     if user is None:
         raise ApiError(403, "CSRF_VALIDATION_FAILED", "CSRF validation failed")
     return user
+
+
+def _require_rotated_password(context: ApiContext, user: LocalUserORM) -> None:
+    with context.session_factory() as session:
+        required = session.scalar(
+            select(AppSettingORM.id).where(
+                AppSettingORM.key == password_change_key(user.id)
+            )
+        )
+    if required is not None:
+        raise ApiError(
+            403,
+            "PASSWORD_CHANGE_REQUIRED",
+            "The initial administrator password must be changed",
+        )
