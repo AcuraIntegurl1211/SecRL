@@ -16,6 +16,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session, sessionmaker
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from secrl_platform import __version__ as PLATFORM_VERSION
 from secrl_platform.api.dependencies import ApiContext
 from secrl_platform.agents.service import AgentServiceTransport
 from secrl_platform.api.errors import ApiError, error_payload
@@ -60,7 +61,7 @@ def create_app(
 
     app = FastAPI(
         title="SecRL Lite API",
-        version="1.0.0",
+        version=PLATFORM_VERSION,
         lifespan=lifespan,
         docs_url=None,
         redoc_url=None,

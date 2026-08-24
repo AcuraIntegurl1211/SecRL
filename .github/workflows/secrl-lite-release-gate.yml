@@ -2,9 +2,9 @@ name: SecRL Lite release gate
 
 on:
   pull_request:
-    branches: [repro/sql-retrieval-subtyping]
+    branches: [main, repro/sql-retrieval-subtyping]
   push:
-    branches: [repro/sql-retrieval-subtyping]
+    branches: [main, repro/sql-retrieval-subtyping]
   workflow_dispatch:
 
 permissions:

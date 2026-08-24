@@ -183,11 +183,13 @@ class ComposePackagingTest(unittest.TestCase):
         pull_request = trigger.split("\n  pull_request:\n", 1)[1].split(
             "\n  push:\n", 1
         )[0]
+        self.assertIn("main", pull_request)
         self.assertIn("repro/sql-retrieval-subtyping", pull_request)
 
         push = trigger.split("\n  push:\n", 1)[1].split(
             "\n  workflow_dispatch:\n", 1
         )[0]
+        self.assertIn("main", push)
         self.assertIn("repro/sql-retrieval-subtyping", push)
 
         permissions = source.split("\npermissions:\n", 1)[1].split(

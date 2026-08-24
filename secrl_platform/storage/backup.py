@@ -14,9 +14,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from secrl_platform import __version__ as PLATFORM_VERSION
 
 BACKUP_SCHEMA_VERSION = 1
-PLATFORM_VERSION = "1.0.0"
 
 
 class BackupIntegrityError(RuntimeError):
