@@ -169,6 +169,37 @@ class ComposePackagingTest(unittest.TestCase):
         ):
             self.assertIn(required, source)
 
+    def test_release_gate_runs_for_pr_target_push_and_manual_dispatch(self):
+        workflow = ROOT / ".github" / "workflows" / "secrl-lite-release-gate.yml"
+        source = workflow.read_text()
+        trigger = source.split("\npermissions:\n", 1)[0]
+
+        self.assertIn("\n  pull_request:\n", trigger)
+        self.assertNotIn("pull_request_target:", trigger)
+        self.assertIn("\n  workflow_dispatch:\n", trigger)
+        self.assertNotIn("paths:", trigger)
+        self.assertNotIn("paths-ignore:", trigger)
+
+        pull_request = trigger.split("\n  pull_request:\n", 1)[1].split(
+            "\n  push:\n", 1
+        )[0]
+        self.assertIn("repro/sql-retrieval-subtyping", pull_request)
+
+        push = trigger.split("\n  push:\n", 1)[1].split(
+            "\n  workflow_dispatch:\n", 1
+        )[0]
+        self.assertIn("repro/sql-retrieval-subtyping", push)
+
+        permissions = source.split("\npermissions:\n", 1)[1].split(
+            "\nconcurrency:\n", 1
+        )[0]
+        self.assertEqual(permissions.strip(), "contents: read")
+
+        concurrency = source.split("\nconcurrency:\n", 1)[1].split(
+            "\njobs:\n", 1
+        )[0]
+        self.assertIn("${{ github.event_name }}", concurrency)
+
     def test_protocol_smoke_does_not_invoke_secrl_only_failure_analysis(self):
         module = _load_release_gate_module()
 

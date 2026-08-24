@@ -4,13 +4,14 @@ on:
   pull_request:
     branches: [repro/sql-retrieval-subtyping]
   push:
-    branches: [feat/secrl-lite-milestone-4]
+    branches: [repro/sql-retrieval-subtyping]
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: secrl-lite-release-gate-${{ github.ref }}
+  group: secrl-lite-release-gate-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
