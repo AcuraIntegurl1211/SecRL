@@ -166,7 +166,7 @@ class ComposePackagingTest(unittest.TestCase):
                 if path == "/api/v1/auth/login":
                     return {"csrf_token": "csrf-1", "password_change_required": True}
                 if path == "/api/v1/auth/password":
-                    return {"csrf_token": "csrf-2", "password_change_required": False}
+                    return None
                 raise AssertionError(path)
 
         client = Client()
@@ -181,7 +181,7 @@ class ComposePackagingTest(unittest.TestCase):
         ):
             module._authenticate(client)
 
-        self.assertEqual(client.csrf, "csrf-2")
+        self.assertEqual(client.csrf, "csrf-1")
         self.assertEqual(
             client.calls,
             [

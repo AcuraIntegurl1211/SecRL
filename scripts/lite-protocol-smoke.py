@@ -120,7 +120,7 @@ def _authenticate(client: "_Client") -> None:
     )
     client.csrf = str(login["csrf_token"])
     if login.get("password_change_required"):
-        changed = client.request(
+        client.request(
             "POST",
             "/api/v1/auth/password",
             {
@@ -128,7 +128,6 @@ def _authenticate(client: "_Client") -> None:
                 "new_password": _required("SECRL_TEST_ADMIN_PASSWORD"),
             },
         )
-        client.csrf = str(changed["csrf_token"])
 
 
 def _verify_protocol_analysis_boundary(client: "_Client", run_id: str):
