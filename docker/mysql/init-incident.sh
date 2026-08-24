@@ -1,6 +1,4 @@
 #!/bin/sh
-set -eu
-
 : "${MYSQL_ROOT_PASSWORD:?MYSQL_ROOT_PASSWORD is required}"
 : "${SECRL_MYSQL_PASSWORD:?SECRL_MYSQL_PASSWORD is required}"
 user="${SECRL_MYSQL_USER:-benchmark_ro}"

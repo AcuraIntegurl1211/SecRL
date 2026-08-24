@@ -56,6 +56,12 @@ class ComposePackagingTest(unittest.TestCase):
             'cap_add: ["CHOWN", "DAC_OVERRIDE", "SETGID", "SETUID"]', mysql
         )
 
+    def test_sourced_incident_init_does_not_mutate_entrypoint_shell_options(self):
+        init = (ROOT / "docker" / "mysql" / "init-incident.sh").read_text()
+
+        self.assertNotIn("set -u", init)
+        self.assertNotIn("set -eu", init)
+
     def test_agent_service_is_network_isolated_from_incidents(self):
         compose = (ROOT / "compose.yaml").read_text()
         agent_start = compose.index("\n  agent-service-reference:\n")
