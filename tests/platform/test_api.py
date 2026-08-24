@@ -9,7 +9,7 @@ import httpx
 from fastapi.testclient import TestClient
 
 from examples.agent_service.app import create_app as create_agent_service_app
-from secrl_platform.api.app import create_app
+from secrl_platform.api.app import _safe_exception_context, create_app
 from secrl_platform.agents.builtin import DeterministicSmokeAgent
 from secrl_platform.agents.builtin import builtin_manifest
 from secrl_platform.agents.protocol import UsageSnapshot
@@ -116,6 +116,17 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.text)
         self.csrf_token = response.json()["csrf_token"]
         return response
+
+    def test_internal_error_diagnostics_never_include_exception_message(self):
+        marker = "sk-never-log-this-value"
+        try:
+            raise RuntimeError(marker)
+        except RuntimeError as error:
+            context = _safe_exception_context(error)
+
+        self.assertEqual(context["exception_type"], "RuntimeError")
+        self.assertTrue(any("test_api.py:" in frame for frame in context["frames"]))
+        self.assertNotIn(marker, json.dumps(context))
 
     def test_secret_endpoint_requires_login(self):
         response = self.client.get("/api/v1/models")

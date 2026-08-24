@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+import traceback
 import uuid
 from collections.abc import Callable
 from contextlib import asynccontextmanager
@@ -27,6 +29,9 @@ from secrl_platform.config import (
 from secrl_platform.models.secrets import SecretStore
 from secrl_platform.storage.artifacts import LocalArtifactStore
 from secrl_platform.storage.database import create_engine_and_session
+
+
+logger = logging.getLogger("secrl_platform.api")
 
 
 def create_app(
@@ -103,7 +108,14 @@ def create_app(
         )
 
     @app.exception_handler(Exception)
-    async def internal_error_handler(request: Request, _error: Exception):
+    async def internal_error_handler(request: Request, error: Exception):
+        diagnostic = _safe_exception_context(error)
+        logger.error(
+            "Unhandled API error request_id=%s exception_type=%s frames=%s",
+            request.state.request_id,
+            diagnostic["exception_type"],
+            ">".join(diagnostic["frames"]),
+        )
         normalized = ApiError(500, "INTERNAL_ERROR", "Internal server error")
         return JSONResponse(
             status_code=normalized.status_code,
@@ -164,6 +176,17 @@ def create_app(
 
     app.openapi = custom_openapi
     return app
+
+
+def _safe_exception_context(error: Exception) -> dict[str, object]:
+    frames = traceback.extract_tb(error.__traceback__)[-12:]
+    return {
+        "exception_type": type(error).__name__,
+        "frames": tuple(
+            f"{Path(frame.filename).name}:{frame.lineno}:{frame.name}"
+            for frame in frames
+        ),
+    }
 
 
 def _context(
