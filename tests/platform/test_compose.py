@@ -126,6 +126,14 @@ class ComposePackagingTest(unittest.TestCase):
             self.assertLess(dependency_install, source_copy, relative)
             self.assertLess(source_copy, package_install, relative)
 
+    def test_installed_package_contains_frozen_secrl_dataset(self):
+        setup = (ROOT / "setup.py").read_text()
+
+        self.assertIn(
+            '"secgym": ["questions/o1/test/*.json"]',
+            setup,
+        )
+
     def test_every_platform_service_has_a_real_healthcheck(self):
         compose = (ROOT / "compose.yaml").read_text()
         for service, following in (
