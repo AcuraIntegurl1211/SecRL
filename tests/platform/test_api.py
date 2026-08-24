@@ -128,6 +128,11 @@ class ApiTest(unittest.TestCase):
         self.assertTrue(any("test_api.py:" in frame for frame in context["frames"]))
         self.assertNotIn(marker, json.dumps(context))
 
+    def test_alembic_does_not_disable_runtime_loggers(self):
+        env_source = (Path(__file__).resolve().parents[2] / "alembic" / "env.py").read_text()
+
+        self.assertIn("disable_existing_loggers=False", env_source)
+
     def test_secret_endpoint_requires_login(self):
         response = self.client.get("/api/v1/models")
 
