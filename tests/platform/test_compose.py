@@ -152,6 +152,14 @@ class ComposePackagingTest(unittest.TestCase):
         web_stage = dockerfile.split("FROM nginx:1.27.4-alpine AS web", 1)[1]
         self.assertIn("USER nginx", web_stage)
 
+    def test_multiarch_frontend_build_runs_on_build_platform(self):
+        dockerfile = (ROOT / "docker/lite/Dockerfile").read_text()
+
+        self.assertIn(
+            "FROM --platform=$BUILDPLATFORM node:22.14.0-alpine AS web-build",
+            dockerfile,
+        )
+
     def test_release_gate_workflow_covers_amd64_compose_and_multiarch(self):
         workflow = ROOT / ".github" / "workflows" / "secrl-lite-release-gate.yml"
         self.assertTrue(workflow.is_file())

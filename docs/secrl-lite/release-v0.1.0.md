@@ -98,8 +98,8 @@ research logs already present on `main` are not changed by this integration.
 
 ## Release preparation verification
 
-- Local Python 3.12 locked environment: 218 platform, eight E2E/parity, and 156
-  failure-analysis tests passed (382 total).
+- Local Python 3.12 locked environment: 219 platform, eight E2E/parity, and 156
+  failure-analysis tests passed (383 total).
 - Frontend: ESLint passed, Vitest passed 19 tests, TypeScript/Vite production
   build passed, and `npm audit --audit-level=low` found zero vulnerabilities.
 - Alembic upgraded an empty database to

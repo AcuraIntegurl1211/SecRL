@@ -1,4 +1,4 @@
-FROM node:22.14.0-alpine AS web-build
+FROM --platform=$BUILDPLATFORM node:22.14.0-alpine AS web-build
 WORKDIR /src/web
 COPY web/package.json web/package-lock.json ./
 RUN npm ci --ignore-scripts
