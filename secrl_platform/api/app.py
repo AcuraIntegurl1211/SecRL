@@ -79,7 +79,21 @@ def create_app(
     @app.middleware("http")
     async def request_id_middleware(request: Request, call_next):
         request.state.request_id = str(uuid.uuid4())
-        response = await call_next(request)
+        try:
+            response = await call_next(request)
+        except Exception as error:
+            diagnostic = _safe_exception_context(error)
+            logger.error(
+                "Unhandled API error request_id=%s exception_type=%s frames=%s",
+                request.state.request_id,
+                diagnostic["exception_type"],
+                ">".join(diagnostic["frames"]),
+            )
+            normalized = ApiError(500, "INTERNAL_ERROR", "Internal server error")
+            response = JSONResponse(
+                status_code=normalized.status_code,
+                content=error_payload(normalized, request.state.request_id),
+            )
         response.headers["X-Request-ID"] = request.state.request_id
         return response
 
@@ -102,21 +116,6 @@ def create_app(
     async def http_error_handler(request: Request, error: StarletteHTTPException):
         code = "NOT_FOUND" if error.status_code == 404 else "HTTP_ERROR"
         normalized = ApiError(error.status_code, code, "Request could not be completed")
-        return JSONResponse(
-            status_code=normalized.status_code,
-            content=error_payload(normalized, request.state.request_id),
-        )
-
-    @app.exception_handler(Exception)
-    async def internal_error_handler(request: Request, error: Exception):
-        diagnostic = _safe_exception_context(error)
-        logger.error(
-            "Unhandled API error request_id=%s exception_type=%s frames=%s",
-            request.state.request_id,
-            diagnostic["exception_type"],
-            ">".join(diagnostic["frames"]),
-        )
-        normalized = ApiError(500, "INTERNAL_ERROR", "Internal server error")
         return JSONResponse(
             status_code=normalized.status_code,
             content=error_payload(normalized, request.state.request_id),

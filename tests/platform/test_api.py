@@ -128,6 +128,21 @@ class ApiTest(unittest.TestCase):
         self.assertTrue(any("test_api.py:" in frame for frame in context["frames"]))
         self.assertNotIn(marker, json.dumps(context))
 
+    def test_internal_error_boundary_does_not_reraise_or_log_exception_message(self):
+        marker = "sk-never-log-this-value"
+
+        def fail_safely():
+            raise RuntimeError(marker)
+
+        self.app.add_api_route("/api/v1/test-internal-error", fail_safely)
+        with self.assertLogs("secrl_platform.api", level="ERROR") as captured:
+            response = self.client.get("/api/v1/test-internal-error")
+
+        self.assertEqual(response.status_code, 500)
+        self.assertEqual(response.json()["error"]["code"], "INTERNAL_ERROR")
+        self.assertNotIn(marker, response.text)
+        self.assertNotIn(marker, "\n".join(captured.output))
+
     def test_alembic_does_not_disable_runtime_loggers(self):
         env_source = (Path(__file__).resolve().parents[2] / "alembic" / "env.py").read_text()
 
