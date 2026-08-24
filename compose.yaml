@@ -28,6 +28,8 @@ x-mysql: &mysql
     timeout: 5s
     retries: 12
   cap_drop: ["ALL"]
+  networks:
+    - incident
   deploy:
     resources:
       limits:
@@ -52,6 +54,8 @@ services:
       retries: 12
       start_period: 10s
     restart: unless-stopped
+    networks:
+      - control
 
   api:
     build:
@@ -68,6 +72,8 @@ services:
       retries: 12
       start_period: 30s
     restart: unless-stopped
+    networks:
+      - control
 
   runner:
     build:
@@ -89,6 +95,9 @@ services:
       retries: 12
       start_period: 10s
     restart: unless-stopped
+    networks:
+      - control
+      - incident
 
   agent-service-reference:
     build:
@@ -104,6 +113,8 @@ services:
       timeout: 5s
       retries: 12
     restart: unless-stopped
+    networks:
+      - control
 
   smoke:
     image: curlimages/curl:8.12.1
@@ -113,6 +124,8 @@ services:
         condition: service_started
     entrypoint: ["/bin/sh", "-c"]
     command: ["curl --fail http://web:8080/api/v1/health"]
+    networks:
+      - control
 
   incident-34:
     <<: *mysql
@@ -174,3 +187,7 @@ volumes:
   incident_134_data:
   incident_166_data:
   incident_322_data:
+
+networks:
+  control:
+  incident:

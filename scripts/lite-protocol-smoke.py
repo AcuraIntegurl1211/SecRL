@@ -20,15 +20,7 @@ BASE_URL = os.environ.get("SECRL_GATE_BASE_URL", "http://127.0.0.1:8080").rstrip
 def main() -> int:
     client = _Client(BASE_URL)
     health = client.public_get("/api/v1/health")
-    login = client.request(
-        "POST",
-        "/api/v1/auth/login",
-        {
-            "username": _required("SECRL_INITIAL_ADMIN_USERNAME"),
-            "password": _required("SECRL_INITIAL_ADMIN_PASSWORD"),
-        },
-    )
-    client.csrf = str(login["csrf_token"])
+    _authenticate(client)
 
     model_configured = False
     model_api_key = os.environ.get("SECRL_TEST_MODEL_API_KEY")
@@ -114,6 +106,29 @@ def main() -> int:
         )
     )
     return 0
+
+
+def _authenticate(client: "_Client") -> None:
+    initial_password = _required("SECRL_INITIAL_ADMIN_PASSWORD")
+    login = client.request(
+        "POST",
+        "/api/v1/auth/login",
+        {
+            "username": _required("SECRL_INITIAL_ADMIN_USERNAME"),
+            "password": initial_password,
+        },
+    )
+    client.csrf = str(login["csrf_token"])
+    if login.get("password_change_required"):
+        changed = client.request(
+            "POST",
+            "/api/v1/auth/password",
+            {
+                "current_password": initial_password,
+                "new_password": _required("SECRL_TEST_ADMIN_PASSWORD"),
+            },
+        )
+        client.csrf = str(changed["csrf_token"])
 
 
 def _verify_protocol_analysis_boundary(client: "_Client", run_id: str):

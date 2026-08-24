@@ -50,6 +50,7 @@ jobs:
             printf 'SECRL_SESSION_SECRET=%s\n' "$(openssl rand -hex 32)"
             printf 'SECRL_INITIAL_ADMIN_USERNAME=ciadmin\n'
             printf 'SECRL_INITIAL_ADMIN_PASSWORD=%s\n' "$(openssl rand -hex 24)"
+            printf 'SECRL_TEST_ADMIN_PASSWORD=%s\n' "$(openssl rand -hex 24)"
             printf 'SECRL_AGENT_SERVICE_CAPABILITY_SECRET=%s\n' "$(openssl rand -hex 32)"
             printf 'SECRL_TEST_MODEL_API_KEY=%s\n' "$(openssl rand -hex 24)"
           } > .env.ci

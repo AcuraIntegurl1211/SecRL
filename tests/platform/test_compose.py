@@ -1,6 +1,7 @@
 from pathlib import Path
 import importlib.util
 import unittest
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -45,6 +46,26 @@ class ComposePackagingTest(unittest.TestCase):
         mysql = compose.split("services:", 1)[0]
         self.assertIn("resources:", mysql)
         self.assertIn("memory:", mysql)
+
+    def test_agent_service_is_network_isolated_from_incidents(self):
+        compose = (ROOT / "compose.yaml").read_text()
+        agent_start = compose.index("\n  agent-service-reference:\n")
+        agent_end = compose.index("\n  smoke:\n", agent_start)
+        agent = compose[agent_start:agent_end]
+        runner_start = compose.index("\n  runner:\n")
+        runner_end = compose.index("\n  agent-service-reference:\n", runner_start)
+        runner = compose[runner_start:runner_end]
+        incident_start = compose.index("\n  incident-34:\n")
+        incident_end = compose.index("\n  incident-38:\n", incident_start)
+        incident = compose[incident_start:incident_end]
+
+        self.assertIn("networks:\n      - control", agent)
+        self.assertNotIn("- incident", agent)
+        self.assertIn("networks:\n      - control\n      - incident", runner)
+        mysql = compose.split("services:", 1)[0]
+        self.assertIn("networks:\n    - incident", mysql)
+        self.assertIn("<<: *mysql", incident)
+        self.assertIn("\nnetworks:\n  control:\n  incident:\n", compose)
 
     def test_entrypoint_requires_secrets_and_forwards_shutdown(self):
         entrypoint = (ROOT / "docker/lite/entrypoint.sh").read_text()
@@ -129,6 +150,54 @@ class ComposePackagingTest(unittest.TestCase):
                 ("GET", "/api/v1/runs/run-1/analysis"),
                 ("GET", "/api/v1/runs/run-1/attributions"),
                 ("GET", "/api/v1/runs/run-1/audit"),
+            ],
+        )
+
+    def test_protocol_smoke_rotates_bootstrap_password_before_api_calls(self):
+        module = _load_release_gate_module()
+
+        class Client:
+            def __init__(self):
+                self.csrf = None
+                self.calls = []
+
+            def request(self, method, path, payload=None, headers=None):
+                self.calls.append((method, path, payload))
+                if path == "/api/v1/auth/login":
+                    return {"csrf_token": "csrf-1", "password_change_required": True}
+                if path == "/api/v1/auth/password":
+                    return {"csrf_token": "csrf-2", "password_change_required": False}
+                raise AssertionError(path)
+
+        client = Client()
+        with mock.patch.dict(
+            "os.environ",
+            {
+                "SECRL_INITIAL_ADMIN_USERNAME": "admin",
+                "SECRL_INITIAL_ADMIN_PASSWORD": "bootstrap-password",
+                "SECRL_TEST_ADMIN_PASSWORD": "rotated-password",
+            },
+            clear=False,
+        ):
+            module._authenticate(client)
+
+        self.assertEqual(client.csrf, "csrf-2")
+        self.assertEqual(
+            client.calls,
+            [
+                (
+                    "POST",
+                    "/api/v1/auth/login",
+                    {"username": "admin", "password": "bootstrap-password"},
+                ),
+                (
+                    "POST",
+                    "/api/v1/auth/password",
+                    {
+                        "current_password": "bootstrap-password",
+                        "new_password": "rotated-password",
+                    },
+                ),
             ],
         )
 
