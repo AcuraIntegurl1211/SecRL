@@ -232,6 +232,58 @@ class ComposePackagingTest(unittest.TestCase):
             ],
         )
 
+    def test_release_gate_freezes_all_twelve_public_protocol_cases(self):
+        module = _load_release_gate_module()
+
+        class Client:
+            def request(self, method, path, payload=None, headers=None):
+                self.call = (method, path)
+                return {
+                    "total": 12,
+                    "items": [{"id": f"smoke-{index:03d}"} for index in range(1, 13)],
+                }
+
+        client = Client()
+        case_ids = module._protocol_case_ids(client)
+
+        self.assertEqual(client.call, ("GET", "/api/v1/benchmarks/protocol-smoke/cases?limit=100"))
+        self.assertEqual(case_ids, tuple(f"smoke-{index:03d}" for index in range(1, 13)))
+
+    def test_release_gate_hashes_only_semantic_case_trajectory(self):
+        module = _load_release_gate_module()
+
+        class Client:
+            def request(self, method, path, payload=None, headers=None):
+                step = int(path.rsplit("=", 1)[1])
+                return {
+                    "case_id": "smoke-001",
+                    "attempt_id": "runtime-specific",
+                    "artifact_sha256": "runtime-specific",
+                    "step": step,
+                    "total_steps": 2,
+                    "exchange": {"sequence": step + 1, "action": {"type": "yield"}},
+                }
+
+        expected = module.hashlib.sha256(
+            module._canonical_json(
+                [
+                    {
+                        "case_id": "smoke-001",
+                        "exchange": {"sequence": 1, "action": {"type": "yield"}},
+                    },
+                    {
+                        "case_id": "smoke-001",
+                        "exchange": {"sequence": 2, "action": {"type": "yield"}},
+                    },
+                ]
+            ).encode()
+        ).hexdigest()
+
+        self.assertEqual(
+            module._semantic_trajectory_sha256(Client(), "run-specific", ("smoke-001",)),
+            expected,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
