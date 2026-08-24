@@ -75,6 +75,7 @@ services:
     restart: unless-stopped
     networks:
       - control
+      - egress
 
   runner:
     build:
@@ -99,6 +100,7 @@ services:
     networks:
       - control
       - incident
+      - egress
 
   agent-service-reference:
     build:
@@ -191,4 +193,6 @@ volumes:
 
 networks:
   control:
+    internal: true
   incident:
+  egress:

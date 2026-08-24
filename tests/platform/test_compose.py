@@ -76,11 +76,20 @@ class ComposePackagingTest(unittest.TestCase):
 
         self.assertIn("networks:\n      - control", agent)
         self.assertNotIn("- incident", agent)
-        self.assertIn("networks:\n      - control\n      - incident", runner)
+        self.assertIn(
+            "networks:\n      - control\n      - incident\n      - egress", runner
+        )
         mysql = compose.split("services:", 1)[0]
         self.assertIn("networks:\n    - incident", mysql)
         self.assertIn("<<: *mysql", incident)
-        self.assertIn("\nnetworks:\n  control:\n  incident:\n", compose)
+        self.assertIn("networks:\n  control:\n    internal: true", compose)
+        self.assertIn("\n  egress:\n", compose)
+
+        api_start = compose.index("\n  api:\n")
+        api_end = compose.index("\n  runner:\n", api_start)
+        api = compose[api_start:api_end]
+        self.assertIn("networks:\n      - control\n      - egress", api)
+        self.assertNotIn("- egress", agent)
 
     def test_entrypoint_requires_secrets_and_forwards_shutdown(self):
         entrypoint = (ROOT / "docker/lite/entrypoint.sh").read_text()
