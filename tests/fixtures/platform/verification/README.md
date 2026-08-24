@@ -16,5 +16,7 @@ npm --prefix web test
 npm --prefix web run build
 ```
 
-Docker/Playwright evidence is recorded in the handoff report when those tools
-are available on the host.
+Sanitized Docker, Playwright, architecture, backup, and test evidence for the
+Milestone 4 gate is recorded in
+[`2026-08-24-release-gate.md`](2026-08-24-release-gate.md). Screenshot binaries
+remain outside Git and are referenced only by their handoff location.
