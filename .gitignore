@@ -300,6 +300,11 @@ FakesAssemblies/
 # Node.js Tools for Visual Studio
 .ntvs_analysis.dat
 node_modules/
+web/dist/
+web/*.tsbuildinfo
+web/vite.config.js
+web/vite.config.d.ts
+output/playwright/
 
 # Visual Studio 6 build log
 *.plg
@@ -419,6 +424,7 @@ __pycache__
 CONFIG_LIST
 *.yml
 *.yaml
+!.github/workflows/*.yml
 *.db
 tables/
 *.egg-info/

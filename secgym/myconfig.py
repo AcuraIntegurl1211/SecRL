@@ -1,6 +1,8 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
+import os
+
 from azure.identity import get_bearer_token_provider, AzureCliCredential
 from azure.ai.inference import ChatCompletionsClient
 from azure.core.credentials import AzureKeyCredential
@@ -25,24 +27,38 @@ from azure.core.credentials import AzureKeyCredential
 # Similarly in run_exp.py, if you set --model gpt-4o, the config_list for the agent will be only the first dictionary in the config_list
 
 
-CONFIG_LIST = [
-    # exmaple using openai
-    #   {
-    #     "model": "gpt-4.1",
-    #     "api_key": open("/Users/kevin/Downloads/SecRL/keys/openaikey").read().strip(),
-    #     "tags": ["gpt-4.1"],
-    # }
-  
-  # example of using azure openai
-  # {
-  #   "model": "gpt-4.1-nano",
-  #   "base_url": "https://secphibench-aoai-eastus.openai.azure.com",
-  #   "api_type": "azure",
-  #   "api_version": "2025-01-01-preview",
-  #   "tags": ["gpt-4.1-nano"],
-  #   "azure_ad_token_provider": token_provider
-  # },
-]
+_DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY")
 
-if len(CONFIG_LIST) == 0:
-    print("Potential Error: No config set in CONFIG_LIST, please add your config list to the CONFIG_LIST variable in secgym/myconfig.py")
+_COMMON_DEEPSEEK_CONFIG = {
+    "api_key": _DEEPSEEK_API_KEY,
+    "base_url": "https://api.deepseek.com",
+    "max_retries": 0,
+    "extra_body": {
+        "thinking": {
+            "type": "disabled",
+        }
+    },
+}
+
+CONFIG_LIST = []
+
+if _DEEPSEEK_API_KEY:
+    CONFIG_LIST = [
+        {
+            **_COMMON_DEEPSEEK_CONFIG,
+            "model": "deepseek-v4-pro",
+            "tags": ["deepseek-v4-pro"],
+            "timeout": 120.0,
+        },
+        {
+            **_COMMON_DEEPSEEK_CONFIG,
+            "model": "deepseek-v4-flash",
+            "tags": ["deepseek-v4-flash"],
+            "timeout": 60.0,
+        },
+    ]
+else:
+    print(
+        "Potential Error: DEEPSEEK_API_KEY is not set; "
+        "CONFIG_LIST will remain empty."
+    )

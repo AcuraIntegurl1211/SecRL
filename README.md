@@ -1,5 +1,18 @@
 # ExCyTIn-Bench: Evaluating LLM agents on Cyber Threat Investigation
 
+## SecRL Lite platform
+
+The local-first management platform is documented in
+[`docs/secrl-lite/installation.md`](docs/secrl-lite/installation.md). It uses
+SQLite WAL, content-addressed artifacts, one Runner process and an explicit
+Compose profile for each Incident. Start with `cp .env.example .env`, fill
+only local runtime secrets, and use `docker compose up -d`; the default Web
+binding is `127.0.0.1:8080`.
+
+See the [SecRL Lite v0.1.0 release notes](docs/secrl-lite/release-v0.1.0.md)
+for supported architectures, release gates, security boundaries, and upgrade
+guidance.
+
 [![Paper](https://img.shields.io/badge/paper-A42C25?style=for-the-badge&logo=arxiv&logoColor=white)](https://arxiv.org/abs/2507.14201) 
 [![Hugging Face](https://img.shields.io/badge/Dataset-orange?style=for-the-badge&logo=huggingface&logoColor=white)](https://huggingface.co/datasets/anandmudgerikar/excytin-bench)
 [![Blog](https://img.shields.io/badge/Blog-5C2D91?style=for-the-badge&logo=rss&logoColor=white)](https://www.microsoft.com/en-us/security/blog/2025/10/14/microsoft-raises-the-bar-a-smarter-way-to-measure-ai-for-cybersecurity/)

@@ -205,9 +205,29 @@ class ExcytinEnv(gym.Env):
         }
     
     def save_logging(self):
-        if self.save_file:
+        if getattr(self, "save_file", False):
             with open(self.save_file, "w") as f:
                 json.dump(self.all_logs, f, indent=4)
+
+    def flush_logging(self):
+        """Persist the current trajectory exactly once."""
+        if len(self.curr_trajectory) == 0:
+            return False
+
+        current_log = self.get_logging()
+        self.all_logs.append(current_log)
+
+        try:
+            self.save_logging()
+        except Exception:
+            # Roll back the in-memory append so retrying will not
+            # produce a duplicate entry.
+            self.all_logs.pop()
+            raise
+
+        # Prevent a later reset() from saving the same trajectory again.
+        self.curr_trajectory = []
+        return True
 
 
     def execute_query(self, query: str) -> Tuple[np.ndarray, bool]:

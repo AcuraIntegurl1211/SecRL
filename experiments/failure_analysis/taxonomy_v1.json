@@ -1,0 +1,110 @@
+{
+  "taxonomy_version": "taxonomy_v1",
+  "categories": [
+    "DATA",
+    "SQL_EXEC",
+    "SQL_RETRIEVAL",
+    "NAVIGATION",
+    "LOOP",
+    "STEP_LIMIT",
+    "REASONING",
+    "ANSWER",
+    "EVALUATOR",
+    "GOLD",
+    "INFRA",
+    "UNKNOWN"
+  ],
+  "definitions": {
+    "DATA": "Missing or incomplete data, empty required tables, or unavailable layer evidence.",
+    "SQL_EXEC": "SQL syntax, table, column, or database execution failure.",
+    "SQL_RETRIEVAL": "Executable SQL using the wrong table, join, filter, identifier, or time condition.",
+    "NAVIGATION": "Incorrect incident or alert starting point, entity selection, or investigation path.",
+    "LOOP": "Repeated equivalent queries without progress from observations.",
+    "STEP_LIMIT": "Incomplete investigation or answer at the configured maximum step count.",
+    "REASONING": "Evidence obtained but timeline, entity relation, or multi-step reasoning is incorrect.",
+    "ANSWER": "Correct evidence obtained but the final answer is incomplete, overbroad, malformed, or contains a wrong entity.",
+    "EVALUATOR": "Submitted and golden answers are materially equivalent but evaluation appears incorrect.",
+    "GOLD": "Question, context, golden answer, solution, or database evidence appears inconsistent.",
+    "INFRA": "API, parser, submission, logging, mapping, duplication, or execution infrastructure failure.",
+    "UNKNOWN": "Available evidence is insufficient for a reliable cause."
+  },
+  "always_human_review": ["EVALUATOR", "GOLD", "UNKNOWN"],
+  "loop_and_step_limit_normally_secondary": true,
+  "review_sampling": {
+    "seed": 20260720,
+    "fraction_per_other_primary_category": 0.1,
+    "minimum_per_nonempty_category": 1
+  },
+  "calibration": [
+    {
+      "incident": "incident_5",
+      "question_index": 13,
+      "question_fingerprint_sha256": "f013d6956c8913bde432da326917825d89c1e171178860d9234935afa1fa3641",
+      "expected_primary": null,
+      "review_status": "confirmed"
+    },
+    {
+      "incident": "incident_5",
+      "question_index": 5,
+      "question_fingerprint_sha256": "428dd97f0387344e9772c82c1c250b31349d963acc62383525f2ef4249a228ff",
+      "expected_primary": null,
+      "review_status": "confirmed"
+    },
+    {
+      "incident": "incident_5",
+      "question_index": 26,
+      "question_fingerprint_sha256": "ce13a820fdc04738aa3cea8b34c57cb7c512eeddbde39b7e3baa8debad1410cd",
+      "expected_primary": null,
+      "review_status": "confirmed"
+    },
+    {
+      "incident": "incident_5",
+      "question_index": 10,
+      "question_fingerprint_sha256": "c625cb32197d9e5b136c67bef9324a1eecd18f52661121580cb0177ca7addc2b",
+      "expected_primary": "NAVIGATION",
+      "review_status": "confirmed"
+    },
+    {
+      "incident": "incident_5",
+      "question_index": 34,
+      "question_fingerprint_sha256": "22c76729415a21377e7ecdd930ad9f19d9adf82f95d83d26075698a6e2d2bda1",
+      "expected_primary": "NAVIGATION",
+      "review_status": "confirmed"
+    },
+    {
+      "incident": "incident_5",
+      "question_index": 55,
+      "question_fingerprint_sha256": "a7e0ef2b978187a4e279d09987e5a05ff924d4edfed723fab5133f763e6e41a5",
+      "expected_primary": "GOLD",
+      "review_status": "human_review_required"
+    },
+    {
+      "incident": "incident_5",
+      "question_index": 79,
+      "question_fingerprint_sha256": "15c2e6b291ad2d8f6b5e99b9576667de284a1743bb607536f763f3abe43258f8",
+      "expected_primary": "GOLD",
+      "review_status": "human_review_required"
+    },
+    {
+      "incident": "incident_5",
+      "question_index": 23,
+      "question_fingerprint_sha256": "6ed33dc5f7f4691e9eb45a4729ebecf11c65345e701296b6100ddf886d3b12ea",
+      "expected_primary": "NAVIGATION",
+      "review_status": "confirmed"
+    },
+    {
+      "incident": "incident_5",
+      "question_index": 65,
+      "question_fingerprint_sha256": "816da8a6b0bfa76ccb693433c4a1965d2d5736b9ed20c3087265eee730ebaa4a",
+      "expected_primary": "GOLD",
+      "review_status": "human_review_required"
+    },
+    {
+      "incident": "incident_5",
+      "question_index": 80,
+      "question_fingerprint_sha256": "9c18a3c122464e3c0b58c5b3109082161c93c9b3cd5e3e723947c35e2561cd3f",
+      "expected_primary": "NAVIGATION",
+      "review_status": "confirmed"
+    }
+  ]
+}

@@ -17,13 +17,18 @@ def parse_requirements(filename):
 
 setup(
     name="secgym",
-    version="0.1",
+    version="0.1.0",
     packages=find_packages(),
     include_package_data=True,
+    package_data={
+        "secgym": ["questions/o1/test/*.json"],
+        "secrl_platform.benchmarks": ["data/*.json"],
+    },
     description="A benchmark for security question answering",
     install_requires=parse_requirements("requirements.txt"),
     entry_points={
         "console_scripts": [
+            "secrl-lite=secrl_platform.cli:main",
         ],
     },
     python_requires=">=3.7",

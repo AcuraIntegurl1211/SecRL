@@ -1,0 +1,53 @@
+{
+  "version": "sql_retrieval_taxonomy_v1",
+  "primary_subtypes": [
+    "SOURCE_SELECTION",
+    "ENTITY_RESOLUTION",
+    "TEMPORAL_SCOPE",
+    "PREDICATE_FILTER",
+    "RELATIONAL_PATH",
+    "PROJECTION",
+    "AGGREGATION_RANKING",
+    "SEARCH_COVERAGE",
+    "RESULT_SELECTION",
+    "INDETERMINATE"
+  ],
+  "auxiliary_tags": [
+    "EMPTY_RESULT",
+    "PARTIAL_EVIDENCE",
+    "NOISY_RESULT",
+    "WRONG_TABLE",
+    "WRONG_COLUMN",
+    "WRONG_ENTITY",
+    "WRONG_TIME",
+    "OVER_FILTER",
+    "UNDER_FILTER",
+    "MISSING_JOIN",
+    "WRONG_JOIN",
+    "MISSING_ORDER",
+    "WRONG_ORDER",
+    "WRONG_LIMIT",
+    "REPEATED_QUERY",
+    "NO_ADAPTATION",
+    "STEP_LIMIT",
+    "SQL_ERROR_PRESENT",
+    "GOLD_IN_RESULT",
+    "GOLD_NOT_IN_RESULT"
+  ],
+  "outcomes": [
+    "EMPTY",
+    "PARTIAL",
+    "NOISY",
+    "WRONG_ROW",
+    "MIXED",
+    "UNOBSERVED"
+  ],
+  "boundary_flags": [
+    "NONE",
+    "SQL_EXEC_POSSIBLE",
+    "REASONING_POSSIBLE",
+    "DATA_GOLD_POSSIBLE"
+  ],
+  "confidence": ["high", "medium", "low", "indeterminate"],
+  "decision_statuses": ["reviewed", "needs_review"]
+}
