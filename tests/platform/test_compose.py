@@ -47,6 +47,13 @@ class ComposePackagingTest(unittest.TestCase):
         self.assertIn("resources:", mysql)
         self.assertIn("memory:", mysql)
 
+    def test_incident_mysql_retains_only_bootstrap_capabilities(self):
+        compose = (ROOT / "compose.yaml").read_text()
+        mysql = compose.split("services:", 1)[0]
+
+        self.assertIn('cap_drop: ["ALL"]', mysql)
+        self.assertIn('cap_add: ["CHOWN", "SETGID", "SETUID"]', mysql)
+
     def test_agent_service_is_network_isolated_from_incidents(self):
         compose = (ROOT / "compose.yaml").read_text()
         agent_start = compose.index("\n  agent-service-reference:\n")
