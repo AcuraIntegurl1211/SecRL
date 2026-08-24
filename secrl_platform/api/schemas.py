@@ -21,12 +21,26 @@ class TaskCreateRequest(ApiModel):
     benchmark_id: str
     agent_revision_id: str
     model_config_revision_id: str | None = None
-    case_ids: tuple[str, ...] = Field(min_length=1)
+    case_ids: tuple[str, ...] = Field(default_factory=tuple, max_length=589)
+    incident_ids: tuple[str, ...] = Field(default_factory=tuple, max_length=8)
+    all_cases: bool = False
     budget: BudgetSpec = Field(default_factory=BudgetSpec)
     max_steps: int = Field(default=32, ge=1, le=10_000)
     max_str_len: int = Field(default=100_000, ge=1, le=10_000_000)
     max_entry_return: int = Field(default=15, ge=1, le=1_000_000)
     agent_parameters: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_selection(self) -> "TaskCreateRequest":
+        if len(self.case_ids) != len(set(self.case_ids)):
+            raise ValueError("case_ids must not contain duplicates")
+        if len(self.incident_ids) != len(set(self.incident_ids)):
+            raise ValueError("incident_ids must not contain duplicates")
+        if self.all_cases and (self.case_ids or self.incident_ids):
+            raise ValueError("all_cases cannot be combined with case_ids or incident_ids")
+        if not self.all_cases and not self.case_ids and not self.incident_ids:
+            raise ValueError("select at least one Case, Incident, or the full Benchmark")
+        return self
 
 
 class TaskCreateResponse(ApiModel):

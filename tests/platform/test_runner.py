@@ -13,6 +13,7 @@ from secrl_platform.agents.capabilities import (
 from secrl_platform.agents.protocol import UsageSnapshot
 from secrl_platform.agents.service import AgentServiceError, InvalidAgentAction
 from secrl_platform.benchmarks.smoke import ProtocolSmokeAdapter
+from secrl_platform.benchmarks.secrl import SecRLAdapter
 from secrl_platform.models.gateway import ModelGateway, _conservative_input_token_bound
 from secrl_platform.models.pricing import Pricing
 from secrl_platform.models.providers import (
@@ -190,6 +191,41 @@ class RunnerEngineTest(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(repo.final_result_count(handle.task_id), 3)
 
+    def test_run_freezes_cases_from_multiple_incidents_without_duplicates(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            adapter = SecRLAdapter()
+            all_cases = adapter.enumerate_cases(adapter.dataset_ref(), adapter.scope_all())
+            selected = (all_cases[0].id, all_cases[-1].id)
+            repo = RunnerRepository(
+                create_engine_and_session(root / "platform.sqlite3", create=True)
+            )
+            handle = repo.create_benchmark_run(
+                name="multi-incident",
+                adapter=adapter,
+                agent_revision=DeterministicSmokeAgent.revision(),
+                case_ids=selected,
+            )
+
+            stored = repo.cases(handle.task_id, handle.run_id)
+
+            self.assertEqual([case.external_id for case in stored], list(selected))
+            self.assertEqual(len({case.ordinal for case in stored}), 2)
+
+    def test_run_rejects_duplicate_selected_cases(self):
+        with tempfile.TemporaryDirectory() as directory:
+            adapter = ProtocolSmokeAdapter.load_default()
+            repo = RunnerRepository(
+                create_engine_and_session(Path(directory) / "platform.sqlite3", create=True)
+            )
+            with self.assertRaisesRegex(ValueError, "duplicate"):
+                repo.create_protocol_smoke_run(
+                    name="duplicate",
+                    adapter=adapter,
+                    agent_revision=DeterministicSmokeAgent.revision(),
+                    case_ids=("smoke-001", "smoke-001"),
+                )
+
     async def test_case_and_token_budgets_commit_current_evidence_then_stop(self):
         for budget, runtime_factory in (({"max_cases": 1}, DeterministicSmokeAgent),):
             with self.subTest(budget=budget):
@@ -209,6 +245,29 @@ class RunnerEngineTest(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(status, "BUDGET_EXHAUSTED")
                     self.assertEqual(repo.final_result_count(handle.task_id), 1)
                     self.assertEqual(repo.checkpoint(handle.task_id, handle.run_id), 1)
+
+    async def test_max_cases_equal_to_or_above_selected_cases_succeeds(self):
+        for case_ids, max_cases in (
+            (("smoke-001",), 1),
+            (("smoke-001", "smoke-002"), 2),
+            (("smoke-001", "smoke-002"), 3),
+        ):
+            with self.subTest(case_ids=case_ids, max_cases=max_cases):
+                with tempfile.TemporaryDirectory() as directory:
+                    adapter, repo, handle, store = self.create_harness(
+                        Path(directory),
+                        budget={"max_cases": max_cases},
+                        case_ids=case_ids,
+                    )
+                    status = await RunnerEngine(
+                        repository=repo,
+                        artifact_store=store,
+                        adapter=adapter,
+                        runtime_factory=DeterministicSmokeAgent,
+                    ).run(handle.task_id, handle.run_id)
+
+                    self.assertEqual(status, "SUCCEEDED")
+                    self.assertEqual(repo.final_result_count(handle.task_id), len(case_ids))
 
     async def test_hard_budget_exhaustion_wins_over_pause_request(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -415,7 +474,12 @@ class RunnerEngineTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(calls, 1)
             self.assertEqual(
                 repo.attempt_errors(handle.task_id),
-                ({"code": "TIMEOUT", "retryable": False},),
+                ({
+                    "code": "TIMEOUT",
+                    "retryable": False,
+                    "safe_to_retry": False,
+                    "usage_may_have_occurred": True,
+                },),
             )
 
     async def test_permanent_agent_action_error_fails_without_retry(self):

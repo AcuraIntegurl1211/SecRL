@@ -6,7 +6,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 DEFAULT_AGENT_SERVICE_ALLOWLIST = ("agent-service-reference",)
-DEFAULT_MODEL_PROVIDER_ALLOWLIST = ("api.openai.com",)
+DEFAULT_MODEL_PROVIDER_ALLOWLIST = ("api.openai.com", "api.deepseek.com")
 
 
 class Settings(BaseSettings):

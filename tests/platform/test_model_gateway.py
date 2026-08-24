@@ -109,6 +109,7 @@ class ModelGatewayTest(unittest.IsolatedAsyncioTestCase):
         result = await gateway.complete(model_request())
 
         self.assertEqual(provider.calls, 2)
+        self.assertTrue(ProviderError("RATE_LIMITED").safe_to_retry)
         self.assertEqual(result.usage.total, 12)
         self.assertEqual(result.estimated_cost, Decimal("0.000014"))
         self.assertEqual(
@@ -306,6 +307,62 @@ class OpenAICompatibleProviderTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.usage.reasoning, 1)
         self.assertEqual(seen_authorization, ["Bearer test-provider-key"])
 
+    async def test_accepts_reasoning_content_when_compatible_provider_omits_content(self):
+        transport = httpx.MockTransport(
+            lambda _request: httpx.Response(
+                200,
+                headers={"content-type": "application/json"},
+                json={
+                    "id": "response-reasoning-only",
+                    "choices": [{
+                        "finish_reason": "stop",
+                        "message": {"content": None, "reasoning_content": "Action: SELECT 1"},
+                    }],
+                    "usage": {"prompt_tokens": 3, "completion_tokens": 2},
+                },
+            )
+        )
+        async with httpx.AsyncClient(transport=transport) as client:
+            provider = OpenAICompatibleProvider(
+                base_url="https://api.deepseek.com",
+                api_key="test-provider-key",
+                client=client,
+                allowed_hosts=("api.deepseek.com",),
+                resolver=public_resolver,
+            )
+            response = await provider.complete(model_request())
+
+        self.assertEqual(response.text, "Action: SELECT 1")
+        self.assertEqual(response.provider_request_id, "response-reasoning-only")
+
+    async def test_invalid_usage_is_reported_without_echoing_response_body(self):
+        marker = "do-not-log-provider-answer"
+        transport = httpx.MockTransport(
+            lambda _request: httpx.Response(
+                200,
+                json={
+                    "choices": [{"message": {"content": marker}}],
+                    "usage": {"prompt_tokens": "not-an-integer", "completion_tokens": 1},
+                },
+            )
+        )
+        async with httpx.AsyncClient(transport=transport) as client:
+            provider = OpenAICompatibleProvider(
+                base_url="https://provider.invalid/v1",
+                api_key="test-provider-key",
+                client=client,
+                allowed_hosts=("provider.invalid",),
+                resolver=public_resolver,
+            )
+            with self.assertLogs("secrl_platform.models.providers", level="WARNING") as captured:
+                with self.assertRaises(ProviderError) as raised:
+                    await provider.complete(model_request())
+
+        self.assertEqual(raised.exception.code, "INVALID_PROVIDER_RESPONSE")
+        self.assertTrue(raised.exception.usage_may_have_occurred)
+        self.assertNotIn(marker, "\n".join(captured.output))
+        self.assertNotIn("test-provider-key", "\n".join(captured.output))
+
     async def test_invalid_success_response_is_treated_as_ambiguous_usage(self):
         transport = httpx.MockTransport(
             lambda _request: httpx.Response(200, json={"choices": []})
@@ -323,6 +380,30 @@ class OpenAICompatibleProviderTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(raised.exception.code, "INVALID_PROVIDER_RESPONSE")
         self.assertTrue(raised.exception.usage_may_have_occurred)
+        self.assertFalse(raised.exception.safe_to_retry)
+
+    async def test_malformed_json_and_empty_content_are_ambiguous_provider_failures(self):
+        responses = (
+            httpx.Response(200, headers={"content-type": "application/json"}, content=b"not-json"),
+            httpx.Response(200, json={"choices": [{"message": {"content": ""}}]}),
+            httpx.Response(200, json={"choices": [{"finish_reason": 7, "message": {"content": "answer"}}]}),
+        )
+        for response in responses:
+            with self.subTest(response=response):
+                transport = httpx.MockTransport(lambda _request, response=response: response)
+                async with httpx.AsyncClient(transport=transport) as client:
+                    provider = OpenAICompatibleProvider(
+                        base_url="https://provider.invalid/v1",
+                        api_key="test-provider-key",
+                        client=client,
+                        allowed_hosts=("provider.invalid",),
+                        resolver=public_resolver,
+                    )
+                    with self.assertRaises(ProviderError) as raised:
+                        await provider.complete(model_request())
+                self.assertEqual(raised.exception.code, "INVALID_PROVIDER_RESPONSE")
+                self.assertTrue(raised.exception.usage_may_have_occurred)
+                self.assertFalse(raised.exception.safe_to_retry)
 
     async def test_classifies_permanent_and_transient_statuses(self):
         statuses = [

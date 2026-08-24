@@ -323,6 +323,46 @@ class SecRLAdapter:
     def scope_all() -> Scope:
         return Scope.all()
 
+    def incident_case_ids(self, incident_id: str) -> tuple[str, ...]:
+        if incident_id not in SECRL_EXPECTED_SCENARIO_COUNTS:
+            raise ValueError(f"unknown SecRL Incident: {incident_id}")
+        return tuple(
+            case.case_id
+            for case in self._cases.values()
+            if case.scenario_id == incident_id
+        )
+
+    def incident_counts(self) -> dict[str, int]:
+        return dict(SECRL_EXPECTED_SCENARIO_COUNTS)
+
+    def resolve_case_ids(
+        self,
+        *,
+        case_ids: tuple[str, ...] = (),
+        incident_ids: tuple[str, ...] = (),
+        all_cases: bool = False,
+    ) -> tuple[str, ...]:
+        if all_cases and (case_ids or incident_ids):
+            raise ValueError("all benchmark selection cannot be combined with case or Incident selection")
+        if all_cases:
+            return self._case_order
+        selected: list[str] = []
+        seen: set[str] = set()
+        for incident_id in incident_ids:
+            for case_id in self.incident_case_ids(incident_id):
+                if case_id not in seen:
+                    seen.add(case_id)
+                    selected.append(case_id)
+        for case_id in case_ids:
+            if case_id not in self._cases:
+                raise ValueError(f"unknown SecRL Case: {case_id}")
+            if case_id not in seen:
+                seen.add(case_id)
+                selected.append(case_id)
+        if not selected:
+            raise ValueError("at least one Case, Incident, or the full Benchmark must be selected")
+        return tuple(selected)
+
     def validate_dataset(self, source: Path) -> SecRLValidationReport:
         try:
             cases, digest = self._load(Path(source))

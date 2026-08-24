@@ -82,7 +82,24 @@ export type AgentSummary = {
 
 export type BenchmarkSummary = {
   manifest: Record<string, unknown>;
-  dataset: Record<string, unknown>;
+  dataset: Record<string, unknown> & {
+    case_count?: number;
+    incidents?: Record<string, number>;
+  };
+};
+
+export type PreflightCheck = {
+  name: string;
+  status: "ready" | "missing" | "not_applicable";
+  message: string;
+  code?: string;
+  secret_status?: "configured" | "missing";
+};
+
+export type PreflightResponse = {
+  ready: boolean;
+  benchmark_id: string;
+  checks: PreflightCheck[];
 };
 
 export type TaskSummary = {

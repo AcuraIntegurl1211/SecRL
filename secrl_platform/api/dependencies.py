@@ -32,6 +32,8 @@ class ApiContext:
     agent_service_resolver: Callable[[str, int], object] | None
     secret_store: SecretStore | None
     secrl_runtime_enabled: bool
+    secrl_environment_probe: Callable[[], bool] | None = None
+    runner_configured: bool = False
 
 
 def get_context(request: Request) -> ApiContext:

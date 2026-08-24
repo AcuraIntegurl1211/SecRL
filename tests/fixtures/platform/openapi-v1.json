@@ -375,6 +375,11 @@
             "title": "Agent Revision Id",
             "type": "string"
           },
+          "all_cases": {
+            "default": false,
+            "title": "All Cases",
+            "type": "boolean"
+          },
           "benchmark_id": {
             "title": "Benchmark Id",
             "type": "string"
@@ -386,8 +391,16 @@
             "items": {
               "type": "string"
             },
-            "minItems": 1,
+            "maxItems": 589,
             "title": "Case Ids",
+            "type": "array"
+          },
+          "incident_ids": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 8,
+            "title": "Incident Ids",
             "type": "array"
           },
           "max_entry_return": {
@@ -432,8 +445,7 @@
         "required": [
           "name",
           "benchmark_id",
-          "agent_revision_id",
-          "case_ids"
+          "agent_revision_id"
         ],
         "title": "TaskCreateRequest",
         "type": "object"
@@ -1064,6 +1076,87 @@
         "summary": "Create Model",
         "tags": [
           "models"
+        ]
+      }
+    },
+    "/api/v1/preflight": {
+      "get": {
+        "operationId": "preflight_api_v1_preflight_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "benchmark_id",
+            "required": false,
+            "schema": {
+              "default": "secrl",
+              "maxLength": 64,
+              "minLength": 1,
+              "title": "Benchmark Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "model_config_revision_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 128,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Model Config Revision Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "agent_revision_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 128,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Agent Revision Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Preflight Api V1 Preflight Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Preflight",
+        "tags": [
+          "preflight"
         ]
       }
     },

@@ -1,7 +1,12 @@
 from pathlib import Path
 import importlib.util
+import os
+import subprocess
+import sys
+import tempfile
 import unittest
 from unittest import mock
+from zipfile import ZipFile
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -133,6 +138,53 @@ class ComposePackagingTest(unittest.TestCase):
             '"secgym": ["questions/o1/test/*.json"]',
             setup,
         )
+
+    def test_built_wheel_imports_builtin_agents_with_runtime_assets(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            dist = root / "dist"
+            install = root / "install"
+            dist.mkdir()
+            install.mkdir()
+            subprocess.run(
+                [sys.executable, "-m", "pip", "wheel", str(ROOT), "--no-deps", "--no-build-isolation", "-w", str(dist)],
+                check=True,
+                cwd=ROOT,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
+            wheel = next(dist.glob("*.whl"))
+            with ZipFile(wheel) as archive:
+                names = set(archive.namelist())
+            self.assertTrue(
+                any(name.startswith("secgym/agents/react_examples/") and name.endswith(".txt") for name in names)
+            )
+            self.assertIn("secgym/agents/expel_train/insights.json", names)
+            self.assertIn("secgym/agents/expel_train/corrects.jsonl", names)
+            subprocess.run(
+                [sys.executable, "-m", "pip", "install", "--no-deps", "--target", str(install), str(wheel)],
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
+            env = {key: value for key, value in os.environ.items() if key not in {"PYTHONPATH"}}
+            env["PYTHONPATH"] = str(install)
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    "from secgym.agents.react_agent import ReActAgent; from secrl_platform.agents.builtin import builtin_manifest; print(ReActAgent.__name__, builtin_manifest('secrl-react-v1').agent_id)",
+                ],
+                cwd=root,
+                env=env,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
+            self.assertIn("ReActAgent secrl-react-v1", result.stdout)
 
     def test_every_platform_service_has_a_real_healthcheck(self):
         compose = (ROOT / "compose.yaml").read_text()

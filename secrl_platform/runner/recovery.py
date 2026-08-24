@@ -95,14 +95,16 @@ class RunnerRepository:
         model_config_sha256: str | None = None,
         run_limits: dict[str, int] | None = None,
         agent_parameters: dict[str, Any] | None = None,
+        selection: dict[str, Any] | None = None,
     ) -> RunHandle:
+        if case_ids is not None and len(case_ids) != len(set(case_ids)):
+            raise ValueError("runner task scope contains duplicate cases")
         scope = Scope(case_ids=case_ids) if case_ids is not None else Scope.all()
         cases = adapter.enumerate_cases(adapter.dataset_ref(), scope)
         if not cases:
             raise ValueError("runner task scope must include at least one case")
-        scenario_ids = {case.scenario.id for case in cases}
-        if len(scenario_ids) != 1:
-            raise ValueError("one run may contain cases from exactly one scenario")
+        if len({case.id for case in cases}) != len(cases):
+            raise ValueError("runner task scope contains duplicate cases")
         frozen_limits = dict(
             run_limits
             or {"max_steps": 32, "max_str_len": 100_000, "max_entry_return": 15}
@@ -159,23 +161,29 @@ class RunnerRepository:
                 session.flush()
             elif dataset.benchmark_revision_id != benchmark.id:
                 raise ValueError("dataset revision is bound to a different benchmark revision")
-            scenario = ScenarioORM(
-                dataset_version_id=dataset.id,
-                external_id=cases[0].scenario.id,
-                metadata_json=canonical_json(cases[0].scenario.metadata),
-            )
-            session.add(scenario)
-            session.flush()
+            scenarios: dict[str, ScenarioORM] = {}
+            case_records: list[CaseRecordORM] = []
             for ordinal, case in enumerate(cases):
-                session.add(
-                    CaseRecordORM(
+                scenario = scenarios.get(case.scenario.id)
+                if scenario is None:
+                    scenario = ScenarioORM(
                         dataset_version_id=dataset.id,
-                        scenario_id=scenario.id,
-                        external_id=case.id,
-                        ordinal=ordinal,
-                        payload_json=canonical_json(case.model_dump(mode="json")),
+                        external_id=case.scenario.id,
+                        metadata_json=canonical_json(case.scenario.metadata),
                     )
+                    session.add(scenario)
+                    session.flush()
+                    scenarios[case.scenario.id] = scenario
+                record = CaseRecordORM(
+                    dataset_version_id=dataset.id,
+                    scenario_id=scenario.id,
+                    external_id=case.id,
+                    ordinal=ordinal,
+                    payload_json=canonical_json(case.model_dump(mode="json")),
                 )
+                session.add(record)
+                case_records.append(record)
+            session.flush()
             agent = session.scalar(
                 select(AgentRevisionORM).where(
                     AgentRevisionORM.sha256 == agent_revision.manifest_sha256
@@ -207,10 +215,13 @@ class RunnerRepository:
                 "agent_revision_id": agent_revision.id,
                 "agent_revision_sha256": agent_revision.manifest_sha256,
                 "case_ids": [case.id for case in cases],
+                "case_record_ids": [record.id for record in case_records],
                 "budget": frozen_budget,
                 "limits": frozen_limits,
                 "agent_parameters": dict(agent_parameters or {}),
             }
+            if selection is not None:
+                task_spec["selection"] = dict(selection)
             if model_config_revision_id is not None:
                 if model_config_sha256 is None:
                     raise ValueError("model config hash is required")
@@ -241,7 +252,7 @@ class RunnerRepository:
             run_spec_json = canonical_json(run_spec)
             run = RunORM(
                 task_id=task.id,
-                scenario_id=scenario.id,
+                scenario_id=scenarios[cases[0].scenario.id].id,
                 status="QUEUED",
                 run_spec_json=run_spec_json,
                 run_spec_sha256=hashlib.sha256(
@@ -329,15 +340,27 @@ class RunnerRepository:
 
     def cases(self, task_id: str, run_id: str) -> list[StoredCase]:
         with self._session_factory() as session:
-            task, run = self._get_task_run(session, task_id, run_id)
+            task, _run = self._get_task_run(session, task_id, run_id)
+            task_spec = json.loads(task.task_spec_json)
+            selected_ids = tuple(task_spec.get("case_ids", ()))
+            record_ids = tuple(task_spec.get("case_record_ids", ()))
+            scope = (
+                CaseRecordORM.id.in_(record_ids)
+                if record_ids
+                else CaseRecordORM.external_id.in_(selected_ids)
+            )
             records = session.scalars(
                 select(CaseRecordORM)
                 .where(
                     CaseRecordORM.dataset_version_id == task.dataset_version_id,
-                    CaseRecordORM.scenario_id == run.scenario_id,
+                    scope,
                 )
                 .order_by(CaseRecordORM.ordinal)
             ).all()
+            if len(records) != len(selected_ids) or tuple(
+                record.external_id for record in records
+            ) != selected_ids:
+                raise ValueError("frozen task Case selection does not match stored records")
             return [
                 StoredCase(
                     record_id=record.id,
@@ -464,7 +487,15 @@ class RunnerRepository:
                 _transition_task(task, "CANCELED")
                 run.status = "CANCELED"
                 task.finished_at = utc_now()
-            elif budget_exhausted or self._budget_reached(session, task, run_id):
+            elif budget_exhausted:
+                _transition_task(task, "BUDGET_EXHAUSTED")
+                run.status = "FAILED"
+                task.finished_at = utc_now()
+            elif run.next_case_index >= case_count:
+                _transition_task(task, "SUCCEEDED")
+                run.status = "SUCCEEDED"
+                task.finished_at = utc_now()
+            elif self._budget_reached(session, task, run_id):
                 _transition_task(task, "BUDGET_EXHAUSTED")
                 run.status = "FAILED"
                 task.finished_at = utc_now()
@@ -472,10 +503,6 @@ class RunnerRepository:
                 _transition_task(task, "PAUSED")
                 run.status = "QUEUED"
                 run.pause_requested = False
-            elif run.next_case_index >= case_count:
-                _transition_task(task, "SUCCEEDED")
-                run.status = "SUCCEEDED"
-                task.finished_at = utc_now()
             if task.status != "RUNNING":
                 self._release_lease(session, run_id)
             else:
@@ -528,6 +555,7 @@ class RunnerRepository:
         attempt_id: str,
         code: str,
         retryable: bool | None = None,
+        details: dict[str, Any] | None = None,
     ) -> str:
         with self._session_factory.begin() as session:
             task, run = self._get_task_run(session, task_id, run_id)
@@ -540,6 +568,24 @@ class RunnerRepository:
             error = {"code": code}
             if retryable is not None:
                 error["retryable"] = retryable
+            if details:
+                error.update(
+                    {
+                        key: value
+                        for key, value in details.items()
+                        if key
+                        in {
+                            "usage_may_have_occurred",
+                            "safe_to_retry",
+                            "http_status",
+                            "content_type",
+                            "provider_request_id",
+                            "request_id",
+                            "response_shape",
+                        }
+                        and value is not None
+                    }
+                )
             attempt.error_json = canonical_json(error)
             _transition_task(task, "FAILED")
             task.finished_at = utc_now()

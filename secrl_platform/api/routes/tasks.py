@@ -23,6 +23,7 @@ from secrl_platform.api.dependencies import (
 from secrl_platform.api.errors import ApiError
 from secrl_platform.api.schemas import TaskCreateRequest, TaskCreateResponse
 from secrl_platform.benchmarks.smoke import ProtocolSmokeAdapter
+from secrl_platform.benchmarks.protocol import Scope
 from secrl_platform.benchmarks.secrl import SecRLAdapter, SecRLRunSpec
 from secrl_platform.runner.recovery import RunnerRepository
 from secrl_platform.storage.orm import (
@@ -79,7 +80,11 @@ def create_task(
             raise ApiError(
                 503,
                 "SECRL_RUNTIME_UNAVAILABLE",
-                "SecRL environment credentials are not configured",
+                "SecRL environment credentials are missing; configure the read-only Incident database credentials before queuing a run.",
+                details={
+                    "secret_status": "missing",
+                    "next_step": "Configure the SecRL Incident database credentials and rerun preflight.",
+                },
             )
         adapter = SecRLAdapter(
             run_spec=SecRLRunSpec(
@@ -90,6 +95,36 @@ def create_task(
         )
     else:
         raise ApiError(422, "INVALID_TASK_SPEC", "Unknown benchmark revision")
+    try:
+        if payload.benchmark_id == "secrl":
+            selected_case_ids = adapter.resolve_case_ids(
+                case_ids=payload.case_ids,
+                incident_ids=payload.incident_ids,
+                all_cases=payload.all_cases,
+            )
+        elif payload.all_cases:
+            selected_case_ids = tuple(
+                case.id for case in adapter.enumerate_cases(adapter.dataset_ref(), Scope.all())
+            )
+        elif payload.incident_ids:
+            raise ValueError("Incident selection is only supported by the SecRL benchmark")
+        else:
+            selected_case_ids = tuple(payload.case_ids)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ApiError(
+            422,
+            "INVALID_TASK_SCOPE",
+            "The selected Cases or Incidents are invalid; choose an available Case, Incident, or Benchmark.",
+            details={"next_step": "Refresh the benchmark catalog and select a valid scope."},
+        ) from exc
+    selection = {
+        "case_ids": list(payload.case_ids),
+        "incident_ids": list(payload.incident_ids),
+        "all_cases": payload.all_cases,
+        "resolved_case_count": len(selected_case_ids),
+        "dataset_revision": adapter.dataset_ref().version,
+        "dataset_sha256": adapter.dataset_ref().sha256,
+    }
     revision = _resolve_agent_revision(context, payload.agent_revision_id)
     model_id, model_sha256 = _resolve_model_revision(
         context, payload.model_config_revision_id
@@ -137,7 +172,7 @@ def create_task(
             name=payload.name,
             adapter=adapter,
             agent_revision=revision,
-            case_ids=payload.case_ids,
+            case_ids=selected_case_ids,
             budget=budget,
             model_config_revision_id=model_id,
             model_config_sha256=model_sha256,
@@ -147,6 +182,7 @@ def create_task(
                 "max_entry_return": payload.max_entry_return,
             },
             agent_parameters=parameters,
+            selection=selection,
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise ApiError(422, "INVALID_TASK_SPEC", "Invalid benchmark task") from exc

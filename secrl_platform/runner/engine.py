@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
+import os
 from collections.abc import Callable
 from decimal import Decimal
 from typing import Any
@@ -31,6 +33,19 @@ from secrl_platform.storage.repositories import canonical_json
 
 
 MAX_PLATFORM_ATTEMPTS = 3
+_LOGGER = logging.getLogger(__name__)
+
+
+def _safe_provider_error_details(error: ProviderError) -> dict[str, Any]:
+    return {
+        "usage_may_have_occurred": error.usage_may_have_occurred,
+        "safe_to_retry": error.safe_to_retry,
+        "http_status": error.http_status,
+        "content_type": error.content_type,
+        "provider_request_id": error.provider_request_id,
+        "request_id": error.request_id,
+        "response_shape": error.response_shape,
+    }
 
 
 class RunnerEngine:
@@ -99,8 +114,10 @@ class RunnerEngine:
                 )
                 budget_anchor = guard.usage() if guard is not None else None
             except (AgentServiceError, ProviderError) as exc:
-                safely_retryable = exc.transient and not (
-                    isinstance(exc, ProviderError) and exc.usage_may_have_occurred
+                safely_retryable = (
+                    exc.safe_to_retry
+                    if isinstance(exc, ProviderError)
+                    else exc.transient
                 )
                 if safely_retryable and attempt.number < MAX_PLATFORM_ATTEMPTS:
                     self._repository.retry_attempt(
@@ -115,6 +132,11 @@ class RunnerEngine:
                     attempt_id=attempt.id,
                     code=exc.code,
                     retryable=safely_retryable,
+                    details=(
+                        _safe_provider_error_details(exc)
+                        if isinstance(exc, ProviderError)
+                        else None
+                    ),
                 )
             except CapabilityBudgetError:
                 return self._repository.fail_attempt(
@@ -124,7 +146,18 @@ class RunnerEngine:
                     code="CAPABILITY_BUDGET_ERROR",
                     retryable=False,
                 )
-            except Exception:
+            except Exception as exc:
+                missing_path = getattr(exc, "filename", None)
+                missing_name = (
+                    os.path.basename(missing_path)
+                    if isinstance(missing_path, str)
+                    else None
+                )
+                _LOGGER.error(
+                    "agent runtime error exception_type=%s missing_name=%s",
+                    type(exc).__name__,
+                    missing_name,
+                )
                 return self._repository.fail_attempt(
                     task_id=task_id,
                     run_id=run_id,

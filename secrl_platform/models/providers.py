@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import ipaddress
+import logging
 import socket
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
@@ -15,6 +16,9 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
 from uuid import uuid4
 
 from secrl_platform.models.secrets import EncryptedSecret, SecretStore
+
+
+_LOGGER = logging.getLogger(__name__)
 
 
 class ProviderModel(BaseModel):
@@ -69,6 +73,8 @@ class ModelResponse(ProviderModel):
     text: str
     usage: Usage | None
     provider_request_id: str | None = None
+    finish_reason: str | None = None
+    reasoning_content: str | None = None
     raw_usage: dict[str, Any] | None = None
 
 
@@ -81,15 +87,30 @@ class ProviderError(RuntimeError):
         *,
         retry_after: float | None = None,
         usage_may_have_occurred: bool = False,
+        http_status: int | None = None,
+        content_type: str | None = None,
+        provider_request_id: str | None = None,
+        request_id: str | None = None,
+        response_shape: str | None = None,
     ) -> None:
         super().__init__(f"model provider request failed: {code}")
         self.code = code
         self.retry_after = retry_after
         self.usage_may_have_occurred = usage_may_have_occurred
+        self.http_status = http_status
+        self.content_type = content_type
+        self.provider_request_id = provider_request_id
+        self.request_id = request_id
+        self.response_shape = response_shape
 
     @property
     def transient(self) -> bool:
         return self.code in self.TRANSIENT_CODES
+
+    @property
+    def safe_to_retry(self) -> bool:
+        """True only when the request outcome cannot have incurred usage."""
+        return self.transient and not self.usage_may_have_occurred
 
 
 class ModelProvider(Protocol):
@@ -192,25 +213,61 @@ class OpenAICompatibleProvider:
                 usage_may_have_occurred=not isinstance(exc, httpx.ConnectError),
             ) from exc
 
+        response_context = _safe_response_context(response, request_id=request.request_id)
         if 300 <= response.status_code < 400:
-            raise ProviderError("PROVIDER_REDIRECT")
+            raise ProviderError("PROVIDER_REDIRECT", **response_context)
         if response.status_code >= 400:
-            raise _status_error(response)
+            raise _status_error(response, request_id=request.request_id)
         try:
             body = response.json()
-            text = body["choices"][0]["message"]["content"]
+        except ValueError as exc:
+            raise _invalid_response(
+                request,
+                response,
+                response_shape="malformed_json",
+            ) from exc
+        try:
+            if not isinstance(body, dict):
+                raise TypeError("response body is not an object")
+            choices = body.get("choices")
+            if not isinstance(choices, list) or not choices:
+                raise ValueError("response choices are empty")
+            choice = choices[0]
+            if not isinstance(choice, dict):
+                raise TypeError("response choice is not an object")
+            message = choice.get("message")
+            if not isinstance(message, dict):
+                raise TypeError("response message is not an object")
+            content = message.get("content")
+            reasoning_content = message.get("reasoning_content")
+            if not isinstance(reasoning_content, (str, type(None))):
+                raise TypeError("reasoning_content is not a string")
+            if not isinstance(content, str) or not content.strip():
+                if not isinstance(reasoning_content, str) or not reasoning_content.strip():
+                    raise ValueError("response content is empty")
+                content = reasoning_content
+            finish_reason = choice.get("finish_reason")
+            if not isinstance(finish_reason, (str, type(None))):
+                raise TypeError("finish_reason is not a string")
             raw_usage = body.get("usage")
             usage = _normalize_usage(raw_usage) if raw_usage is not None else None
-            request_id = body.get("id")
-        except (KeyError, IndexError, TypeError, ValueError) as exc:
-            raise ProviderError(
-                "INVALID_PROVIDER_RESPONSE",
-                usage_may_have_occurred=True,
+            provider_request_id = _safe_identifier(body.get("id"))
+        except (TypeError, ValueError, KeyError) as exc:
+            raise _invalid_response(
+                request,
+                response,
+                response_shape=_response_shape(body, exc),
             ) from exc
         return ModelResponse(
-            text=text,
+            text=content,
             usage=usage,
-            provider_request_id=request_id,
+            provider_request_id=provider_request_id,
+            finish_reason=finish_reason,
+            reasoning_content=(
+                reasoning_content
+                if isinstance(reasoning_content, str) and reasoning_content.strip()
+                else None
+            ),
             raw_usage=raw_usage,
         )
 
@@ -338,28 +395,31 @@ def _resolve_host(host: str, port: int) -> tuple[str, ...]:
     return tuple(sorted({result[4][0] for result in results}))
 
 
-def _status_error(response: httpx.Response) -> ProviderError:
+def _status_error(response: httpx.Response, *, request_id: str | None = None) -> ProviderError:
     status = response.status_code
     retry_after = _retry_after_seconds(response.headers.get("Retry-After"))
+    context = _safe_response_context(response, request_id=request_id)
     if status in {401, 403}:
-        return ProviderError("AUTHENTICATION_FAILED")
+        return ProviderError("AUTHENTICATION_FAILED", **context)
     if status == 404:
-        return ProviderError("MODEL_NOT_FOUND")
+        return ProviderError("MODEL_NOT_FOUND", **context)
     if status == 408:
         return ProviderError(
             "TIMEOUT",
             retry_after=retry_after,
             usage_may_have_occurred=True,
+            **context,
         )
     if status == 429:
-        return ProviderError("RATE_LIMITED", retry_after=retry_after)
+        return ProviderError("RATE_LIMITED", retry_after=retry_after, **context)
     if status >= 500:
         return ProviderError(
             "PROVIDER_UNAVAILABLE",
             retry_after=retry_after,
             usage_may_have_occurred=True,
+            **context,
         )
-    return ProviderError("INVALID_PROVIDER_REQUEST")
+    return ProviderError("INVALID_PROVIDER_REQUEST", **context)
 
 
 def _retry_after_seconds(value: str | None) -> float | None:
@@ -380,12 +440,90 @@ def _retry_after_seconds(value: str | None) -> float | None:
     return max(0.0, seconds)
 
 
-def _normalize_usage(raw: dict[str, Any]) -> Usage:
+def _normalize_usage(raw: Any) -> Usage:
+    if not isinstance(raw, dict):
+        raise TypeError("usage is not an object")
     prompt_details = raw.get("prompt_tokens_details") or {}
     completion_details = raw.get("completion_tokens_details") or {}
+    if not isinstance(prompt_details, dict) or not isinstance(completion_details, dict):
+        raise TypeError("usage details are not objects")
     return Usage(
-        prompt=raw["prompt_tokens"],
-        completion=raw["completion_tokens"],
-        cached=prompt_details.get("cached_tokens"),
-        reasoning=completion_details.get("reasoning_tokens"),
+        prompt=_usage_count(raw, "prompt_tokens"),
+        completion=_usage_count(raw, "completion_tokens"),
+        cached=_optional_usage_count(prompt_details, "cached_tokens"),
+        reasoning=_optional_usage_count(completion_details, "reasoning_tokens"),
     )
+
+
+def _usage_count(raw: dict[str, Any], key: str) -> int:
+    value = raw[key]
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(f"usage field {key} is invalid")
+    return value
+
+
+def _optional_usage_count(raw: dict[str, Any], key: str) -> int | None:
+    if key not in raw or raw[key] is None:
+        return None
+    return _usage_count(raw, key)
+
+
+def _safe_identifier(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    if not normalized or len(normalized) > 256:
+        return None
+    return normalized
+
+
+def _safe_response_context(
+    response: httpx.Response,
+    *,
+    request_id: str | None,
+) -> dict[str, Any]:
+    return {
+        "http_status": response.status_code,
+        "content_type": _safe_identifier(response.headers.get("content-type")),
+        "provider_request_id": _safe_identifier(
+            response.headers.get("x-request-id")
+            or response.headers.get("x-correlation-id")
+            or response.headers.get("request-id")
+        ),
+        "request_id": _safe_identifier(request_id),
+    }
+
+
+def _invalid_response(
+    request: ModelRequest,
+    response: httpx.Response,
+    *,
+    response_shape: str,
+) -> ProviderError:
+    context = _safe_response_context(response, request_id=request.request_id)
+    _LOGGER.warning(
+        "provider response rejected request_id=%s http_status=%s content_type=%s provider_request_id=%s response_shape=%s",
+        context["request_id"],
+        context["http_status"],
+        context["content_type"],
+        context["provider_request_id"],
+        response_shape,
+    )
+    return ProviderError(
+        "INVALID_PROVIDER_RESPONSE",
+        usage_may_have_occurred=True,
+        response_shape=response_shape,
+        **context,
+    )
+
+
+def _response_shape(body: Any, error: Exception) -> str:
+    if isinstance(body, dict):
+        choices = body.get("choices")
+        if choices == []:
+            return "empty_choices"
+        if isinstance(choices, list) and choices:
+            return "invalid_choice"
+        if "usage" in body:
+            return "invalid_usage"
+    return type(error).__name__.lower()

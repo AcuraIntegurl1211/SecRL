@@ -106,8 +106,7 @@ class ModelGateway:
                 response = await self._provider.complete(request)
             except ProviderError as exc:
                 if (
-                    exc.usage_may_have_occurred
-                    or not exc.transient
+                    not exc.safe_to_retry
                     or attempt == request.max_attempts
                 ):
                     if token is not None:

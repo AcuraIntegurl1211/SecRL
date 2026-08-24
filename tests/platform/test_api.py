@@ -2,6 +2,7 @@ import asyncio
 import json
 import tempfile
 import unittest
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -170,6 +171,69 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(response.status_code, 201, response.text)
         self.assertRegex(response.json()["task_spec_sha256"], r"^[0-9a-f]{64}$")
         self.assertRegex(response.json()["run_id"], r"^[0-9a-f-]{36}$")
+
+    def test_task_schema_accepts_incident_selection_and_freezes_case_ids(self):
+        self.login()
+        headers = {"X-CSRF-Token": self.csrf_token}
+        model = self.client.post(
+            "/api/v1/models",
+            headers={**headers, "X-Model-API-Key": "test-model-key"},
+            json={
+                "name": "fixture-model",
+                "provider": "openai-compatible",
+                "endpoint": "https://models.invalid/v1",
+                "model": "fixture",
+                "parameters": {"max_output_tokens": 32},
+                "pricing": {"input_per_million": "1", "output_per_million": "1"},
+            },
+        )
+        self.assertEqual(model.status_code, 201, model.text)
+        agent = self.client.post(
+            "/api/v1/agents",
+            headers=headers,
+            json={"kind": "BUILT_IN", "revision_id": "secrl-baseline-v1"},
+        )
+        self.assertEqual(agent.status_code, 201, agent.text)
+        response = self.client.post(
+            "/api/v1/tasks",
+            headers=headers,
+            json={
+                "name": "incident selection",
+                "benchmark_id": "secrl",
+                "agent_revision_id": agent.json()["id"],
+                "model_config_revision_id": model.json()["id"],
+                "case_ids": [],
+                "incident_ids": ["incident_5", "incident_34"],
+            },
+        )
+
+        self.assertEqual(response.status_code, 201, response.text)
+        task = self.client.get("/api/v1/tasks").json()[0]
+        spec = task["task_spec"]
+        self.assertEqual(len(spec["case_ids"]), 180)
+        self.assertEqual(len(set(spec["case_ids"])), 180)
+        self.assertEqual(spec["selection"]["incident_ids"], ["incident_5", "incident_34"])
+        self.assertEqual(spec["dataset_sha256"], "cc1fd79db8627768611b8b230c23d5cb11c19b50ad25f3810dba3fe8adef8e8f")
+
+        full = self.client.post(
+            "/api/v1/tasks",
+            headers=headers,
+            json={
+                "name": "full benchmark selection",
+                "benchmark_id": "secrl",
+                "agent_revision_id": agent.json()["id"],
+                "model_config_revision_id": model.json()["id"],
+                "case_ids": [],
+                "all_cases": True,
+            },
+        )
+        self.assertEqual(full.status_code, 201, full.text)
+        full_task = next(
+            item for item in self.client.get("/api/v1/tasks").json()
+            if item["id"] == full.json()["id"]
+        )
+        self.assertEqual(len(full_task["task_spec"]["case_ids"]), 589)
+        self.assertTrue(full_task["task_spec"]["selection"]["all_cases"])
 
     def test_api_created_smoke_agent_is_runner_executable_and_listed_with_run(self):
         self.login()
@@ -552,6 +616,7 @@ class ApiTest(unittest.TestCase):
                 "/api/v1/auth/logout",
                 "/api/v1/auth/password",
                 "/api/v1/health",
+                "/api/v1/preflight",
                 "/api/v1/models",
                 "/api/v1/agents",
                 "/api/v1/agents/{id}:check",
@@ -703,7 +768,7 @@ class ApiTest(unittest.TestCase):
         )
         created_model = self.client.post(
             "/api/v1/models",
-            headers=headers,
+            headers={**headers, "X-Model-API-Key": "encrypted-test-key"},
             json={
                 "name": "fixture",
                 "provider": "openai-compatible",
@@ -727,7 +792,7 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(rejected.status_code, 422)
         self.assertNotIn(leaked_value, rejected.text)
         self.assertEqual(created_model.status_code, 201, created_model.text)
-        self.assertFalse(created_model.json()["credential_configured"])
+        self.assertTrue(created_model.json()["credential_configured"])
         self.assertEqual(created_agent.status_code, 201, created_agent.text)
         self.assertEqual(checked.json()["status"], "valid")
         self.assertEqual(len(benchmarks.json()), 2)
@@ -918,7 +983,7 @@ class ApiTest(unittest.TestCase):
 
         created = self.client.post(
             "/api/v1/models",
-            headers=headers,
+            headers={**headers, "X-Model-API-Key": "encrypted-test-key"},
             json={
                 "name": "redacted-response",
                 "provider": "openai-compatible",
@@ -970,6 +1035,117 @@ class ApiTest(unittest.TestCase):
                 session.scalar(select(func.count(ModelConfigRevisionORM.id))),
                 0,
             )
+
+    def test_model_creation_requires_an_api_key_and_explains_next_step(self):
+        self.login()
+        response = self.client.post(
+            "/api/v1/models",
+            headers={"X-CSRF-Token": self.csrf_token},
+            json={
+                "name": "missing-secret",
+                "provider": "openai-compatible",
+                "endpoint": "https://models.invalid/v1",
+                "model": "fixture",
+            },
+        )
+
+        self.assertEqual(response.status_code, 422)
+        self.assertEqual(response.json()["error"]["code"], "MODEL_CREDENTIAL_MISSING")
+        self.assertIn("API key", response.json()["error"]["message"])
+        self.assertEqual(response.json()["error"]["details"]["secret_status"], "missing")
+
+    def test_benchmark_payload_exposes_frozen_secrl_incident_counts(self):
+        self.login()
+        response = self.client.get("/api/v1/benchmarks")
+
+        self.assertEqual(response.status_code, 200, response.text)
+        secrl = next(item for item in response.json() if item["manifest"]["benchmark_id"] == "secrl")
+        self.assertEqual(secrl["dataset"]["case_count"], 589)
+        self.assertEqual(
+            secrl["dataset"]["incidents"],
+            {
+                "incident_5": 98,
+                "incident_34": 82,
+                "incident_38": 11,
+                "incident_39": 98,
+                "incident_55": 100,
+                "incident_134": 57,
+                "incident_166": 87,
+                "incident_322": 56,
+            },
+        )
+
+    def test_preflight_reports_safe_actionable_configuration_states(self):
+        self.login()
+        response = self.client.get(
+            "/api/v1/preflight",
+            params={
+                "benchmark_id": "secrl",
+                "agent_revision_id": "missing-agent",
+                "model_config_revision_id": "missing-model",
+            },
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        self.assertEqual({item["name"] for item in payload["checks"]}, {
+            "database", "environment", "model_secret", "agent_revision", "runner"
+        })
+        serialized = json.dumps(payload)
+        self.assertNotIn("master_key", serialized)
+        self.assertNotIn("missing-model-secret-value", serialized)
+        model_check = next(item for item in payload["checks"] if item["name"] == "model_secret")
+        self.assertEqual(model_check["status"], "missing")
+        self.assertEqual(model_check["secret_status"], "missing")
+
+        original_context = self.app.state.api_context
+        self.app.state.api_context = replace(
+            original_context,
+            secrl_environment_probe=lambda: False,
+        )
+        unavailable = self.client.get(
+            "/api/v1/preflight",
+            params={"benchmark_id": "secrl", "agent_revision_id": DeterministicSmokeAgent.revision().id},
+        )
+        environment_check = next(item for item in unavailable.json()["checks"] if item["name"] == "environment")
+        self.assertEqual(environment_check["status"], "missing")
+        self.assertEqual(environment_check["code"], "SECRL_ENV_UNAVAILABLE")
+
+        self.app.state.api_context = original_context
+        unregistered = self.client.get(
+            "/api/v1/preflight",
+            params={"benchmark_id": "protocol-smoke", "agent_revision_id": "secrl-baseline-v1"},
+        )
+        agent_check = next(item for item in unregistered.json()["checks"] if item["name"] == "agent_revision")
+        self.assertEqual(agent_check["status"], "missing")
+
+    def test_retry_cannot_escape_frozen_case_record_scope(self):
+        self.login()
+        headers = {"X-CSRF-Token": self.csrf_token}
+        first = self.client.post(
+            "/api/v1/tasks",
+            headers=headers,
+            json={**valid_smoke_task(), "case_ids": ["smoke-001"]},
+        )
+        second = self.client.post(
+            "/api/v1/tasks",
+            headers=headers,
+            json={**valid_smoke_task(), "name": "other", "case_ids": ["smoke-002"]},
+        )
+        self.assertEqual(first.status_code, 201, first.text)
+        self.assertEqual(second.status_code, 201, second.text)
+        with self.session_factory.begin() as session:
+            task = session.get(EvaluationTaskORM, first.json()["id"])
+            run = session.get(RunORM, first.json()["run_id"])
+            task.status = "FAILED"
+            run.status = "FAILED"
+
+        response = self.client.post(
+            f"/api/v1/runs/{first.json()['run_id']}/cases/smoke-002:retry",
+            headers=headers,
+        )
+        self.assertEqual(response.status_code, 404, response.text)
+        self.assertEqual(response.json()["error"]["code"], "CASE_NOT_FOUND")
 
     def test_model_endpoint_allowlist_rejects_unapproved_host(self):
         try:
