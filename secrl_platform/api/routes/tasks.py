@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Mapping
 
 from fastapi import APIRouter, Depends
 from sqlalchemy import select
@@ -26,6 +27,7 @@ from secrl_platform.api.scope import (
     AmbiguousScopeError,
     InvalidScopeError,
     canonical_scope_mode,
+    task_scope_summary,
 )
 from secrl_platform.benchmarks.smoke import ProtocolSmokeAdapter
 from secrl_platform.benchmarks.protocol import Scope
@@ -68,6 +70,7 @@ def list_tasks(
                 "task_spec_sha256": hashlib.sha256(
                     task.task_spec_json.encode("utf-8")
                 ).hexdigest(),
+                "scope": task_scope_summary(json.loads(task.task_spec_json)),
             }
             for task, run_id in tasks
         ]
@@ -116,16 +119,6 @@ def create_task(
             "A Scope mode and selection are required before queuing a run.",
             details={"next_step": "Select a Scope mode and matching Case, Incident, or Benchmark selection."},
         ) from exc
-    if payload.benchmark_id == "secrl" and not context.secrl_runtime_enabled:
-        raise ApiError(
-            503,
-            "SECRL_RUNTIME_UNAVAILABLE",
-            "SecRL environment credentials are missing; configure the read-only Incident database credentials before queuing a run.",
-            details={
-                "secret_status": "missing",
-                "next_step": "Configure the SecRL Incident database credentials and rerun preflight.",
-            },
-        )
     try:
         if payload.benchmark_id == "secrl":
             selected_case_ids = adapter.resolve_case_ids(
@@ -153,6 +146,29 @@ def create_task(
         if payload.benchmark_id == "secrl"
         else ()
     )
+    if payload.benchmark_id == "secrl":
+        if not context.secrl_runtime_enabled:
+            raise ApiError(
+                503,
+                "SECRL_RUNTIME_UNAVAILABLE",
+                "SecRL environment credentials are missing; configure the read-only Incident database credentials before queuing a run.",
+                details={
+                    "secret_status": "missing",
+                    "next_step": "Configure the SecRL Incident database credentials and rerun preflight.",
+                },
+            )
+        unavailable_incidents = _unavailable_incidents(context, resolved_incident_ids)
+        if unavailable_incidents:
+            raise ApiError(
+                503,
+                "SECRL_ENV_UNAVAILABLE",
+                "Selected SecRL Incident service(s) are unavailable; start the required Compose profile(s) before queuing a run.",
+                details={
+                    "unavailable_incidents": unavailable_incidents,
+                    "start_command": _incident_start_command(unavailable_incidents),
+                    "next_step": "Start the selected Incident profile(s) and rerun preflight.",
+                },
+            )
     selection = {
         "scope_mode": scope_mode,
         "case_ids": list(payload.case_ids),
@@ -236,6 +252,26 @@ def create_task(
         status=status,
         task_spec_sha256=task_hash,
     )
+
+
+def _unavailable_incidents(
+    context: ApiContext,
+    incident_ids: tuple[str, ...],
+) -> list[str]:
+    if context.secrl_environment_probe is None:
+        return []
+    try:
+        result = context.secrl_environment_probe(incident_ids)
+        if isinstance(result, Mapping):
+            return [incident_id for incident_id in incident_ids if result.get(incident_id) is not True]
+        return [] if result is True else list(incident_ids)
+    except Exception:
+        return list(incident_ids)
+
+
+def _incident_start_command(incident_ids: list[str]) -> str:
+    profiles = " ".join(f"--profile {incident_id}" for incident_id in incident_ids)
+    return f"docker compose {profiles} up -d"
 
 
 def _resolve_model_revision(

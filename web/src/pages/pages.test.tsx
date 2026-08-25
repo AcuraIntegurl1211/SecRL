@@ -67,6 +67,21 @@ describe("core operational pages", () => {
     expect(screen.getAllByText("healthy").length).toBeGreaterThanOrEqual(1);
   });
 
+  it("shows inferred scope metadata for a legacy RunSpec", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify([
+      {
+        id: "legacy-task",
+        name: "Legacy SecRL",
+        status: "SUCCEEDED",
+        task_spec: { case_ids: ["incident_5:0:legacy"] },
+        task_spec_sha256: "c".repeat(64),
+        scope: { mode: "CASES", case_count: 1, incident_count: 1, legacy: true },
+      },
+    ]), { status: 200 })));
+    renderPage(<RunsPage />);
+    expect(await screen.findByText("1 Case across 1 Incident · legacy scope inferred")).toBeInTheDocument();
+  });
+
   it("renders a run detail route without loading the whole trajectory", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ id: "run-1", task_id: "task-1", status: "QUEUED", checkpoint: 0, run_spec_sha256: "a".repeat(64) }), { status: 200 })));
     render(<MemoryRouter initialEntries={["/runs/run-1"]}><Routes><Route path="/runs/:id" element={<RunDetailPage />} /></Routes></MemoryRouter>);

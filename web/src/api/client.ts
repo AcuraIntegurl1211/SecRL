@@ -117,4 +117,10 @@ export type TaskSummary = {
   status: string;
   task_spec: Record<string, unknown>;
   task_spec_sha256: string;
+  scope?: {
+    mode: "CASES" | "INCIDENTS" | "ALL_BENCHMARK";
+    case_count: number;
+    incident_count: number;
+    legacy?: boolean;
+  };
 };

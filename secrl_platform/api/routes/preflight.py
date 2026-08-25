@@ -14,7 +14,9 @@ from secrl_platform.api.scope import (
     ScopeMode,
     canonical_scope_mode,
 )
+from secrl_platform.benchmarks.protocol import Scope
 from secrl_platform.benchmarks.secrl import SecRLAdapter
+from secrl_platform.benchmarks.smoke import ProtocolSmokeAdapter
 from secrl_platform.storage.orm import (
     AgentRevisionORM,
     LocalUserORM,
@@ -54,9 +56,23 @@ def preflight(
                 )
             )
 
-        if benchmark_id == "secrl":
+        try:
+            canonical_scope_mode(
+                scope_mode=scope_mode,
+                case_ids=case_ids,
+                incident_ids=incident_ids,
+                all_cases=all_cases,
+                allow_empty_all_benchmark=True,
+            )
+        except AmbiguousScopeError as exc:
+            raise _ambiguous_scope_error() from exc
+        except InvalidScopeError as exc:
+            raise _invalid_scope_error() from exc
+
+        if benchmark_id in {"secrl", "protocol-smoke"}:
             try:
                 selected_scope = _selected_scope(
+                    benchmark_id=benchmark_id,
                     scope_mode=scope_mode,
                     case_ids=case_ids,
                     incident_ids=incident_ids,
@@ -70,23 +86,18 @@ def preflight(
                     "incident_ids": list(selected_incidents),
                 }
             except AmbiguousScopeError as exc:
-                raise ApiError(
-                    422,
-                    "AMBIGUOUS_SCOPE",
-                    "Choose exactly one scope mode and provide only its matching selection fields.",
-                    details={
-                        "scope_modes": ["CASES", "INCIDENTS", "ALL_BENCHMARK"],
-                        "next_step": "Select a Scope mode and clear incompatible fields.",
-                    },
-                ) from exc
+                raise _ambiguous_scope_error() from exc
             except (InvalidScopeError, KeyError, TypeError, ValueError) as exc:
-                raise ApiError(
-                    422,
-                    "INVALID_TASK_SCOPE",
-                    "The selected Cases or Incidents are invalid; choose an available Case, Incident, or Benchmark.",
-                    details={"next_step": "Refresh the benchmark catalog and select a valid scope."},
-                ) from exc
-            if context.secrl_runtime_enabled:
+                raise _invalid_scope_error() from exc
+            if benchmark_id != "secrl":
+                checks.append(
+                    _check(
+                        "environment",
+                        "not_applicable",
+                        "The selected benchmark does not require the SecRL Incident environment.",
+                    )
+                )
+            elif context.secrl_runtime_enabled:
                 environment_status = {incident_id: False for incident_id in selected_incidents}
                 if context.secrl_environment_probe is not None:
                     try:
@@ -224,12 +235,13 @@ def preflight(
 
 def _selected_scope(
     *,
+    benchmark_id: str,
     scope_mode: ScopeMode | None,
     case_ids: tuple[str, ...],
     incident_ids: tuple[str, ...],
     all_cases: bool,
 ) -> tuple[ScopeMode, tuple[str, ...], tuple[str, ...]]:
-    adapter = SecRLAdapter()
+    adapter = SecRLAdapter() if benchmark_id == "secrl" else ProtocolSmokeAdapter.load_default()
     mode = canonical_scope_mode(
         scope_mode=scope_mode,
         case_ids=case_ids,
@@ -237,22 +249,55 @@ def _selected_scope(
         all_cases=all_cases,
         allow_empty_all_benchmark=True,
     )
-    resolved = adapter.resolve_case_ids(
-        case_ids=case_ids if mode == "CASES" else (),
-        incident_ids=incident_ids if mode == "INCIDENTS" else (),
-        all_cases=mode == "ALL_BENCHMARK",
-    )
-    selected = (
-        incident_ids
-        if mode == "INCIDENTS"
-        else adapter.incident_ids_for_case_ids(resolved)
-    )
+    if mode == "INCIDENTS":
+        if benchmark_id != "secrl":
+            raise InvalidScopeError(
+                "Incident selection is only supported by the SecRL benchmark"
+            )
+        resolved = adapter.resolve_case_ids(incident_ids=incident_ids)
+        selected = incident_ids
+    elif benchmark_id == "secrl":
+        resolved = adapter.resolve_case_ids(
+            case_ids=case_ids if mode == "CASES" else (),
+            all_cases=mode == "ALL_BENCHMARK",
+        )
+        selected = adapter.incident_ids_for_case_ids(resolved)
+    else:
+        smoke_scope = Scope(
+            case_ids=case_ids if mode == "CASES" else None,
+        )
+        resolved = tuple(
+            case.id
+            for case in adapter.enumerate_cases(adapter.dataset_ref(), smoke_scope)
+        )
+        selected = ()
     return mode, resolved, tuple(dict.fromkeys(selected))
 
 
 def _incident_start_command(incident_ids: tuple[str, ...] | list[str]) -> str:
     profiles = " ".join(f"--profile {incident_id}" for incident_id in incident_ids)
     return f"docker compose {profiles} up -d"
+
+
+def _ambiguous_scope_error() -> ApiError:
+    return ApiError(
+        422,
+        "AMBIGUOUS_SCOPE",
+        "Choose exactly one scope mode and provide only its matching selection fields.",
+        details={
+            "scope_modes": ["CASES", "INCIDENTS", "ALL_BENCHMARK"],
+            "next_step": "Select a Scope mode and clear incompatible fields.",
+        },
+    )
+
+
+def _invalid_scope_error() -> ApiError:
+    return ApiError(
+        422,
+        "INVALID_TASK_SCOPE",
+        "The selected Cases or Incidents are invalid; choose an available Case, Incident, or Benchmark.",
+        details={"next_step": "Refresh the benchmark catalog and select a valid scope."},
+    )
 
 
 def _check(name: str, status: str, message: str, *, code: str | None = None, **details: object) -> dict[str, object]:

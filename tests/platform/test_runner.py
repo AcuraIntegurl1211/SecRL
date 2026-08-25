@@ -35,7 +35,7 @@ from secrl_platform.runner.recovery import (
 from secrl_platform.runner.state import InvalidTransition, RunStateMachine
 from secrl_platform.storage.artifacts import LocalArtifactStore
 from secrl_platform.storage.database import create_engine_and_session
-from secrl_platform.storage.orm import RunORM
+from secrl_platform.storage.orm import EvaluationTaskORM, RunORM
 
 
 class RunStateTest(unittest.TestCase):
@@ -255,6 +255,43 @@ class RunnerEngineTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(repo.task_status(handle.task_id), "SUCCEEDED")
             self.assertEqual(repo.checkpoint(handle.task_id, handle.run_id), 1)
             self.assertEqual(repo.final_result_count(handle.task_id), 1)
+
+    async def test_legacy_v010_runspec_without_scope_metadata_still_recovers(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            adapter, repo, handle, store = self.create_harness(
+                root,
+                case_ids=("smoke-001", "smoke-002"),
+            )
+            with repo._session_factory.begin() as session:
+                run = session.get(RunORM, handle.run_id)
+                self.assertIsNotNone(run)
+                task = session.get(EvaluationTaskORM, handle.task_id)
+                self.assertIsNotNone(task)
+                legacy_spec = json.loads(task.task_spec_json)
+                legacy_spec.pop("selection", None)
+                legacy_spec.pop("case_record_ids", None)
+                legacy_spec.pop("case_count", None)
+                legacy_spec.pop("incident_count", None)
+                task.task_spec_json = json.dumps(legacy_spec, sort_keys=True, separators=(",", ":"))
+                legacy_run_spec = json.loads(run.run_spec_json)
+                legacy_run_spec["task_spec"] = legacy_spec
+                run.run_spec_json = json.dumps(legacy_run_spec, sort_keys=True, separators=(",", ":"))
+                run.run_spec_sha256 = hashlib.sha256(run.run_spec_json.encode("utf-8")).hexdigest()
+
+            self.assertEqual(
+                tuple(case.external_id for case in repo.cases(handle.task_id, handle.run_id)),
+                ("smoke-001", "smoke-002"),
+            )
+            self.assertEqual(
+                await RunnerEngine(
+                    repository=repo,
+                    artifact_store=store,
+                    adapter=adapter,
+                    runtime_factory=DeterministicSmokeAgent,
+                ).run(handle.task_id, handle.run_id),
+                "SUCCEEDED",
+            )
 
     async def test_provider_request_id_is_persisted_without_raw_response(self):
         with tempfile.TemporaryDirectory() as directory:

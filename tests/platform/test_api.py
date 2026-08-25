@@ -1265,6 +1265,56 @@ class ApiTest(unittest.TestCase):
             "docker compose --profile incident_5 up -d",
         )
 
+    def test_queue_rejects_selected_incident_when_environment_probe_is_unavailable(self):
+        self.login()
+        headers = {"X-CSRF-Token": self.csrf_token}
+        model = self.client.post(
+            "/api/v1/models",
+            headers={**headers, "X-Model-API-Key": "test-model-key"},
+            json={
+                "name": "fixture-model",
+                "provider": "openai-compatible",
+                "endpoint": "https://models.invalid/v1",
+                "model": "fixture",
+                "parameters": {"max_output_tokens": 32},
+                "pricing": {"input_per_million": "1", "output_per_million": "1"},
+            },
+        )
+        self.assertEqual(model.status_code, 201, model.text)
+        agent = self.client.post(
+            "/api/v1/agents",
+            headers=headers,
+            json={"kind": "BUILT_IN", "revision_id": "secrl-baseline-v1"},
+        )
+        self.assertEqual(agent.status_code, 201, agent.text)
+        original_context = self.app.state.api_context
+        self.app.state.api_context = replace(
+            original_context,
+            secrl_runtime_enabled=True,
+            secrl_environment_probe=lambda _incidents: False,
+        )
+        try:
+            response = self.client.post(
+                "/api/v1/tasks",
+                headers=headers,
+                json={
+                    "name": "unavailable incident",
+                    "benchmark_id": "secrl",
+                    "agent_revision_id": agent.json()["id"],
+                    "model_config_revision_id": model.json()["id"],
+                    "scope_mode": "INCIDENTS",
+                    "incident_ids": ["incident_5"],
+                },
+            )
+        finally:
+            self.app.state.api_context = original_context
+        self.assertEqual(response.status_code, 503, response.text)
+        self.assertEqual(response.json()["error"]["code"], "SECRL_ENV_UNAVAILABLE")
+        self.assertEqual(
+            response.json()["error"]["details"]["unavailable_incidents"],
+            ["incident_5"],
+        )
+
     def test_preflight_freezes_scope_counts_and_rejects_mixed_fields(self):
         self.login()
         original_context = self.app.state.api_context
@@ -1317,6 +1367,106 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(ambiguous.status_code, 422, ambiguous.text)
         self.assertEqual(ambiguous.json()["error"]["code"], "AMBIGUOUS_SCOPE")
         self.app.state.api_context = original_context
+
+    def test_preflight_applies_scope_contract_to_protocol_smoke(self):
+        self.login()
+        mixed = self.client.get(
+            "/api/v1/preflight",
+            params={
+                "benchmark_id": "protocol-smoke",
+                "agent_revision_id": DeterministicSmokeAgent.revision().id,
+                "scope_mode": "CASES",
+                "case_ids": ["smoke-001"],
+                "incident_ids": ["incident_5"],
+            },
+        )
+        self.assertEqual(mixed.status_code, 422, mixed.text)
+        self.assertEqual(mixed.json()["error"]["code"], "AMBIGUOUS_SCOPE")
+
+        cases = self.client.get(
+            "/api/v1/preflight",
+            params={
+                "benchmark_id": "protocol-smoke",
+                "agent_revision_id": DeterministicSmokeAgent.revision().id,
+                "scope_mode": "CASES",
+                "case_ids": ["smoke-001"],
+            },
+        )
+        self.assertEqual(cases.status_code, 200, cases.text)
+        self.assertEqual(cases.json()["scope"], {
+            "mode": "CASES",
+            "case_count": 1,
+            "incident_count": 0,
+            "incident_ids": [],
+        })
+
+        incidents = self.client.get(
+            "/api/v1/preflight",
+            params={
+                "benchmark_id": "protocol-smoke",
+                "agent_revision_id": DeterministicSmokeAgent.revision().id,
+                "scope_mode": "INCIDENTS",
+                "incident_ids": ["incident_5"],
+            },
+        )
+        self.assertEqual(incidents.status_code, 422, incidents.text)
+        self.assertEqual(incidents.json()["error"]["code"], "INVALID_TASK_SCOPE")
+
+        missing_cases = self.client.get(
+            "/api/v1/preflight",
+            params={
+                "benchmark_id": "protocol-smoke",
+                "agent_revision_id": DeterministicSmokeAgent.revision().id,
+                "scope_mode": "CASES",
+            },
+        )
+        self.assertEqual(missing_cases.status_code, 422, missing_cases.text)
+        self.assertEqual(missing_cases.json()["error"]["code"], "INVALID_TASK_SCOPE")
+
+        all_cases = self.client.get(
+            "/api/v1/preflight",
+            params={
+                "benchmark_id": "protocol-smoke",
+                "agent_revision_id": DeterministicSmokeAgent.revision().id,
+                "scope_mode": "ALL_BENCHMARK",
+            },
+        )
+        self.assertEqual(all_cases.status_code, 200, all_cases.text)
+        self.assertEqual(all_cases.json()["scope"], {
+            "mode": "ALL_BENCHMARK",
+            "case_count": 12,
+            "incident_count": 0,
+            "incident_ids": [],
+        })
+
+    def test_legacy_task_scope_is_projected_for_display_without_mutating_spec(self):
+        self.login()
+        created = self.client.post(
+            "/api/v1/tasks",
+            json=valid_smoke_task(),
+            headers={"X-CSRF-Token": self.csrf_token},
+        )
+        self.assertEqual(created.status_code, 201, created.text)
+        task_id = created.json()["id"]
+        with self.session_factory.begin() as session:
+            task = session.get(EvaluationTaskORM, task_id)
+            self.assertIsNotNone(task)
+            legacy_spec = json.loads(task.task_spec_json)
+            legacy_spec.pop("selection", None)
+            legacy_spec.pop("case_count", None)
+            legacy_spec.pop("incident_count", None)
+            task.task_spec_json = json.dumps(legacy_spec, sort_keys=True, separators=(",", ":"))
+
+        listed = self.client.get("/api/v1/tasks")
+        self.assertEqual(listed.status_code, 200, listed.text)
+        row = next(item for item in listed.json() if item["id"] == task_id)
+        self.assertEqual(row["scope"], {
+            "mode": "CASES",
+            "case_count": 1,
+            "incident_count": 0,
+            "legacy": True,
+        })
+        self.assertNotIn("selection", row["task_spec"])
 
     def test_preflight_and_queue_block_an_invalid_model_secret(self):
         self.login()
