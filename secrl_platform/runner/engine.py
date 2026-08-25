@@ -113,7 +113,14 @@ class RunnerEngine:
                         self._repository.model_budget_anchor(task_id, run_id)
                     )
                 budget_baseline = guard.usage() if guard is not None else None
-                trajectory, result, usage, budget_exhausted, restricted_outputs = await self._run_case(
+                (
+                    trajectory,
+                    result,
+                    usage,
+                    budget_exhausted,
+                    provider_request_ids,
+                    restricted_outputs,
+                ) = await self._run_case(
                     run_id=run_id,
                     stored_case=stored_case,
                     case=case_by_id[stored_case.external_id],
@@ -218,6 +225,7 @@ class RunnerEngine:
                 budget_anchor=budget_anchor,
                 budget_exhausted=budget_exhausted,
                 case_count=len(cases),
+                provider_request_ids=provider_request_ids,
             )
             if status != "RUNNING":
                 return status
@@ -239,6 +247,7 @@ class RunnerEngine:
         EvaluationResult,
         UsageSnapshot,
         bool,
+        tuple[str, ...],
         tuple[tuple[str, bytes], ...],
     ]:
         lease = self._adapter.prepare_scenario(case.scenario)
@@ -368,6 +377,7 @@ class RunnerEngine:
                         self._adapter.release_scenario(lease)
             if heartbeat_error is not None:
                 raise heartbeat_error
+        provider_request_ids = _safe_runtime_provider_request_ids(runtime)
         trajectory = {
             "protocol_version": "1",
             "run_id": run_id,
@@ -376,8 +386,16 @@ class RunnerEngine:
             "exchanges": exchanges,
             "result": result.model_dump(mode="json"),
             "usage": usage.model_dump(mode="json"),
+            "provider_request_ids": list(provider_request_ids),
         }
-        return trajectory, result, usage, budget_exhausted, restricted_outputs
+        return (
+            trajectory,
+            result,
+            usage,
+            budget_exhausted,
+            provider_request_ids,
+            restricted_outputs,
+        )
 
     async def _heartbeat_loop(self, run_id: str) -> None:
         while True:
@@ -398,6 +416,17 @@ def _submission_for(action) -> Submission | None:
 def _canonical_observation(observation) -> dict[str, Any]:
     payload = observation.model_dump(mode="json", exclude={"ref"})
     return json.loads(canonical_json(payload))
+
+
+def _safe_runtime_provider_request_ids(runtime: AgentRuntime) -> tuple[str, ...]:
+    values = getattr(runtime, "provider_request_ids", ())
+    if not isinstance(values, (tuple, list)):
+        return ()
+    return tuple(
+        value.strip()
+        for value in values
+        if isinstance(value, str) and 0 < len(value.strip()) <= 256
+    )
 
 
 class CapabilityBudgetGuard:

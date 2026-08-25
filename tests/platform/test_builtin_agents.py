@@ -241,6 +241,35 @@ class BuiltinAgentAdapterTest(unittest.TestCase):
             response.usage.model_dump(),
             {"prompt_tokens": 7, "completion_tokens": 3},
         )
+        self.assertIsNone(response.provider_request_id)
+        self.assertEqual(client.provider_request_ids, ())
+
+    def test_legacy_gateway_persists_only_safe_provider_request_id(self):
+        class _Gateway:
+            async def complete(self, _request):
+                return SimpleNamespace(
+                    text="Thought: done\nAction: submit[ok]",
+                    usage=SimpleNamespace(prompt=7, completion=3),
+                    provider_request_id="  provider-response-123  ",
+                )
+
+        client = LegacyGatewayClient(
+            gateway=_Gateway(),
+            model="fixture-model",
+            capability_token="signed-capability-token",
+            agent_revision_id="secrl-react-v1",
+            max_output_tokens=32,
+        )
+        client.bind_episode(_episode())
+        response = client.create(messages=[{"role": "user", "content": "fixture"}])
+
+        self.assertEqual(response.provider_request_id, "provider-response-123")
+        self.assertEqual(client.provider_request_ids, ("provider-response-123",))
+        runtime = BuiltinAgentAdapter(
+            _FakeLegacyAgent("submit[ok]"),
+            model_client=client,
+        )
+        self.assertEqual(runtime.provider_request_ids, ("provider-response-123",))
 
 
 if __name__ == "__main__":

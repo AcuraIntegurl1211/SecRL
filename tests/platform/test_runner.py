@@ -1,3 +1,4 @@
+import asyncio
 import tempfile
 import unittest
 import hashlib
@@ -5,8 +6,9 @@ import json
 from decimal import Decimal
 from pathlib import Path
 
-from secrl_platform.agents.builtin import DeterministicSmokeAgent
+from secrl_platform.agents.builtin import DeterministicSmokeAgent, LegacyGatewayClient
 from secrl_platform.agents.capabilities import (
+    CapabilityBudgetError,
     CapabilityClaims,
     CapabilitySigner,
     InMemoryCapabilityBudgetStore,
@@ -95,6 +97,47 @@ class GatewaySmokeAgent(DeterministicSmokeAgent):
         return hashlib.sha256(self._token.encode("utf-8")).hexdigest()
 
 
+class ProviderRequestIdSmokeAgent(DeterministicSmokeAgent):
+    @property
+    def provider_request_ids(self):
+        return ("provider-response-123",)
+
+
+class BoundaryGatewayAgent(DeterministicSmokeAgent):
+    model_access = "platform_gateway"
+
+    def __init__(self, gateway, token, run_id):
+        super().__init__()
+        self._client = LegacyGatewayClient(
+            gateway=gateway,
+            model="fixture",
+            capability_token=token,
+            agent_revision_id=DeterministicSmokeAgent.revision().id,
+            max_output_tokens=23_958,
+        )
+        self._provider_request_ids = []
+
+    @property
+    def provider_request_ids(self):
+        return tuple(self._provider_request_ids)
+
+    async def reset(self, episode):
+        await super().reset(episode)
+        self._client.bind_episode(episode)
+
+    async def act(self, _observation):
+        await asyncio.to_thread(
+            self._client.create,
+            messages=[{"role": "user", "content": "x" * 400_000}],
+        )
+        self._provider_request_ids = list(self._client.provider_request_ids)
+        raise CapabilityBudgetError("simulated post-call budget boundary")
+
+    @property
+    def model_gateway_binding(self):
+        return self._client.model_gateway_binding
+
+
 class IncorrectlyBoundGatewayAgent(GatewaySmokeAgent):
     @property
     def model_gateway_binding(self):
@@ -127,7 +170,13 @@ class FailingStartAdapter:
         self._delegate.release_scenario(lease)
 
 
-def gateway_model_request(token, *, request_id, run_id="guarded-run"):
+def gateway_model_request(
+    token,
+    *,
+    request_id,
+    run_id="guarded-run",
+    max_output_tokens=1,
+):
     return ModelRequest(
         provider_adapter_version="v1",
         model_role="agent",
@@ -139,7 +188,7 @@ def gateway_model_request(token, *, request_id, run_id="guarded-run"):
         agent_revision_id=DeterministicSmokeAgent.revision().id,
         capability_token=token,
         request_id=request_id,
-        max_output_tokens=1,
+        max_output_tokens=max_output_tokens,
     )
 
 
@@ -157,6 +206,182 @@ class RunnerEngineTest(unittest.IsolatedAsyncioTestCase):
             budget=budget,
         )
         return adapter, repo, handle, LocalArtifactStore(root / "artifacts")
+
+    def test_real_single_case_budget_boundary_is_success_after_commit(self):
+        """A committed final Case must win over a post-call budget signal."""
+        with tempfile.TemporaryDirectory() as directory:
+            adapter, repo, handle, store = self.create_harness(
+                Path(directory),
+                budget={
+                    "max_cases": 1,
+                    "max_tokens": 500_000,
+                    "max_cost": "0.10",
+                },
+                case_ids=("smoke-001",),
+            )
+            self.assertEqual(
+                repo.prepare_for_run(handle.task_id, handle.run_id),
+                "RUNNING",
+            )
+            stored_case = repo.cases(handle.task_id, handle.run_id)[0]
+            attempt = repo.start_attempt(handle.run_id, stored_case.record_id)
+            artifact = store.put_bytes(
+                "trajectory",
+                b'{"protocol_version":"1","exchanges":[]}',
+                media_type="application/json",
+            )
+
+            status = repo.commit_case(
+                task_id=handle.task_id,
+                run_id=handle.run_id,
+                attempt_id=attempt.id,
+                artifact=artifact,
+                result={"reward": 0.0, "correct": False, "steps": 19},
+                usage=UsageSnapshot(
+                    prompt_tokens=411_410,
+                    completion_tokens=0,
+                    estimated_cost=Decimal("0.06095152"),
+                ),
+                budget_anchor=UsageSnapshot(
+                    prompt_tokens=411_410,
+                    completion_tokens=0,
+                    estimated_cost=Decimal("0.06095152"),
+                ),
+                budget_exhausted=True,
+                case_count=1,
+            )
+
+            self.assertEqual(status, "SUCCEEDED")
+            self.assertEqual(repo.task_status(handle.task_id), "SUCCEEDED")
+            self.assertEqual(repo.checkpoint(handle.task_id, handle.run_id), 1)
+            self.assertEqual(repo.final_result_count(handle.task_id), 1)
+
+    async def test_provider_request_id_is_persisted_without_raw_response(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            adapter, repo, handle, store = self.create_harness(
+                root,
+                case_ids=("smoke-001",),
+            )
+
+            status = await RunnerEngine(
+                repository=repo,
+                artifact_store=store,
+                adapter=adapter,
+                runtime_factory=ProviderRequestIdSmokeAgent,
+            ).run(handle.task_id, handle.run_id)
+
+            self.assertEqual(status, "SUCCEEDED")
+            artifacts = list((root / "artifacts").glob("sha256/*/*/*"))
+            self.assertEqual(len(artifacts), 1)
+            trajectory = json.loads(artifacts[0].read_text(encoding="utf-8"))
+            self.assertEqual(
+                trajectory["provider_request_ids"],
+                ["provider-response-123"],
+            )
+            self.assertNotIn("raw_response", trajectory)
+
+    async def test_real_budget_boundary_settles_gateway_and_prioritizes_completion(self):
+        for case_ids, expected_status in (
+            (("smoke-001",), "SUCCEEDED"),
+            (("smoke-001", "smoke-002"), "BUDGET_EXHAUSTED"),
+        ):
+            with self.subTest(case_ids=case_ids):
+                with tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    adapter, repo, handle, store = self.create_harness(
+                        root,
+                        budget={
+                            "max_cases": 1,
+                            "max_tokens": 500_000,
+                            "max_cost": "0.10",
+                        },
+                        case_ids=case_ids,
+                    )
+                    revision_id = DeterministicSmokeAgent.revision().id
+                    signer = CapabilitySigner(
+                        b"g" * 32,
+                        now=lambda: 1_000,
+                        budget_store=InMemoryCapabilityBudgetStore(),
+                    )
+                    token = signer.issue(
+                        CapabilityClaims(
+                            run_id=handle.run_id,
+                            agent_revision_id=revision_id,
+                            allowed_model_roles=("agent",),
+                            max_tokens=500_000,
+                            max_cost=Decimal("0.10"),
+                            issued_at=1_000,
+                            expires_at=1_300,
+                            nonce="real-budget-boundary",
+                        )
+                    )
+
+                    class Provider:
+                        calls = 0
+
+                        async def complete(self, _request):
+                            self.calls += 1
+                            return ModelResponse(
+                                text="unused",
+                                usage=Usage(prompt=387_452, completion=23_958),
+                                provider_request_id="provider-boundary-123",
+                            )
+
+                    provider = Provider()
+                    gateway = ModelGateway(
+                        provider=provider,
+                        pricing=Pricing(
+                            input_per_million="0.14",
+                            output_per_million="0.28",
+                        ),
+                        capability_signer=signer,
+                    )
+                    guard = CapabilityBudgetGuard(
+                        signer=signer,
+                        token=token,
+                        run_id=handle.run_id,
+                        agent_revision_id=revision_id,
+                    )
+
+                    status = await RunnerEngine(
+                        repository=repo,
+                        artifact_store=store,
+                        adapter=adapter,
+                        runtime_factory=lambda: BoundaryGatewayAgent(
+                            gateway,
+                            token,
+                            handle.run_id,
+                        ),
+                        model_budget_guard=guard,
+                    ).run(handle.task_id, handle.run_id)
+
+                    self.assertEqual(
+                        status,
+                        expected_status,
+                        repo.attempt_errors(handle.task_id),
+                    )
+                    self.assertEqual(provider.calls, 1)
+                    self.assertEqual(repo.final_result_count(handle.task_id), 1)
+                    settled = signer.budget_snapshot(
+                        token,
+                        expected_run=handle.run_id,
+                        expected_agent=revision_id,
+                    )
+                    self.assertEqual(settled.reserved_tokens, 0)
+                    self.assertEqual(settled.reserved_cost, Decimal("0"))
+                    self.assertEqual(settled.consumed_tokens, 411_410)
+                    self.assertEqual(
+                        settled.consumed_cost,
+                        Decimal("0.06095152"),
+                    )
+                    artifact = next((root / "artifacts").glob("sha256/*/*/*"))
+                    trajectory = json.loads(artifact.read_text(encoding="utf-8"))
+                    self.assertEqual(
+                        trajectory["provider_request_ids"],
+                        ["provider-boundary-123"],
+                    )
+                    self.assertNotIn("raw_response", trajectory)
 
     async def test_pause_and_resume_happen_only_at_committed_checkpoint(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -359,16 +584,24 @@ class RunnerEngineTest(unittest.IsolatedAsyncioTestCase):
                 model_budget_guard=guard,
             ).run(handle.task_id, handle.run_id)
 
-            self.assertEqual(status, "BUDGET_EXHAUSTED")
+            self.assertEqual(status, "SUCCEEDED")
             self.assertEqual(repo.final_result_count(handle.task_id), 1)
             self.assertEqual(provider.calls, 1)
+            settled = signer.budget_snapshot(
+                token,
+                expected_run=handle.run_id,
+                expected_agent=DeterministicSmokeAgent.revision().id,
+            )
+            self.assertEqual(settled.reserved_tokens, 0)
+            self.assertEqual(settled.reserved_cost, Decimal("0"))
+            self.assertEqual(settled.consumed_tokens, token_limit)
 
-    async def test_model_budget_rejection_before_dispatch_is_terminal(self):
+    async def test_model_budget_rejection_before_dispatch_commits_final_case(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             adapter, repo, handle, store = self.create_harness(
                 root,
-                budget={"max_tokens": 1, "max_cost": "0"},
+                budget={"max_tokens": 1_000, "max_cost": "0"},
                 case_ids=("smoke-001",),
             )
             signer = CapabilitySigner(
@@ -381,7 +614,7 @@ class RunnerEngineTest(unittest.IsolatedAsyncioTestCase):
                     run_id=handle.run_id,
                     agent_revision_id=DeterministicSmokeAgent.revision().id,
                     allowed_model_roles=("agent",),
-                    max_tokens=1,
+                    max_tokens=1_000,
                     max_cost=Decimal("0"),
                     issued_at=1_000,
                     expires_at=1_300,
@@ -399,7 +632,7 @@ class RunnerEngineTest(unittest.IsolatedAsyncioTestCase):
             provider = Provider()
             gateway = ModelGateway(
                 provider=provider,
-                pricing=Pricing(input_per_million=0, output_per_million=0),
+                pricing=Pricing(input_per_million=1, output_per_million=1),
                 capability_signer=signer,
             )
             guard = CapabilityBudgetGuard(
@@ -419,7 +652,7 @@ class RunnerEngineTest(unittest.IsolatedAsyncioTestCase):
                 model_budget_guard=guard,
             ).run(handle.task_id, handle.run_id)
 
-            self.assertEqual(status, "BUDGET_EXHAUSTED")
+            self.assertEqual(status, "SUCCEEDED")
             self.assertEqual(repo.final_result_count(handle.task_id), 1)
             self.assertEqual(provider.calls, 0)
 

@@ -413,6 +413,7 @@ class RunnerRepository:
         budget_anchor: UsageSnapshot | None,
         budget_exhausted: bool,
         case_count: int,
+        provider_request_ids: tuple[str, ...] = (),
     ) -> str:
         with self._session_factory.begin() as session:
             task, run = self._get_task_run(session, task_id, run_id)
@@ -476,24 +477,37 @@ class RunnerRepository:
                         "model_ledger_cost": str(budget_anchor.estimated_cost),
                     }
                 )
+            safe_provider_request_ids = tuple(
+                request_id.strip()
+                for request_id in provider_request_ids
+                if isinstance(request_id, str)
+                and 0 < len(request_id.strip()) <= 256
+            )
+            metrics["provider_request_ids"] = list(safe_provider_request_ids)
             attempt.status = "SUCCEEDED"
             attempt.is_final = True
             attempt.metrics_json = canonical_json(metrics)
             attempt.trajectory_summary_json = canonical_json(
-                {"artifact_sha256": artifact.sha256}
+                {
+                    "artifact_sha256": artifact.sha256,
+                    "provider_request_ids": list(safe_provider_request_ids),
+                }
             )
             run.next_case_index += 1
             if run.cancel_requested:
                 _transition_task(task, "CANCELED")
                 run.status = "CANCELED"
                 task.finished_at = utc_now()
-            elif budget_exhausted:
-                _transition_task(task, "BUDGET_EXHAUSTED")
-                run.status = "FAILED"
-                task.finished_at = utc_now()
+            # The current Case is committed before terminal status is chosen.
+            # A final committed Case completes the selected scope even when
+            # the attempt observed a budget boundary while stopping.
             elif run.next_case_index >= case_count:
                 _transition_task(task, "SUCCEEDED")
                 run.status = "SUCCEEDED"
+                task.finished_at = utc_now()
+            elif budget_exhausted:
+                _transition_task(task, "BUDGET_EXHAUSTED")
+                run.status = "FAILED"
                 task.finished_at = utc_now()
             elif self._budget_reached(session, task, run_id):
                 _transition_task(task, "BUDGET_EXHAUSTED")
