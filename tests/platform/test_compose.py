@@ -55,6 +55,15 @@ class ComposePackagingTest(unittest.TestCase):
         self.assertIn("SECRL_SECRL_MYSQL_PASSWORD: ${SECRL_MYSQL_PASSWORD", platform_environment)
         self.assertIn("SECRL_SECRL_MYSQL_DATABASE: ${SECRL_MYSQL_DATABASE", platform_environment)
 
+    def test_mysql_bootstrap_uses_the_configured_database_name(self):
+        compose = (ROOT / "compose.yaml").read_text()
+        mysql_section = compose.split("x-mysql:", 1)[1].split("services:", 1)[0]
+
+        self.assertIn(
+            "SECRL_MYSQL_DATABASE: ${SECRL_MYSQL_DATABASE:-env_monitor_db}",
+            mysql_section,
+        )
+
     def test_https_proxy_headers_reach_api_cookie_policy(self):
         compose = (ROOT / "compose.yaml").read_text()
         nginx = (ROOT / "docker" / "lite" / "nginx.conf").read_text()

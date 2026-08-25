@@ -22,7 +22,7 @@ x-mysql: &mysql
     MYSQL_ROOT_PASSWORD: ${SECRL_MYSQL_ROOT_PASSWORD:-}
     SECRL_MYSQL_USER: ${SECRL_MYSQL_USER:-benchmark_ro}
     SECRL_MYSQL_PASSWORD: ${SECRL_MYSQL_PASSWORD:-}
-    SECRL_MYSQL_DATABASE: env_monitor_db
+    SECRL_MYSQL_DATABASE: ${SECRL_MYSQL_DATABASE:-env_monitor_db}
   volumes:
     - incident_data:/var/lib/mysql
     - ./docker/mysql/init-incident.sh:/docker-entrypoint-initdb.d/10-init-incident.sh:ro
