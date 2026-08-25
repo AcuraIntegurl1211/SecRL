@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import unittest
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from secrl_platform.agents.builtin import (
@@ -173,6 +174,72 @@ class BuiltinAgentAdapterTest(unittest.TestCase):
         self.assertEqual(
             runtime.model_gateway_binding,
             hashlib.sha256(token.encode("utf-8")).hexdigest(),
+        )
+
+    def test_react_builtin_initializes_and_binds_openai_compatible_gateway_client(self):
+        gateway_client = Mock()
+        from secgym.agents import react_agent
+
+        with patch.object(react_agent, "OpenAIWrapper"):
+            runtime = create_approved_builtin(
+                "secrl-react-v1",
+                {},
+                model_client=gateway_client,
+                model_name="fixture-model",
+            )
+            asyncio.run(runtime.reset(_episode()))
+
+        self.assertIs(runtime.legacy_agent.client, gateway_client)
+
+    def test_react_calls_platform_gateway_for_openai_compatible_config(self):
+        gateway_client = Mock()
+        from secgym.agents import react_agent
+
+        with patch.object(react_agent, "OpenAIWrapper"):
+            runtime = create_approved_builtin(
+                "secrl-react-v1",
+                {},
+                model_client=gateway_client,
+                model_name="fixture-model",
+            )
+        response = SimpleNamespace(
+            model="fixture-model",
+            choices=[SimpleNamespace(message=SimpleNamespace(content="submit[ok]"))],
+            usage=SimpleNamespace(as_dict=lambda: {"prompt_tokens": 1, "completion_tokens": 2}),
+        )
+        with patch.object(react_agent, "call_llm", return_value=response) as call_llm:
+            content = runtime.legacy_agent._call_llm([{"role": "user", "content": "fixture"}])
+
+        self.assertEqual(content, "submit[ok]")
+        call_llm.assert_called_once()
+        self.assertIs(call_llm.call_args.kwargs["client"], gateway_client)
+        self.assertEqual(
+            runtime.legacy_agent.totoal_usage,
+            {"fixture-model": {"prompt_tokens": 1, "completion_tokens": 2}},
+        )
+
+    def test_legacy_gateway_usage_supports_openai_and_autogen_shapes(self):
+        class _Gateway:
+            async def complete(self, _request):
+                return SimpleNamespace(
+                    text="Thought: done\nAction: submit[ok]",
+                    usage=SimpleNamespace(prompt=7, completion=3),
+                )
+
+        client = LegacyGatewayClient(
+            gateway=_Gateway(),
+            model="fixture-model",
+            capability_token="signed-capability-token",
+            agent_revision_id="secrl-react-v1",
+            max_output_tokens=32,
+        )
+        client.bind_episode(_episode())
+        response = client.create(messages=[{"role": "user", "content": "fixture"}])
+
+        self.assertEqual(response.usage.as_dict(), {"prompt_tokens": 7, "completion_tokens": 3})
+        self.assertEqual(
+            response.usage.model_dump(),
+            {"prompt_tokens": 7, "completion_tokens": 3},
         )
 
 

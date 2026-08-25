@@ -320,7 +320,10 @@ class LegacyGatewayClient:
         self.total_usage_summary[self._model] = usage_payload
         return SimpleNamespace(
             choices=[SimpleNamespace(message=SimpleNamespace(content=response.text))],
-            usage=SimpleNamespace(as_dict=lambda: usage_payload),
+            usage=SimpleNamespace(
+                as_dict=lambda: dict(usage_payload),
+                model_dump=lambda **_kwargs: dict(usage_payload),
+            ),
             model=self._model,
         )
 
