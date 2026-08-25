@@ -111,7 +111,7 @@ class ComposePackagingTest(unittest.TestCase):
         api_start = compose.index("\n  api:\n")
         api_end = compose.index("\n  runner:\n", api_start)
         api = compose[api_start:api_end]
-        self.assertIn("networks:\n      - control\n      - egress", api)
+        self.assertIn("networks:\n      - control\n      - incident\n      - egress", api)
         self.assertNotIn("- egress", agent)
 
         web_start = compose.index("\n  web:\n")
