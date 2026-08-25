@@ -76,6 +76,10 @@ docker compose --profile secrl-all up -d
 Use a separate, non-checked-in value for `SECRL_MYSQL_ROOT_PASSWORD` and
 `SECRL_MYSQL_PASSWORD` when an Incident profile is enabled.
 
+To make SecRL Incident selection and preflight available to the API and
+Runner, also set `SECRL_SECRL_RUNTIME_ENABLED=true` in `.env`. The API only
+reports the credential as configured or missing; it never returns the value.
+
 ## Stop and upgrade
 
 ```sh
