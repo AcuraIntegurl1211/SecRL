@@ -186,6 +186,15 @@ class ComposePackagingTest(unittest.TestCase):
             )
             self.assertIn("ReActAgent secrl-react-v1", result.stdout)
 
+    def test_release_gate_bootstraps_wheel_for_no_isolation_wheel_test(self):
+        workflow = (ROOT / ".github" / "workflows" / "secrl-lite-release-gate.yml").read_text()
+        install_step = workflow.split("      - name: Platform core tests", 1)[0]
+
+        self.assertRegex(
+            install_step,
+            r"python -m pip install[^\n]*\bwheel(?:[<>= ]|$)",
+        )
+
     def test_every_platform_service_has_a_real_healthcheck(self):
         compose = (ROOT / "compose.yaml").read_text()
         for service, following in (
