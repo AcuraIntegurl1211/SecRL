@@ -36,7 +36,7 @@ def main() -> int:
         "GET",
         "/api/v1/preflight"
         f"?benchmark_id=secrl&agent_revision_id={DeterministicSmokeAgent.revision().id}"
-        f"&incident_ids={INCIDENT_ID}&case_ids={case_id}",
+        f"&scope_mode=INCIDENTS&incident_ids={INCIDENT_ID}",
     )
     environment = next(
         check for check in preflight["checks"] if check["name"] == "environment"

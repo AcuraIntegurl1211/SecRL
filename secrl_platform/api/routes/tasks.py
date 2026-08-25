@@ -22,6 +22,11 @@ from secrl_platform.api.dependencies import (
 )
 from secrl_platform.api.errors import ApiError
 from secrl_platform.api.schemas import TaskCreateRequest, TaskCreateResponse
+from secrl_platform.api.scope import (
+    AmbiguousScopeError,
+    InvalidScopeError,
+    canonical_scope_mode,
+)
 from secrl_platform.benchmarks.smoke import ProtocolSmokeAdapter
 from secrl_platform.benchmarks.protocol import Scope
 from secrl_platform.benchmarks.secrl import SecRLAdapter, SecRLRunSpec
@@ -77,16 +82,6 @@ def create_task(
     if payload.benchmark_id == "protocol-smoke":
         adapter = ProtocolSmokeAdapter.load_default()
     elif payload.benchmark_id == "secrl":
-        if not context.secrl_runtime_enabled:
-            raise ApiError(
-                503,
-                "SECRL_RUNTIME_UNAVAILABLE",
-                "SecRL environment credentials are missing; configure the read-only Incident database credentials before queuing a run.",
-                details={
-                    "secret_status": "missing",
-                    "next_step": "Configure the SecRL Incident database credentials and rerun preflight.",
-                },
-            )
         adapter = SecRLAdapter(
             run_spec=SecRLRunSpec(
                 max_steps=payload.max_steps,
@@ -97,17 +92,52 @@ def create_task(
     else:
         raise ApiError(422, "INVALID_TASK_SPEC", "Unknown benchmark revision")
     try:
+        scope_mode = canonical_scope_mode(
+            scope_mode=payload.scope_mode,
+            case_ids=payload.case_ids,
+            incident_ids=payload.incident_ids,
+            all_cases=payload.all_cases,
+            allow_empty_all_benchmark=payload.benchmark_id != "secrl",
+        )
+    except AmbiguousScopeError as exc:
+        raise ApiError(
+            422,
+            "AMBIGUOUS_SCOPE",
+            "Choose exactly one scope mode and provide only its matching selection fields.",
+            details={
+                "scope_modes": ["CASES", "INCIDENTS", "ALL_BENCHMARK"],
+                "next_step": "Select CASES, INCIDENTS, or ALL_BENCHMARK and clear the other fields.",
+            },
+        ) from exc
+    except InvalidScopeError as exc:
+        raise ApiError(
+            422,
+            "INVALID_TASK_SCOPE",
+            "A Scope mode and selection are required before queuing a run.",
+            details={"next_step": "Select a Scope mode and matching Case, Incident, or Benchmark selection."},
+        ) from exc
+    if payload.benchmark_id == "secrl" and not context.secrl_runtime_enabled:
+        raise ApiError(
+            503,
+            "SECRL_RUNTIME_UNAVAILABLE",
+            "SecRL environment credentials are missing; configure the read-only Incident database credentials before queuing a run.",
+            details={
+                "secret_status": "missing",
+                "next_step": "Configure the SecRL Incident database credentials and rerun preflight.",
+            },
+        )
+    try:
         if payload.benchmark_id == "secrl":
             selected_case_ids = adapter.resolve_case_ids(
-                case_ids=payload.case_ids,
-                incident_ids=payload.incident_ids,
-                all_cases=payload.all_cases,
+                case_ids=payload.case_ids if scope_mode == "CASES" else (),
+                incident_ids=payload.incident_ids if scope_mode == "INCIDENTS" else (),
+                all_cases=scope_mode == "ALL_BENCHMARK",
             )
-        elif payload.all_cases:
+        elif scope_mode == "ALL_BENCHMARK":
             selected_case_ids = tuple(
                 case.id for case in adapter.enumerate_cases(adapter.dataset_ref(), Scope.all())
             )
-        elif payload.incident_ids:
+        elif scope_mode == "INCIDENTS":
             raise ValueError("Incident selection is only supported by the SecRL benchmark")
         else:
             selected_case_ids = tuple(payload.case_ids)
@@ -118,11 +148,18 @@ def create_task(
             "The selected Cases or Incidents are invalid; choose an available Case, Incident, or Benchmark.",
             details={"next_step": "Refresh the benchmark catalog and select a valid scope."},
         ) from exc
+    resolved_incident_ids = (
+        adapter.incident_ids_for_case_ids(selected_case_ids)
+        if payload.benchmark_id == "secrl"
+        else ()
+    )
     selection = {
+        "scope_mode": scope_mode,
         "case_ids": list(payload.case_ids),
         "incident_ids": list(payload.incident_ids),
-        "all_cases": payload.all_cases,
+        "all_cases": scope_mode == "ALL_BENCHMARK",
         "resolved_case_count": len(selected_case_ids),
+        "resolved_incident_count": len(resolved_incident_ids),
         "dataset_revision": adapter.dataset_ref().version,
         "dataset_sha256": adapter.dataset_ref().sha256,
     }

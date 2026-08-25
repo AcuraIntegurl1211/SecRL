@@ -177,7 +177,7 @@ describe("core operational pages", () => {
       if (path.endsWith("/agents")) return new Response(JSON.stringify([{ id: "agent-db-1", name: "SecRL baseline", kind: "BUILT_IN", sha256: "a".repeat(64), manifest: { agent_id: "secrl-baseline-v1", parameter_schema: { properties: {} } } }]), { status: 200 });
       if (path.endsWith("/models")) return new Response(JSON.stringify([{ id: "model-db-1", name: "DeepSeek", model: "deepseek-chat", credential_configured: true, pricing_configured: true, sha256: "b".repeat(64) }]), { status: 200 });
       if (path.endsWith("/benchmarks")) return new Response(JSON.stringify([{ manifest: { benchmark_id: "secrl", name: "SecRL" }, dataset: { case_count: 589, incidents: { incident_5: 98, incident_34: 82 } } }]), { status: 200 });
-      if (path.includes("/preflight")) return new Response(JSON.stringify({ ready: true, benchmark_id: "secrl", checks: [{ name: "database", status: "ready", message: "ok" }, { name: "environment", status: "ready", message: "ok" }, { name: "model_secret", status: "ready", message: "ok", secret_status: "configured" }, { name: "agent_revision", status: "ready", message: "ok" }, { name: "runner", status: "ready", message: "ok" }] }), { status: 200 });
+      if (path.includes("/preflight")) return new Response(JSON.stringify({ ready: true, benchmark_id: "secrl", scope: { mode: "INCIDENTS", case_count: 180, incident_count: 2, incident_ids: ["incident_5", "incident_34"] }, checks: [{ name: "database", status: "ready", message: "ok" }, { name: "environment", status: "ready", message: "ok" }, { name: "model_secret", status: "ready", message: "ok", secret_status: "configured" }, { name: "agent_revision", status: "ready", message: "ok" }, { name: "runner", status: "ready", message: "ok" }] }), { status: 200 });
       if (path.endsWith("/tasks") && init?.method === "POST") {
         taskBody = JSON.parse(String(init.body));
         return new Response(JSON.stringify({ run_id: "secrl-run-created" }), { status: 201 });
@@ -188,15 +188,18 @@ describe("core operational pages", () => {
     const user = userEvent.setup();
     renderPage(<NewEvaluationPage />);
     expect(await screen.findByLabelText("Benchmark revision")).toHaveValue("secrl");
+    await user.selectOptions(screen.getByLabelText("Scope mode"), "INCIDENTS");
     await user.selectOptions(screen.getByLabelText("Incident selection"), ["incident_5", "incident_34"]);
     expect(screen.getByText("incident_5 · 98 cases")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: /Continue/ }));
     await user.selectOptions(screen.getByLabelText("Model revision (optional)"), "model-db-1");
     await user.click(screen.getByRole("button", { name: /Continue/ }));
     await user.click(screen.getByRole("button", { name: /Continue/ }));
+    expect(await screen.findByText("180 Cases across 2 Incidents")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: /Queue evaluation/ }));
     expect(taskBody).toMatchObject({
       benchmark_id: "secrl",
+      scope_mode: "INCIDENTS",
       incident_ids: ["incident_5", "incident_34"],
       case_ids: [],
       all_cases: false,
@@ -207,6 +210,7 @@ describe("core operational pages", () => {
       .find((path) => path.includes("/preflight"));
     expect(preflightRequest).toContain("incident_ids=incident_5");
     expect(preflightRequest).toContain("incident_ids=incident_34");
+    expect(preflightRequest).toContain("scope_mode=INCIDENTS");
   });
 
   it("shows unavailable Incident profiles and the safe Compose start command", async () => {
@@ -221,12 +225,33 @@ describe("core operational pages", () => {
     const user = userEvent.setup();
     renderPage(<NewEvaluationPage />);
     expect(await screen.findByLabelText("Benchmark revision")).toHaveValue("secrl");
+    await user.selectOptions(screen.getByLabelText("Scope mode"), "INCIDENTS");
     await user.selectOptions(screen.getByLabelText("Incident selection"), "incident_34");
     await user.click(screen.getByRole("button", { name: /Continue/ }));
     await user.click(screen.getByRole("button", { name: /Continue/ }));
     await user.click(screen.getByRole("button", { name: /Continue/ }));
     await user.click(screen.getByRole("button", { name: /Queue evaluation/ }));
     expect(await screen.findByText(/docker compose --profile incident_34 up -d/)).toBeInTheDocument();
+  });
+
+  it("clears incompatible scope fields when the scope mode changes", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path.endsWith("/agents")) return new Response(JSON.stringify([{ id: "agent-db-1", name: "Smoke", kind: "BUILT_IN", sha256: "a".repeat(64), manifest: { parameter_schema: { properties: {} } } }]), { status: 200 });
+      if (path.endsWith("/models")) return new Response(JSON.stringify([]), { status: 200 });
+      if (path.endsWith("/benchmarks")) return new Response(JSON.stringify([{ manifest: { benchmark_id: "protocol-smoke", name: "Protocol Smoke" }, dataset: { case_count: 1 } }, { manifest: { benchmark_id: "secrl", name: "SecRL" }, dataset: { case_count: 1, incidents: { incident_5: 1 } } }]), { status: 200 });
+      if (path.includes("/preflight")) return new Response(JSON.stringify({ ready: true, benchmark_id: "protocol-smoke", scope: { mode: "ALL_BENCHMARK", case_count: 1, incident_count: 0 }, checks: [] }), { status: 200 });
+      throw new Error(`unexpected request ${path}`);
+    }));
+    const user = userEvent.setup();
+    renderPage(<NewEvaluationPage />);
+    expect(await screen.findByLabelText("Benchmark revision")).toHaveValue("protocol-smoke");
+    await user.selectOptions(screen.getByLabelText("Benchmark revision"), "secrl");
+    await user.type(screen.getByLabelText("Case IDs"), "case-1");
+    await user.selectOptions(screen.getByLabelText("Scope mode"), "INCIDENTS");
+    expect(screen.queryByLabelText("Case IDs")).not.toBeInTheDocument();
+    await user.selectOptions(screen.getByLabelText("Scope mode"), "ALL_BENCHMARK");
+    expect(screen.queryByLabelText("Incident selection")).not.toBeInTheDocument();
   });
 
   it("does not claim an Agent Service is healthy before a real manifest check", async () => {

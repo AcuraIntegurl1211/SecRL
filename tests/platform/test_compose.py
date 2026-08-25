@@ -49,6 +49,11 @@ class ComposePackagingTest(unittest.TestCase):
         self.assertIn("incident-34", workflow)
         self.assertNotIn("--profile secrl-all", workflow)
 
+    def test_single_incident_smoke_uses_one_explicit_scope_source(self):
+        smoke = (ROOT / "scripts" / "lite-incident-smoke.py").read_text()
+        self.assertIn("scope_mode=INCIDENTS", smoke)
+        self.assertNotIn("&case_ids={case_id}", smoke)
+
     def test_platform_receives_documented_admin_and_capability_settings(self):
         compose = (ROOT / "compose.yaml").read_text()
         platform_environment = compose.split("x-mysql:", 1)[0]

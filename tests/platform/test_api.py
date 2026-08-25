@@ -194,6 +194,28 @@ class ApiTest(unittest.TestCase):
             json={"kind": "BUILT_IN", "revision_id": "secrl-baseline-v1"},
         )
         self.assertEqual(agent.status_code, 201, agent.text)
+        incident_only = self.client.post(
+            "/api/v1/tasks",
+            headers=headers,
+            json={
+                "name": "incident 5 only",
+                "benchmark_id": "secrl",
+                "agent_revision_id": agent.json()["id"],
+                "model_config_revision_id": model.json()["id"],
+                "scope_mode": "INCIDENTS",
+                "incident_ids": ["incident_5"],
+            },
+        )
+        self.assertEqual(incident_only.status_code, 201, incident_only.text)
+        incident_only_task = next(
+            item for item in self.client.get("/api/v1/tasks").json()
+            if item["id"] == incident_only.json()["id"]
+        )
+        self.assertEqual(len(incident_only_task["task_spec"]["case_ids"]), 98)
+        self.assertEqual(incident_only_task["task_spec"]["case_count"], 98)
+        self.assertEqual(incident_only_task["task_spec"]["incident_count"], 1)
+        self.assertEqual(incident_only_task["task_spec"]["selection"]["resolved_incident_count"], 1)
+
         response = self.client.post(
             "/api/v1/tasks",
             headers=headers,
@@ -202,17 +224,25 @@ class ApiTest(unittest.TestCase):
                 "benchmark_id": "secrl",
                 "agent_revision_id": agent.json()["id"],
                 "model_config_revision_id": model.json()["id"],
+                "scope_mode": "INCIDENTS",
                 "case_ids": [],
                 "incident_ids": ["incident_5", "incident_34"],
             },
         )
 
         self.assertEqual(response.status_code, 201, response.text)
-        task = self.client.get("/api/v1/tasks").json()[0]
+        task = next(
+            item for item in self.client.get("/api/v1/tasks").json()
+            if item["id"] == response.json()["id"]
+        )
         spec = task["task_spec"]
         self.assertEqual(len(spec["case_ids"]), 180)
         self.assertEqual(len(set(spec["case_ids"])), 180)
+        self.assertEqual(spec["case_count"], 180)
+        self.assertEqual(spec["incident_count"], 2)
+        self.assertEqual(spec["selection"]["scope_mode"], "INCIDENTS")
         self.assertEqual(spec["selection"]["incident_ids"], ["incident_5", "incident_34"])
+        self.assertEqual(spec["selection"]["resolved_incident_count"], 2)
         self.assertEqual(spec["dataset_sha256"], "cc1fd79db8627768611b8b230c23d5cb11c19b50ad25f3810dba3fe8adef8e8f")
 
         full = self.client.post(
@@ -223,7 +253,7 @@ class ApiTest(unittest.TestCase):
                 "benchmark_id": "secrl",
                 "agent_revision_id": agent.json()["id"],
                 "model_config_revision_id": model.json()["id"],
-                "case_ids": [],
+                "scope_mode": "ALL_BENCHMARK",
                 "all_cases": True,
             },
         )
@@ -233,7 +263,62 @@ class ApiTest(unittest.TestCase):
             if item["id"] == full.json()["id"]
         )
         self.assertEqual(len(full_task["task_spec"]["case_ids"]), 589)
+        self.assertEqual(full_task["task_spec"]["case_count"], 589)
+        self.assertEqual(full_task["task_spec"]["incident_count"], 8)
+        self.assertEqual(full_task["task_spec"]["selection"]["scope_mode"], "ALL_BENCHMARK")
         self.assertTrue(full_task["task_spec"]["selection"]["all_cases"])
+
+    def test_mixed_scope_fields_return_ambiguous_scope(self):
+        self.login()
+        headers = {"X-CSRF-Token": self.csrf_token}
+        original_context = self.app.state.api_context
+        self.app.state.api_context = replace(original_context, secrl_runtime_enabled=False)
+        response = self.client.post(
+            "/api/v1/tasks",
+            headers=headers,
+            json={
+                "name": "ambiguous scope",
+                "benchmark_id": "secrl",
+                "agent_revision_id": "secrl-baseline-v1",
+                "scope_mode": "CASES",
+                "case_ids": ["incident_5:0:fa690c9807741e82011ba257388064a03a44f26236870a79f811317a1dc60951"],
+                "incident_ids": ["incident_5"],
+            },
+        )
+
+        self.assertEqual(response.status_code, 422, response.text)
+        self.assertEqual(response.json()["error"]["code"], "AMBIGUOUS_SCOPE")
+        self.app.state.api_context = original_context
+
+        mismatched = self.client.post(
+            "/api/v1/tasks",
+            headers=headers,
+            json={
+                "name": "mismatched scope",
+                "benchmark_id": "secrl",
+                "agent_revision_id": "secrl-baseline-v1",
+                "scope_mode": "CASES",
+                "incident_ids": ["incident_5"],
+            },
+        )
+        self.assertEqual(mismatched.status_code, 422, mismatched.text)
+        self.assertEqual(mismatched.json()["error"]["code"], "INVALID_TASK_SCOPE")
+
+    def test_single_case_scope_freezes_exactly_one_case(self):
+        self.login()
+        headers = {"X-CSRF-Token": self.csrf_token}
+        response = self.client.post(
+            "/api/v1/tasks",
+            headers=headers,
+            json={**valid_smoke_task(), "scope_mode": "CASES"},
+        )
+
+        self.assertEqual(response.status_code, 201, response.text)
+        task = next(item for item in self.client.get("/api/v1/tasks").json() if item["id"] == response.json()["id"])
+        self.assertEqual(len(task["task_spec"]["case_ids"]), 1)
+        self.assertEqual(task["task_spec"]["case_count"], 1)
+        self.assertEqual(task["task_spec"]["selection"]["scope_mode"], "CASES")
+        self.assertEqual(task["task_spec"]["selection"]["resolved_case_count"], 1)
 
     def test_api_created_smoke_agent_is_runner_executable_and_listed_with_run(self):
         self.login()
@@ -1179,6 +1264,59 @@ class ApiTest(unittest.TestCase):
             environment_check["start_command"],
             "docker compose --profile incident_5 up -d",
         )
+
+    def test_preflight_freezes_scope_counts_and_rejects_mixed_fields(self):
+        self.login()
+        original_context = self.app.state.api_context
+        self.app.state.api_context = replace(
+            original_context,
+            secrl_runtime_enabled=True,
+            secrl_environment_probe=lambda _incidents: True,
+        )
+
+        incident = self.client.get(
+            "/api/v1/preflight",
+            params={
+                "benchmark_id": "secrl",
+                "agent_revision_id": DeterministicSmokeAgent.revision().id,
+                "scope_mode": "INCIDENTS",
+                "incident_ids": ["incident_5"],
+            },
+        )
+        self.assertEqual(incident.status_code, 200, incident.text)
+        self.assertEqual(incident.json()["scope"], {
+            "mode": "INCIDENTS",
+            "case_count": 98,
+            "incident_count": 1,
+            "incident_ids": ["incident_5"],
+        })
+
+        case = self.client.get(
+            "/api/v1/preflight",
+            params={
+                "benchmark_id": "secrl",
+                "agent_revision_id": DeterministicSmokeAgent.revision().id,
+                "scope_mode": "CASES",
+                "case_ids": ["incident_5:0:fa690c9807741e82011ba257388064a03a44f26236870a79f811317a1dc60951"],
+            },
+        )
+        self.assertEqual(case.status_code, 200, case.text)
+        self.assertEqual(case.json()["scope"]["case_count"], 1)
+        self.assertEqual(case.json()["scope"]["incident_count"], 1)
+
+        ambiguous = self.client.get(
+            "/api/v1/preflight",
+            params={
+                "benchmark_id": "secrl",
+                "agent_revision_id": DeterministicSmokeAgent.revision().id,
+                "scope_mode": "CASES",
+                "case_ids": ["incident_5:0:fa690c9807741e82011ba257388064a03a44f26236870a79f811317a1dc60951"],
+                "incident_ids": ["incident_5"],
+            },
+        )
+        self.assertEqual(ambiguous.status_code, 422, ambiguous.text)
+        self.assertEqual(ambiguous.json()["error"]["code"], "AMBIGUOUS_SCOPE")
+        self.app.state.api_context = original_context
 
     def test_preflight_and_queue_block_an_invalid_model_secret(self):
         self.login()

@@ -102,6 +102,12 @@ export type PreflightResponse = {
   ready: boolean;
   benchmark_id: string;
   checks: PreflightCheck[];
+  scope?: {
+    mode: "CASES" | "INCIDENTS" | "ALL_BENCHMARK";
+    case_count: number;
+    incident_count: number;
+    incident_ids?: string[];
+  } | null;
 };
 
 export type TaskSummary = {

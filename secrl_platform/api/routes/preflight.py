@@ -8,6 +8,12 @@ from sqlalchemy import text
 from secrl_platform.agents.builtin import DeterministicSmokeAgent
 from secrl_platform.api.dependencies import ApiContext, get_context, require_user
 from secrl_platform.api.errors import ApiError
+from secrl_platform.api.scope import (
+    AmbiguousScopeError,
+    InvalidScopeError,
+    ScopeMode,
+    canonical_scope_mode,
+)
 from secrl_platform.benchmarks.secrl import SecRLAdapter
 from secrl_platform.storage.orm import (
     AgentRevisionORM,
@@ -25,6 +31,7 @@ def preflight(
     benchmark_id: str = Query("secrl", min_length=1, max_length=64),
     model_config_revision_id: str | None = Query(None, max_length=128),
     agent_revision_id: str | None = Query(None, max_length=128),
+    scope_mode: ScopeMode | None = Query(None),
     case_ids: tuple[str, ...] = Query(default=()),
     incident_ids: tuple[str, ...] = Query(default=()),
     all_cases: bool = Query(False),
@@ -32,6 +39,7 @@ def preflight(
     context: ApiContext = Depends(get_context),
 ) -> dict:
     checks: list[dict[str, str]] = []
+    scope_summary: dict[str, object] | None = None
     with context.session_factory() as session:
         try:
             session.execute(text("SELECT 1"))
@@ -48,12 +56,30 @@ def preflight(
 
         if benchmark_id == "secrl":
             try:
-                selected_incidents = _selected_incidents(
+                selected_scope = _selected_scope(
+                    scope_mode=scope_mode,
                     case_ids=case_ids,
                     incident_ids=incident_ids,
                     all_cases=all_cases,
                 )
-            except (KeyError, TypeError, ValueError) as exc:
+                selected_incidents = selected_scope[2]
+                scope_summary = {
+                    "mode": selected_scope[0],
+                    "case_count": len(selected_scope[1]),
+                    "incident_count": len(selected_incidents),
+                    "incident_ids": list(selected_incidents),
+                }
+            except AmbiguousScopeError as exc:
+                raise ApiError(
+                    422,
+                    "AMBIGUOUS_SCOPE",
+                    "Choose exactly one scope mode and provide only its matching selection fields.",
+                    details={
+                        "scope_modes": ["CASES", "INCIDENTS", "ALL_BENCHMARK"],
+                        "next_step": "Select a Scope mode and clear incompatible fields.",
+                    },
+                ) from exc
+            except (InvalidScopeError, KeyError, TypeError, ValueError) as exc:
                 raise ApiError(
                     422,
                     "INVALID_TASK_SCOPE",
@@ -187,6 +213,7 @@ def preflight(
         "ready": all(check["status"] in {"ready", "not_applicable"} for check in checks),
         "benchmark_id": benchmark_id,
         "checks": checks,
+        "scope": scope_summary,
         "dataset": (
             {"revision": SecRLAdapter().dataset_ref().version, "sha256": SecRLAdapter().dataset_ref().sha256}
             if benchmark_id == "secrl"
@@ -195,30 +222,32 @@ def preflight(
     }
 
 
-def _selected_incidents(
+def _selected_scope(
     *,
+    scope_mode: ScopeMode | None,
     case_ids: tuple[str, ...],
     incident_ids: tuple[str, ...],
     all_cases: bool,
-) -> tuple[str, ...]:
+) -> tuple[ScopeMode, tuple[str, ...], tuple[str, ...]]:
     adapter = SecRLAdapter()
-    effective_all_cases = all_cases or not case_ids and not incident_ids
-    resolved = adapter.resolve_case_ids(
+    mode = canonical_scope_mode(
+        scope_mode=scope_mode,
         case_ids=case_ids,
         incident_ids=incident_ids,
-        all_cases=effective_all_cases,
+        all_cases=all_cases,
+        allow_empty_all_benchmark=True,
     )
-    resolved_set = set(resolved)
-    selected: list[str] = []
-    for incident_id in incident_ids:
-        if incident_id not in selected:
-            selected.append(incident_id)
-    for incident_id in adapter.incident_counts():
-        if incident_id in selected:
-            continue
-        if any(case_id in resolved_set for case_id in adapter.incident_case_ids(incident_id)):
-            selected.append(incident_id)
-    return tuple(selected)
+    resolved = adapter.resolve_case_ids(
+        case_ids=case_ids if mode == "CASES" else (),
+        incident_ids=incident_ids if mode == "INCIDENTS" else (),
+        all_cases=mode == "ALL_BENCHMARK",
+    )
+    selected = (
+        incident_ids
+        if mode == "INCIDENTS"
+        else adapter.incident_ids_for_case_ids(resolved)
+    )
+    return mode, resolved, tuple(dict.fromkeys(selected))
 
 
 def _incident_start_command(incident_ids: tuple[str, ...] | list[str]) -> str:

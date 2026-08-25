@@ -435,6 +435,22 @@
             ],
             "title": "Model Config Revision Id"
           },
+          "scope_mode": {
+            "anyOf": [
+              {
+                "enum": [
+                  "CASES",
+                  "INCIDENTS",
+                  "ALL_BENCHMARK"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Scope Mode"
+          },
           "name": {
             "maxLength": 256,
             "minLength": 1,
@@ -1127,6 +1143,27 @@
                 }
               ],
               "title": "Agent Revision Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "scope_mode",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "CASES",
+                    "INCIDENTS",
+                    "ALL_BENCHMARK"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Scope Mode"
             }
           },
           {

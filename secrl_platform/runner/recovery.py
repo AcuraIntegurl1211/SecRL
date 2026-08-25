@@ -216,12 +216,16 @@ class RunnerRepository:
                 "agent_revision_sha256": agent_revision.manifest_sha256,
                 "case_ids": [case.id for case in cases],
                 "case_record_ids": [record.id for record in case_records],
+                "case_count": len(cases),
                 "budget": frozen_budget,
                 "limits": frozen_limits,
                 "agent_parameters": dict(agent_parameters or {}),
             }
             if selection is not None:
                 task_spec["selection"] = dict(selection)
+                task_spec["incident_count"] = int(
+                    selection.get("resolved_incident_count", 0)
+                )
             if model_config_revision_id is not None:
                 if model_config_sha256 is None:
                     raise ValueError("model config hash is required")

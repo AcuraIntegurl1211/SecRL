@@ -344,6 +344,8 @@ class SecRLAdapter:
     ) -> tuple[str, ...]:
         if all_cases and (case_ids or incident_ids):
             raise ValueError("all benchmark selection cannot be combined with case or Incident selection")
+        if case_ids and incident_ids:
+            raise ValueError("ambiguous scope: choose Case IDs or Incident IDs")
         if all_cases:
             return self._case_order
         selected: list[str] = []
@@ -362,6 +364,18 @@ class SecRLAdapter:
         if not selected:
             raise ValueError("at least one Case, Incident, or the full Benchmark must be selected")
         return tuple(selected)
+
+    def incident_ids_for_case_ids(self, case_ids: tuple[str, ...]) -> tuple[str, ...]:
+        incident_ids: list[str] = []
+        seen: set[str] = set()
+        for case_id in case_ids:
+            case = self._cases.get(case_id)
+            if case is None:
+                raise ValueError(f"unknown SecRL Case: {case_id}")
+            if case.scenario_id not in seen:
+                seen.add(case.scenario_id)
+                incident_ids.append(case.scenario_id)
+        return tuple(incident_ids)
 
     def validate_dataset(self, source: Path) -> SecRLValidationReport:
         try:
