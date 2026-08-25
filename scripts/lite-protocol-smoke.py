@@ -32,7 +32,7 @@ def main() -> int:
             {
                 "name": "Release gate no-call model",
                 "provider": "openai-compatible",
-                "endpoint": "https://api.openai.com/v1",
+                "endpoint": "https://api.deepseek.com",
                 "model": "release-gate-no-call",
                 "parameters": {"max_output_tokens": 64},
                 "pricing": {"input_per_million": "1", "output_per_million": "1"},

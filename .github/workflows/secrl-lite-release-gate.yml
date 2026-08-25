@@ -32,6 +32,7 @@ jobs:
           cache-dependency-path: web/package-lock.json
       - name: Install locked Python dependencies
         run: |
+          python -m pip install --disable-pip-version-check "wheel>=0.45,<1"
           python -m pip install --disable-pip-version-check -r requirements-platform.txt
           python -m pip install --disable-pip-version-check --no-deps .
       - name: Platform core tests
@@ -54,13 +55,16 @@ jobs:
             printf 'SECRL_TEST_ADMIN_PASSWORD=%s\n' "$(openssl rand -hex 24)"
             printf 'SECRL_AGENT_SERVICE_CAPABILITY_SECRET=%s\n' "$(openssl rand -hex 32)"
             printf 'SECRL_TEST_MODEL_API_KEY=%s\n' "$(openssl rand -hex 24)"
+            printf 'SECRL_SECRL_RUNTIME_ENABLED=true\n'
+            printf 'SECRL_MYSQL_ROOT_PASSWORD=%s\n' "$(openssl rand -hex 24)"
+            printf 'SECRL_MYSQL_PASSWORD=%s\n' "$(openssl rand -hex 24)"
           } > .env.ci
       - name: Validate and build linux/amd64 Compose
         run: |
-          docker compose -p secrlliteci --env-file .env.ci --profile smoke config --quiet
-          docker compose -p secrlliteci --env-file .env.ci --profile smoke build
+          docker compose -p secrlliteci --env-file .env.ci --profile smoke --profile incident_34 config --quiet
+          docker compose -p secrlliteci --env-file .env.ci --profile smoke --profile incident_34 build
       - name: Start from an empty volume and wait for health
-        run: docker compose -p secrlliteci --env-file .env.ci --profile smoke up -d --wait api runner web agent-service-reference
+        run: docker compose -p secrlliteci --env-file .env.ci --profile smoke --profile incident_34 up -d --wait api runner web agent-service-reference incident-34
       - name: API health and Protocol-Smoke workflows
         run: |
           set -a
@@ -68,6 +72,15 @@ jobs:
           set +a
           export SECRL_GATE_BASE_URL=http://127.0.0.1:18080
           python scripts/lite-protocol-smoke.py
+      - name: Single Incident environment smoke
+        run: |
+          set -a
+          . ./.env.ci
+          set +a
+          export SECRL_ADMIN_PASSWORD="$SECRL_TEST_ADMIN_PASSWORD"
+          export SECRL_GATE_BASE_URL=http://127.0.0.1:18080
+          export SECRL_INCIDENT_SMOKE_ID=incident_34
+          python scripts/lite-incident-smoke.py
       - name: Backup, restore, and tamper rejection
         run: |
           docker compose -p secrlliteci --env-file .env.ci exec -T api secrl-lite backup /tmp/release-gate-backup
@@ -79,10 +92,10 @@ jobs:
           fi
       - name: Compose diagnostics
         if: always()
-        run: docker compose -p secrlliteci --env-file .env.ci --profile smoke ps || true
+        run: docker compose -p secrlliteci --env-file .env.ci --profile smoke --profile incident_34 ps || true
       - name: Clean isolated Compose project
         if: always()
-        run: docker compose -p secrlliteci --env-file .env.ci --profile smoke down --volumes --remove-orphans || true
+        run: docker compose -p secrlliteci --env-file .env.ci --profile smoke --profile incident_34 down --volumes --remove-orphans || true
 
   multiarch-build:
     name: linux/amd64 + linux/arm64 image build

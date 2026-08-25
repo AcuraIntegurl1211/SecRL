@@ -51,7 +51,16 @@ def get_run(
         if run is None:
             raise ApiError(404, "RUN_NOT_FOUND", "Run was not found")
         task = session.get(EvaluationTaskORM, run.task_id)
-        return _run_payload(run, task)
+        failed_attempt = session.scalar(
+            select(CaseAttemptORM)
+            .where(
+                CaseAttemptORM.run_id == id,
+                CaseAttemptORM.status == "FAILED",
+            )
+            .order_by(CaseAttemptORM.created_at.desc(), CaseAttemptORM.id.desc())
+            .limit(1)
+        )
+        return _run_payload(run, task, failed_attempt)
 
 
 @router.post("/runs/{id}:pause", tags=["runs"])
@@ -299,13 +308,24 @@ def retry_case(
         if run is None:
             raise ApiError(404, "RUN_NOT_FOUND", "Run was not found")
         task = session.get(EvaluationTaskORM, run.task_id)
+        if task is None:
+            raise ApiError(404, "RUN_NOT_FOUND", "Run task was not found")
+        task_spec = json.loads(task.task_spec_json)
+        frozen_case_ids = tuple(task_spec.get("case_ids", ()))
+        frozen_record_ids = tuple(task_spec.get("case_record_ids", ()))
+        case_scope = (
+            CaseRecordORM.id.in_(frozen_record_ids)
+            if frozen_record_ids
+            else CaseRecordORM.scenario_id == run.scenario_id
+        )
         case = session.scalar(
             select(CaseRecordORM).where(
-                CaseRecordORM.scenario_id == run.scenario_id,
+                CaseRecordORM.dataset_version_id == task.dataset_version_id,
+                case_scope,
                 CaseRecordORM.external_id == case_id,
             )
         )
-        if task is None or case is None:
+        if case is None or case.external_id not in frozen_case_ids:
             raise ApiError(404, "CASE_NOT_FOUND", "Run case was not found")
         if task.status != "FAILED" or case.ordinal != run.next_case_index:
             raise ApiError(409, "CASE_RETRY_CONFLICT", "Case is not retryable")
@@ -504,14 +524,21 @@ def _task_id(context: ApiContext, run_id: str) -> str:
         return run.task_id
 
 
-def _run_payload(run: RunORM, task: EvaluationTaskORM | None) -> dict:
-    return {
+def _run_payload(
+    run: RunORM,
+    task: EvaluationTaskORM | None,
+    failed_attempt: CaseAttemptORM | None = None,
+) -> dict:
+    payload = {
         "id": run.id,
         "task_id": run.task_id,
         "status": task.status if task is not None else run.status,
         "checkpoint": run.next_case_index,
         "run_spec_sha256": run.run_spec_sha256,
     }
+    if failed_attempt is not None and failed_attempt.error_json:
+        payload["failure"] = json.loads(failed_attempt.error_json)
+    return payload
 
 
 def _artifact_payload(artifact: ArtifactORM) -> dict:

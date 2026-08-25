@@ -94,6 +94,32 @@ class SecRLImportTest(unittest.TestCase):
         self.assertEqual(len(manifest.dataset_sha256), 64)
         self.assertEqual(manifest.dataset_sha256, adapter.dataset_ref().sha256)
 
+    def test_resolves_cases_or_incidents_without_duplicate_cases(self):
+        adapter = SecRLAdapter()
+
+        selected = adapter.resolve_case_ids(incident_ids=("incident_5", "incident_34"))
+
+        self.assertEqual(len(selected), 180)
+        self.assertEqual(len(set(selected)), 180)
+        self.assertTrue(all(case_id.startswith(("incident_5:", "incident_34:")) for case_id in selected))
+        one_case = adapter.resolve_case_ids(case_ids=(selected[0],))
+        self.assertEqual(one_case, (selected[0],))
+
+    def test_rejects_ambiguous_case_and_incident_scope(self):
+        adapter = SecRLAdapter()
+
+        with self.assertRaisesRegex(ValueError, "ambiguous scope"):
+            adapter.resolve_case_ids(
+                case_ids=(adapter.incident_case_ids("incident_5")[0],),
+                incident_ids=("incident_5",),
+            )
+
+    def test_resolves_all_benchmark_cases_and_rejects_unknown_incident(self):
+        adapter = SecRLAdapter()
+        self.assertEqual(len(adapter.resolve_case_ids(all_cases=True)), 589)
+        with self.assertRaisesRegex(ValueError, "unknown SecRL Incident"):
+            adapter.resolve_case_ids(incident_ids=("incident_999",))
+
     def test_missing_or_malformed_dataset_is_reported(self):
         adapter = SecRLAdapter()
         with tempfile.TemporaryDirectory() as directory:

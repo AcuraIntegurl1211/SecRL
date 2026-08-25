@@ -68,15 +68,16 @@ class ReActAgent:
         self.config_list = config_list
         self.temperature = temperature
         self.cache_seed = cache_seed
+        api_type = config_list[0].get('api_type', '')
 
-        if "ai_foundry" in config_list[0]['api_type']:
+        if "ai_foundry" in api_type:
             from secgym.config_key import api_key
             self.client = ChatCompletionsClient(
             endpoint= config_list[0]['endpoint'],
             credential=AzureKeyCredential(api_key),
             seed =self.cache_seed
             )
-        elif "azure" in config_list[0]['api_type']:
+        elif "azure" in api_type or "openai" in api_type:
             self.client = OpenAIWrapper(config_list=config_list, cache_seed=cache_seed)
         
         sys_prompt = BASE_PROMPT
@@ -98,7 +99,7 @@ class ReActAgent:
 
     def _call_llm(self, messages):
         
-        if "azure" in self.config_list[0]['api_type']:
+        if "azure" in self.config_list[0]['api_type'] or "openai" in self.config_list[0]['api_type']:
             response = call_llm(
                 client=self.client, 
                 model=self.config_list[0]['model'],
@@ -108,7 +109,14 @@ class ReActAgent:
                 temperature=self.temperature,
                 stop=["Observation:", "observation:"]
             )
-            update_model_usage(self.totoal_usage, model_name=response.model, usage_dict=response.usage.model_dump())
+            usage = response.usage
+            if hasattr(usage, "model_dump"):
+                usage_dict = usage.model_dump()
+            elif hasattr(usage, "as_dict"):
+                usage_dict = usage.as_dict()
+            else:
+                usage_dict = {}
+            update_model_usage(self.totoal_usage, model_name=response.model, usage_dict=usage_dict)
         elif "ai_foundry" in self.config_list[0]['api_type']:
             response = call_llm_foundry(
                 client=self.client, 
@@ -177,7 +185,7 @@ class ReActAgent:
             credential=AzureKeyCredential(api_key),
             seed =self.cache_seed
             )
-        elif "azure" in self.config_list[0]['api_type']:
+        elif "azure" in self.config_list[0]['api_type'] or "openai" in self.config_list[0]['api_type']:
             self.client = OpenAIWrapper(config_list=self.config_list, cache_seed=self.cache_seed)
 
         self.step_count = 0

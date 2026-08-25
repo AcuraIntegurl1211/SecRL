@@ -77,11 +77,26 @@ def create_model(
             resolver=context.model_provider_resolver,
         )
     except ValueError:
-        raise ApiError(422, "INVALID_MODEL_CONFIG", "Model endpoint is invalid")
+        raise ApiError(
+            422,
+            "INVALID_MODEL_CONFIG",
+            "Model endpoint is not an allowed HTTPS OpenAI-compatible URL; use a platform-approved provider host such as api.deepseek.com.",
+            details={"next_step": "Use an HTTPS endpoint without embedded credentials and ask an administrator to approve a new host if needed."},
+        )
+    api_key = request.headers.get("X-Model-API-Key")
+    if not api_key:
+        raise ApiError(
+            422,
+            "MODEL_CREDENTIAL_MISSING",
+            "Model API key is missing; provide it so the platform can encrypt the credential before saving.",
+            details={
+                "secret_status": "missing",
+                "next_step": "Enter the provider API key and submit the model again.",
+            },
+        )
     parameters = payload.parameters.model_dump(mode="json", exclude_none=True)
     pricing = payload.pricing.model_dump(mode="json", exclude_none=True)
-    api_key = request.headers.get("X-Model-API-Key")
-    secret_ref_id = str(uuid.uuid4()) if api_key else None
+    secret_ref_id = str(uuid.uuid4())
     frozen = {
         "endpoint": payload.endpoint,
         "model": payload.model,
@@ -104,7 +119,8 @@ def create_model(
                     raise ApiError(
                         503,
                         "SECRET_STORE_UNAVAILABLE",
-                        "Model credential storage is unavailable",
+                        "Model credential storage is unavailable; the platform master key must be configured before saving a model.",
+                        details={"next_step": "Configure SECRL_MASTER_KEY and restart the platform."},
                     )
                 encrypted = context.secret_store.encrypt(
                     api_key,
@@ -173,7 +189,8 @@ async def create_agent(
             raise ApiError(
                 422,
                 "AGENT_SERVICE_CHECK_FAILED",
-                "Agent Service manifest did not match registration",
+                "Agent Service manifest did not match registration; verify the endpoint and SHA-256 revision.",
+                details={"next_step": "Run the service manifest check again and register the exact returned revision and hash."},
             )
         manifest = AgentManifest(
             agent_id=service_manifest.agent_revision_id,
@@ -227,7 +244,8 @@ async def create_agent(
         raise ApiError(
             422,
             "AGENT_REVISION_NOT_ALLOWLISTED",
-            "Agent revision is not allowlisted",
+            "Agent revision is not allowlisted; choose a platform-approved built-in revision or register a checked Agent Service.",
+            details={"next_step": "Use a revision shown in the Agents page."},
         )
     with context.session_factory.begin() as session:
         existing = session.scalar(
@@ -366,6 +384,9 @@ def _benchmark_payload(adapter) -> dict:
         "split": manifest.get("dataset_split"),
         "schema_version": manifest.get("dataset_schema_version"),
     }
+    incident_counts = getattr(adapter, "incident_counts", None)
+    if callable(incident_counts):
+        dataset["incidents"] = incident_counts()
     return {"manifest": manifest, "dataset": dataset}
 
 
@@ -422,5 +443,8 @@ async def _inspect_service(context: ApiContext, endpoint: str):
         raise ApiError(
             422,
             "AGENT_SERVICE_CHECK_FAILED",
-            "Agent Service validation failed",
+            "Agent Service validation failed; verify the allowlisted endpoint and protocol v1 manifest.",
+            details={
+                "next_step": "Check that the endpoint is reachable, returns protocol v1, and matches the supplied manifest hash.",
+            },
         ) from exc

@@ -272,9 +272,15 @@ class LegacyGatewayClient:
         self._max_output_tokens = max_output_tokens
         self._episode: EpisodeContext | None = None
         self.total_usage_summary: dict[str, dict[str, int]] = {}
+        self._provider_request_ids: list[str] = []
 
     def bind_episode(self, episode: EpisodeContext) -> None:
         self._episode = episode
+        self._provider_request_ids.clear()
+
+    @property
+    def provider_request_ids(self) -> tuple[str, ...]:
+        return tuple(self._provider_request_ids)
 
     @property
     def model_gateway_binding(self) -> str:
@@ -284,6 +290,7 @@ class LegacyGatewayClient:
 
     def clear_usage_summary(self) -> None:
         self.total_usage_summary = {}
+        self._provider_request_ids.clear()
 
     def create(self, *, messages: list[Mapping[str, Any]], model: str | None = None, **parameters: Any) -> Any:
         if self._episode is None:
@@ -312,6 +319,11 @@ class LegacyGatewayClient:
             max_output_tokens=self._max_output_tokens,
         )
         response = asyncio.run(self._gateway.complete(request))
+        provider_request_id = _safe_provider_request_id(
+            getattr(response, "provider_request_id", None)
+        )
+        if provider_request_id is not None:
+            self._provider_request_ids.append(provider_request_id)
         usage = response.usage
         usage_payload = {
             "prompt_tokens": usage.prompt if usage is not None else 0,
@@ -320,8 +332,12 @@ class LegacyGatewayClient:
         self.total_usage_summary[self._model] = usage_payload
         return SimpleNamespace(
             choices=[SimpleNamespace(message=SimpleNamespace(content=response.text))],
-            usage=SimpleNamespace(as_dict=lambda: usage_payload),
+            usage=SimpleNamespace(
+                as_dict=lambda: dict(usage_payload),
+                model_dump=lambda **_kwargs: dict(usage_payload),
+            ),
             model=self._model,
+            provider_request_id=provider_request_id,
         )
 
 
@@ -382,6 +398,17 @@ class BuiltinAgentAdapter(AgentRuntime):
         if self._model_client is None:
             return None
         return getattr(self._model_client, "model_gateway_binding", None)
+
+    @property
+    def provider_request_ids(self) -> tuple[str, ...]:
+        values = getattr(self._model_client, "provider_request_ids", ())
+        if not isinstance(values, (tuple, list)):
+            return ()
+        return tuple(
+            value
+            for value in values
+            if isinstance(value, str) and 0 < len(value) <= 256
+        )
 
     @property
     def name(self) -> str:
@@ -453,6 +480,15 @@ class BuiltinAgentAdapter(AgentRuntime):
                 await result
         self._closed = True
         self._episode = None
+
+
+def _safe_provider_request_id(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    if not value or len(value) > 256:
+        return None
+    return value
 
 
 class DeterministicSmokeAgent:

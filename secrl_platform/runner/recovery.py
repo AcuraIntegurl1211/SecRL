@@ -95,14 +95,16 @@ class RunnerRepository:
         model_config_sha256: str | None = None,
         run_limits: dict[str, int] | None = None,
         agent_parameters: dict[str, Any] | None = None,
+        selection: dict[str, Any] | None = None,
     ) -> RunHandle:
+        if case_ids is not None and len(case_ids) != len(set(case_ids)):
+            raise ValueError("runner task scope contains duplicate cases")
         scope = Scope(case_ids=case_ids) if case_ids is not None else Scope.all()
         cases = adapter.enumerate_cases(adapter.dataset_ref(), scope)
         if not cases:
             raise ValueError("runner task scope must include at least one case")
-        scenario_ids = {case.scenario.id for case in cases}
-        if len(scenario_ids) != 1:
-            raise ValueError("one run may contain cases from exactly one scenario")
+        if len({case.id for case in cases}) != len(cases):
+            raise ValueError("runner task scope contains duplicate cases")
         frozen_limits = dict(
             run_limits
             or {"max_steps": 32, "max_str_len": 100_000, "max_entry_return": 15}
@@ -159,23 +161,29 @@ class RunnerRepository:
                 session.flush()
             elif dataset.benchmark_revision_id != benchmark.id:
                 raise ValueError("dataset revision is bound to a different benchmark revision")
-            scenario = ScenarioORM(
-                dataset_version_id=dataset.id,
-                external_id=cases[0].scenario.id,
-                metadata_json=canonical_json(cases[0].scenario.metadata),
-            )
-            session.add(scenario)
-            session.flush()
+            scenarios: dict[str, ScenarioORM] = {}
+            case_records: list[CaseRecordORM] = []
             for ordinal, case in enumerate(cases):
-                session.add(
-                    CaseRecordORM(
+                scenario = scenarios.get(case.scenario.id)
+                if scenario is None:
+                    scenario = ScenarioORM(
                         dataset_version_id=dataset.id,
-                        scenario_id=scenario.id,
-                        external_id=case.id,
-                        ordinal=ordinal,
-                        payload_json=canonical_json(case.model_dump(mode="json")),
+                        external_id=case.scenario.id,
+                        metadata_json=canonical_json(case.scenario.metadata),
                     )
+                    session.add(scenario)
+                    session.flush()
+                    scenarios[case.scenario.id] = scenario
+                record = CaseRecordORM(
+                    dataset_version_id=dataset.id,
+                    scenario_id=scenario.id,
+                    external_id=case.id,
+                    ordinal=ordinal,
+                    payload_json=canonical_json(case.model_dump(mode="json")),
                 )
+                session.add(record)
+                case_records.append(record)
+            session.flush()
             agent = session.scalar(
                 select(AgentRevisionORM).where(
                     AgentRevisionORM.sha256 == agent_revision.manifest_sha256
@@ -207,10 +215,17 @@ class RunnerRepository:
                 "agent_revision_id": agent_revision.id,
                 "agent_revision_sha256": agent_revision.manifest_sha256,
                 "case_ids": [case.id for case in cases],
+                "case_record_ids": [record.id for record in case_records],
+                "case_count": len(cases),
                 "budget": frozen_budget,
                 "limits": frozen_limits,
                 "agent_parameters": dict(agent_parameters or {}),
             }
+            if selection is not None:
+                task_spec["selection"] = dict(selection)
+                task_spec["incident_count"] = int(
+                    selection.get("resolved_incident_count", 0)
+                )
             if model_config_revision_id is not None:
                 if model_config_sha256 is None:
                     raise ValueError("model config hash is required")
@@ -241,7 +256,7 @@ class RunnerRepository:
             run_spec_json = canonical_json(run_spec)
             run = RunORM(
                 task_id=task.id,
-                scenario_id=scenario.id,
+                scenario_id=scenarios[cases[0].scenario.id].id,
                 status="QUEUED",
                 run_spec_json=run_spec_json,
                 run_spec_sha256=hashlib.sha256(
@@ -329,15 +344,27 @@ class RunnerRepository:
 
     def cases(self, task_id: str, run_id: str) -> list[StoredCase]:
         with self._session_factory() as session:
-            task, run = self._get_task_run(session, task_id, run_id)
+            task, _run = self._get_task_run(session, task_id, run_id)
+            task_spec = json.loads(task.task_spec_json)
+            selected_ids = tuple(task_spec.get("case_ids", ()))
+            record_ids = tuple(task_spec.get("case_record_ids", ()))
+            scope = (
+                CaseRecordORM.id.in_(record_ids)
+                if record_ids
+                else CaseRecordORM.external_id.in_(selected_ids)
+            )
             records = session.scalars(
                 select(CaseRecordORM)
                 .where(
                     CaseRecordORM.dataset_version_id == task.dataset_version_id,
-                    CaseRecordORM.scenario_id == run.scenario_id,
+                    scope,
                 )
                 .order_by(CaseRecordORM.ordinal)
             ).all()
+            if len(records) != len(selected_ids) or tuple(
+                record.external_id for record in records
+            ) != selected_ids:
+                raise ValueError("frozen task Case selection does not match stored records")
             return [
                 StoredCase(
                     record_id=record.id,
@@ -390,6 +417,7 @@ class RunnerRepository:
         budget_anchor: UsageSnapshot | None,
         budget_exhausted: bool,
         case_count: int,
+        provider_request_ids: tuple[str, ...] = (),
     ) -> str:
         with self._session_factory.begin() as session:
             task, run = self._get_task_run(session, task_id, run_id)
@@ -453,18 +481,39 @@ class RunnerRepository:
                         "model_ledger_cost": str(budget_anchor.estimated_cost),
                     }
                 )
+            safe_provider_request_ids = tuple(
+                request_id.strip()
+                for request_id in provider_request_ids
+                if isinstance(request_id, str)
+                and 0 < len(request_id.strip()) <= 256
+            )
+            metrics["provider_request_ids"] = list(safe_provider_request_ids)
             attempt.status = "SUCCEEDED"
             attempt.is_final = True
             attempt.metrics_json = canonical_json(metrics)
             attempt.trajectory_summary_json = canonical_json(
-                {"artifact_sha256": artifact.sha256}
+                {
+                    "artifact_sha256": artifact.sha256,
+                    "provider_request_ids": list(safe_provider_request_ids),
+                }
             )
             run.next_case_index += 1
             if run.cancel_requested:
                 _transition_task(task, "CANCELED")
                 run.status = "CANCELED"
                 task.finished_at = utc_now()
-            elif budget_exhausted or self._budget_reached(session, task, run_id):
+            # The current Case is committed before terminal status is chosen.
+            # A final committed Case completes the selected scope even when
+            # the attempt observed a budget boundary while stopping.
+            elif run.next_case_index >= case_count:
+                _transition_task(task, "SUCCEEDED")
+                run.status = "SUCCEEDED"
+                task.finished_at = utc_now()
+            elif budget_exhausted:
+                _transition_task(task, "BUDGET_EXHAUSTED")
+                run.status = "FAILED"
+                task.finished_at = utc_now()
+            elif self._budget_reached(session, task, run_id):
                 _transition_task(task, "BUDGET_EXHAUSTED")
                 run.status = "FAILED"
                 task.finished_at = utc_now()
@@ -472,10 +521,6 @@ class RunnerRepository:
                 _transition_task(task, "PAUSED")
                 run.status = "QUEUED"
                 run.pause_requested = False
-            elif run.next_case_index >= case_count:
-                _transition_task(task, "SUCCEEDED")
-                run.status = "SUCCEEDED"
-                task.finished_at = utc_now()
             if task.status != "RUNNING":
                 self._release_lease(session, run_id)
             else:
@@ -528,6 +573,7 @@ class RunnerRepository:
         attempt_id: str,
         code: str,
         retryable: bool | None = None,
+        details: dict[str, Any] | None = None,
     ) -> str:
         with self._session_factory.begin() as session:
             task, run = self._get_task_run(session, task_id, run_id)
@@ -540,11 +586,99 @@ class RunnerRepository:
             error = {"code": code}
             if retryable is not None:
                 error["retryable"] = retryable
+            if details:
+                error.update(
+                    {
+                        key: value
+                        for key, value in details.items()
+                        if key
+                        in {
+                            "usage_may_have_occurred",
+                            "safe_to_retry",
+                            "http_status",
+                            "content_type",
+                            "provider_request_id",
+                            "request_id",
+                            "response_shape",
+                        }
+                        and value is not None
+                    }
+                )
             attempt.error_json = canonical_json(error)
             _transition_task(task, "FAILED")
             task.finished_at = utc_now()
             run.status = "FAILED"
             self._release_lease(session, run_id)
+            return task.status
+
+    def fail_configuration(
+        self,
+        *,
+        task_id: str,
+        run_id: str,
+        code: str,
+    ) -> str:
+        """Fail a queued run after safe, pre-execution configuration validation."""
+        with self._session_factory.begin() as session:
+            task, run = self._get_task_run(session, task_id, run_id)
+            if task.status in {
+                "SUCCEEDED",
+                "BUDGET_EXHAUSTED",
+                "CANCELED",
+            }:
+                return task.status
+
+            task_spec: dict[str, Any] = {}
+            try:
+                parsed_task_spec = json.loads(task.task_spec_json)
+                if isinstance(parsed_task_spec, dict):
+                    task_spec = parsed_task_spec
+            except (TypeError, ValueError, json.JSONDecodeError):
+                pass
+            run_spec: dict[str, Any] = {}
+            try:
+                parsed_run_spec = json.loads(run.run_spec_json)
+                if isinstance(parsed_run_spec, dict):
+                    run_spec = parsed_run_spec
+            except (TypeError, ValueError, json.JSONDecodeError):
+                pass
+            run_task_spec = run_spec.get("task_spec")
+            if not isinstance(run_task_spec, dict):
+                run_task_spec = {}
+            record_ids = tuple(
+                task_spec.get("case_record_ids", ())
+                or run_task_spec.get("case_record_ids", ())
+            )
+            if record_ids and session.get(CaseRecordORM, record_ids[0]) is not None:
+                attempt_no = (
+                    session.scalar(
+                        select(func.count(CaseAttemptORM.id)).where(
+                            CaseAttemptORM.run_id == run_id,
+                            CaseAttemptORM.case_id == record_ids[0],
+                        )
+                    )
+                    or 0
+                ) + 1
+                session.add(
+                    CaseAttemptORM(
+                        run_id=run_id,
+                        case_id=record_ids[0],
+                        attempt_no=attempt_no,
+                        status="FAILED",
+                        is_final=False,
+                        error_json=canonical_json(
+                            {"code": code, "retryable": False}
+                        ),
+                        metrics_json="{}",
+                        trajectory_summary_json="{}",
+                    )
+                )
+            if task.status != "FAILED":
+                _transition_task(task, "FAILED")
+            task.finished_at = utc_now()
+            run.status = "FAILED"
+            if run_id in self._fences:
+                self._release_lease(session, run_id)
             return task.status
 
     def retry_attempt(

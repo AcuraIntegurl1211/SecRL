@@ -108,7 +108,7 @@ Protocol-Smoke 不需要 MySQL，首次安装可以只启动 `secrl-lite` 完成
 SecRL 模式可以：
 
 - 只启动当前要运行的一个 Incident，减少内存和磁盘占用。
-- 使用 `secrl-all` profile 一次启动八个 Incident。
+- 每个 Incident 使用独立 Compose profile；部署者只显式启动当前任务选择的一个或多个 profile，不提供一次启动八个 Incident 的聚合 profile。
 - 同一时间只有一个活跃测评任务，因此无需 Redis 和分布式租约。
 
 平台没有 Docker Socket，不会从 Web 动态启动 Incident。操作者在 Compose 启动命令中选择 Incident profile；任务验证阶段检查目标数据库健康状态，未启动时阻止排队并显示所需 profile 名称。

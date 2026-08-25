@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
+import os
 from collections.abc import Callable
 from decimal import Decimal
 from typing import Any
@@ -31,6 +33,19 @@ from secrl_platform.storage.repositories import canonical_json
 
 
 MAX_PLATFORM_ATTEMPTS = 3
+_LOGGER = logging.getLogger(__name__)
+
+
+def _safe_provider_error_details(error: ProviderError) -> dict[str, Any]:
+    return {
+        "usage_may_have_occurred": error.usage_may_have_occurred,
+        "safe_to_retry": error.safe_to_retry,
+        "http_status": error.http_status,
+        "content_type": error.content_type,
+        "provider_request_id": error.provider_request_id,
+        "request_id": error.request_id,
+        "response_shape": error.response_shape,
+    }
 
 
 class RunnerEngine:
@@ -55,16 +70,27 @@ class RunnerEngine:
         status = self._repository.prepare_for_run(task_id, run_id)
         if status != "RUNNING":
             return status
-        cases = self._repository.cases(task_id, run_id)
-        task_budget = self._repository.budget_spec(task_id)
-        run_limits = self._repository.run_limits(task_id, run_id)
-        case_by_id = {
-            case.id: case
-            for case in self._adapter.enumerate_cases(
-                self._adapter.dataset_ref(),
-                Scope(case_ids=tuple(case.external_id for case in cases)),
+        try:
+            cases = self._repository.cases(task_id, run_id)
+            task_budget = self._repository.budget_spec(task_id)
+            run_limits = self._repository.run_limits(task_id, run_id)
+            case_by_id = {
+                case.id: case
+                for case in self._adapter.enumerate_cases(
+                    self._adapter.dataset_ref(),
+                    Scope(case_ids=tuple(case.external_id for case in cases)),
+                )
+            }
+        except Exception as error:
+            _LOGGER.error(
+                "runner pre-engine configuration rejected exception_type=%s",
+                type(error).__name__,
             )
-        }
+            return self._repository.fail_configuration(
+                task_id=task_id,
+                run_id=run_id,
+                code="RUNNER_CONFIGURATION_ERROR",
+            )
         while self._repository.checkpoint(task_id, run_id) < len(cases):
             self._repository.heartbeat(run_id)
             if self._repository.budget_reached(task_id, run_id):
@@ -87,7 +113,14 @@ class RunnerEngine:
                         self._repository.model_budget_anchor(task_id, run_id)
                     )
                 budget_baseline = guard.usage() if guard is not None else None
-                trajectory, result, usage, budget_exhausted, restricted_outputs = await self._run_case(
+                (
+                    trajectory,
+                    result,
+                    usage,
+                    budget_exhausted,
+                    provider_request_ids,
+                    restricted_outputs,
+                ) = await self._run_case(
                     run_id=run_id,
                     stored_case=stored_case,
                     case=case_by_id[stored_case.external_id],
@@ -99,8 +132,10 @@ class RunnerEngine:
                 )
                 budget_anchor = guard.usage() if guard is not None else None
             except (AgentServiceError, ProviderError) as exc:
-                safely_retryable = exc.transient and not (
-                    isinstance(exc, ProviderError) and exc.usage_may_have_occurred
+                safely_retryable = (
+                    exc.safe_to_retry
+                    if isinstance(exc, ProviderError)
+                    else exc.transient
                 )
                 if safely_retryable and attempt.number < MAX_PLATFORM_ATTEMPTS:
                     self._repository.retry_attempt(
@@ -115,6 +150,11 @@ class RunnerEngine:
                     attempt_id=attempt.id,
                     code=exc.code,
                     retryable=safely_retryable,
+                    details=(
+                        _safe_provider_error_details(exc)
+                        if isinstance(exc, ProviderError)
+                        else None
+                    ),
                 )
             except CapabilityBudgetError:
                 return self._repository.fail_attempt(
@@ -124,7 +164,18 @@ class RunnerEngine:
                     code="CAPABILITY_BUDGET_ERROR",
                     retryable=False,
                 )
-            except Exception:
+            except Exception as exc:
+                missing_path = getattr(exc, "filename", None)
+                missing_name = (
+                    os.path.basename(missing_path)
+                    if isinstance(missing_path, str)
+                    else None
+                )
+                _LOGGER.error(
+                    "agent runtime error exception_type=%s missing_name=%s",
+                    type(exc).__name__,
+                    missing_name,
+                )
                 return self._repository.fail_attempt(
                     task_id=task_id,
                     run_id=run_id,
@@ -174,6 +225,7 @@ class RunnerEngine:
                 budget_anchor=budget_anchor,
                 budget_exhausted=budget_exhausted,
                 case_count=len(cases),
+                provider_request_ids=provider_request_ids,
             )
             if status != "RUNNING":
                 return status
@@ -195,6 +247,7 @@ class RunnerEngine:
         EvaluationResult,
         UsageSnapshot,
         bool,
+        tuple[str, ...],
         tuple[tuple[str, bytes], ...],
     ]:
         lease = self._adapter.prepare_scenario(case.scenario)
@@ -324,6 +377,7 @@ class RunnerEngine:
                         self._adapter.release_scenario(lease)
             if heartbeat_error is not None:
                 raise heartbeat_error
+        provider_request_ids = _safe_runtime_provider_request_ids(runtime)
         trajectory = {
             "protocol_version": "1",
             "run_id": run_id,
@@ -332,8 +386,16 @@ class RunnerEngine:
             "exchanges": exchanges,
             "result": result.model_dump(mode="json"),
             "usage": usage.model_dump(mode="json"),
+            "provider_request_ids": list(provider_request_ids),
         }
-        return trajectory, result, usage, budget_exhausted, restricted_outputs
+        return (
+            trajectory,
+            result,
+            usage,
+            budget_exhausted,
+            provider_request_ids,
+            restricted_outputs,
+        )
 
     async def _heartbeat_loop(self, run_id: str) -> None:
         while True:
@@ -354,6 +416,17 @@ def _submission_for(action) -> Submission | None:
 def _canonical_observation(observation) -> dict[str, Any]:
     payload = observation.model_dump(mode="json", exclude={"ref"})
     return json.loads(canonical_json(payload))
+
+
+def _safe_runtime_provider_request_ids(runtime: AgentRuntime) -> tuple[str, ...]:
+    values = getattr(runtime, "provider_request_ids", ())
+    if not isinstance(values, (tuple, list)):
+        return ()
+    return tuple(
+        value.strip()
+        for value in values
+        if isinstance(value, str) and 0 < len(value.strip()) <= 256
+    )
 
 
 class CapabilityBudgetGuard:

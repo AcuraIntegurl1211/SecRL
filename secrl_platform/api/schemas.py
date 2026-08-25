@@ -5,6 +5,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from secrl_platform.api.scope import ScopeMode
+
 
 class ApiModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -21,12 +23,26 @@ class TaskCreateRequest(ApiModel):
     benchmark_id: str
     agent_revision_id: str
     model_config_revision_id: str | None = None
-    case_ids: tuple[str, ...] = Field(min_length=1)
+    scope_mode: ScopeMode | None = None
+    case_ids: tuple[str, ...] = Field(default_factory=tuple, max_length=589)
+    incident_ids: tuple[str, ...] = Field(default_factory=tuple, max_length=8)
+    all_cases: bool = False
     budget: BudgetSpec = Field(default_factory=BudgetSpec)
     max_steps: int = Field(default=32, ge=1, le=10_000)
     max_str_len: int = Field(default=100_000, ge=1, le=10_000_000)
     max_entry_return: int = Field(default=15, ge=1, le=1_000_000)
     agent_parameters: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_selection(self) -> "TaskCreateRequest":
+        if len(self.case_ids) != len(set(self.case_ids)):
+            raise ValueError("case_ids must not contain duplicates")
+        if len(self.incident_ids) != len(set(self.incident_ids)):
+            raise ValueError("incident_ids must not contain duplicates")
+        if not self.all_cases and not self.case_ids and not self.incident_ids:
+            if self.scope_mode != "ALL_BENCHMARK":
+                raise ValueError("select at least one Case, Incident, or the full Benchmark")
+        return self
 
 
 class TaskCreateResponse(ApiModel):

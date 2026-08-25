@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import secrets
 import time
 from decimal import Decimal
@@ -66,8 +67,13 @@ from secrl_platform.storage.orm import (
 )
 
 
+logger = logging.getLogger("secrl_platform.runner")
+
+
 class RunnerConfigurationError(RuntimeError):
-    pass
+    def __init__(self, message: str, *, code: str = "RUNNER_CONFIGURATION_ERROR") -> None:
+        super().__init__(message)
+        self.code = code
 
 
 class RunnerProcess:
@@ -126,25 +132,42 @@ async def run_pending_once(
     repository = RunnerRepository(sessions)
     owned_client: httpx.AsyncClient | None = None
     try:
-        runtime_factory, budget_guard, owned_client = _resolve_runtime(
-            settings=settings,
-            session_factory=sessions,
-            task_id=task_id,
-            run_id=run_id,
-            agent_service_transport=agent_service_transport,
-            agent_service_resolver=agent_service_resolver,
-            model_provider_resolver=model_provider_resolver,
-            builtin_runtime_resolver=builtin_runtime_resolver,
-        )
-        adapter = _resolve_adapter(
-            settings=settings,
-            session_factory=sessions,
-            task_id=task_id,
-            run_id=run_id,
-            secrl_query_executor=secrl_query_executor,
-            model_provider_resolver=model_provider_resolver,
-            secrl_evaluator_resolver=secrl_evaluator_resolver,
-        )
+        try:
+            runtime_factory, budget_guard, owned_client = _resolve_runtime(
+                settings=settings,
+                session_factory=sessions,
+                task_id=task_id,
+                run_id=run_id,
+                agent_service_transport=agent_service_transport,
+                agent_service_resolver=agent_service_resolver,
+                model_provider_resolver=model_provider_resolver,
+                builtin_runtime_resolver=builtin_runtime_resolver,
+            )
+            adapter = _resolve_adapter(
+                settings=settings,
+                session_factory=sessions,
+                task_id=task_id,
+                run_id=run_id,
+                secrl_query_executor=secrl_query_executor,
+                model_provider_resolver=model_provider_resolver,
+                secrl_evaluator_resolver=secrl_evaluator_resolver,
+            )
+        except RunnerConfigurationError as error:
+            return repository.fail_configuration(
+                task_id=task_id,
+                run_id=run_id,
+                code=error.code,
+            )
+        except Exception as error:
+            logger.error(
+                "runner configuration rejected exception_type=%s",
+                type(error).__name__,
+            )
+            return repository.fail_configuration(
+                task_id=task_id,
+                run_id=run_id,
+                code="RUNNER_CONFIGURATION_ERROR",
+            )
         engine = RunnerEngine(
             repository=repository,
             artifact_store=artifacts,
@@ -309,6 +332,11 @@ def _resolve_model_provider(
     secret = session.get(SecretRefORM, model.secret_ref_id)
     if secret is None:
         raise RunnerConfigurationError("task model credential was not found")
+    if secret.status == "INVALID":
+        raise RunnerConfigurationError(
+            "task model credential is marked invalid",
+            code="MODEL_CREDENTIAL_INVALID",
+        )
     try:
         envelope = encrypted_secret_from_json(secret.ciphertext)
         parameters = json.loads(model.parameters_json)

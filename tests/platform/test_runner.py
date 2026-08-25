@@ -1,11 +1,14 @@
+import asyncio
 import tempfile
 import unittest
 import hashlib
+import json
 from decimal import Decimal
 from pathlib import Path
 
-from secrl_platform.agents.builtin import DeterministicSmokeAgent
+from secrl_platform.agents.builtin import DeterministicSmokeAgent, LegacyGatewayClient
 from secrl_platform.agents.capabilities import (
+    CapabilityBudgetError,
     CapabilityClaims,
     CapabilitySigner,
     InMemoryCapabilityBudgetStore,
@@ -13,6 +16,7 @@ from secrl_platform.agents.capabilities import (
 from secrl_platform.agents.protocol import UsageSnapshot
 from secrl_platform.agents.service import AgentServiceError, InvalidAgentAction
 from secrl_platform.benchmarks.smoke import ProtocolSmokeAdapter
+from secrl_platform.benchmarks.secrl import SecRLAdapter
 from secrl_platform.models.gateway import ModelGateway, _conservative_input_token_bound
 from secrl_platform.models.pricing import Pricing
 from secrl_platform.models.providers import (
@@ -31,6 +35,7 @@ from secrl_platform.runner.recovery import (
 from secrl_platform.runner.state import InvalidTransition, RunStateMachine
 from secrl_platform.storage.artifacts import LocalArtifactStore
 from secrl_platform.storage.database import create_engine_and_session
+from secrl_platform.storage.orm import EvaluationTaskORM, RunORM
 
 
 class RunStateTest(unittest.TestCase):
@@ -92,6 +97,47 @@ class GatewaySmokeAgent(DeterministicSmokeAgent):
         return hashlib.sha256(self._token.encode("utf-8")).hexdigest()
 
 
+class ProviderRequestIdSmokeAgent(DeterministicSmokeAgent):
+    @property
+    def provider_request_ids(self):
+        return ("provider-response-123",)
+
+
+class BoundaryGatewayAgent(DeterministicSmokeAgent):
+    model_access = "platform_gateway"
+
+    def __init__(self, gateway, token, run_id):
+        super().__init__()
+        self._client = LegacyGatewayClient(
+            gateway=gateway,
+            model="fixture",
+            capability_token=token,
+            agent_revision_id=DeterministicSmokeAgent.revision().id,
+            max_output_tokens=23_958,
+        )
+        self._provider_request_ids = []
+
+    @property
+    def provider_request_ids(self):
+        return tuple(self._provider_request_ids)
+
+    async def reset(self, episode):
+        await super().reset(episode)
+        self._client.bind_episode(episode)
+
+    async def act(self, _observation):
+        await asyncio.to_thread(
+            self._client.create,
+            messages=[{"role": "user", "content": "x" * 400_000}],
+        )
+        self._provider_request_ids = list(self._client.provider_request_ids)
+        raise CapabilityBudgetError("simulated post-call budget boundary")
+
+    @property
+    def model_gateway_binding(self):
+        return self._client.model_gateway_binding
+
+
 class IncorrectlyBoundGatewayAgent(GatewaySmokeAgent):
     @property
     def model_gateway_binding(self):
@@ -124,7 +170,13 @@ class FailingStartAdapter:
         self._delegate.release_scenario(lease)
 
 
-def gateway_model_request(token, *, request_id, run_id="guarded-run"):
+def gateway_model_request(
+    token,
+    *,
+    request_id,
+    run_id="guarded-run",
+    max_output_tokens=1,
+):
     return ModelRequest(
         provider_adapter_version="v1",
         model_role="agent",
@@ -136,7 +188,7 @@ def gateway_model_request(token, *, request_id, run_id="guarded-run"):
         agent_revision_id=DeterministicSmokeAgent.revision().id,
         capability_token=token,
         request_id=request_id,
-        max_output_tokens=1,
+        max_output_tokens=max_output_tokens,
     )
 
 
@@ -154,6 +206,219 @@ class RunnerEngineTest(unittest.IsolatedAsyncioTestCase):
             budget=budget,
         )
         return adapter, repo, handle, LocalArtifactStore(root / "artifacts")
+
+    def test_real_single_case_budget_boundary_is_success_after_commit(self):
+        """A committed final Case must win over a post-call budget signal."""
+        with tempfile.TemporaryDirectory() as directory:
+            adapter, repo, handle, store = self.create_harness(
+                Path(directory),
+                budget={
+                    "max_cases": 1,
+                    "max_tokens": 500_000,
+                    "max_cost": "0.10",
+                },
+                case_ids=("smoke-001",),
+            )
+            self.assertEqual(
+                repo.prepare_for_run(handle.task_id, handle.run_id),
+                "RUNNING",
+            )
+            stored_case = repo.cases(handle.task_id, handle.run_id)[0]
+            attempt = repo.start_attempt(handle.run_id, stored_case.record_id)
+            artifact = store.put_bytes(
+                "trajectory",
+                b'{"protocol_version":"1","exchanges":[]}',
+                media_type="application/json",
+            )
+
+            status = repo.commit_case(
+                task_id=handle.task_id,
+                run_id=handle.run_id,
+                attempt_id=attempt.id,
+                artifact=artifact,
+                result={"reward": 0.0, "correct": False, "steps": 19},
+                usage=UsageSnapshot(
+                    prompt_tokens=411_410,
+                    completion_tokens=0,
+                    estimated_cost=Decimal("0.06095152"),
+                ),
+                budget_anchor=UsageSnapshot(
+                    prompt_tokens=411_410,
+                    completion_tokens=0,
+                    estimated_cost=Decimal("0.06095152"),
+                ),
+                budget_exhausted=True,
+                case_count=1,
+            )
+
+            self.assertEqual(status, "SUCCEEDED")
+            self.assertEqual(repo.task_status(handle.task_id), "SUCCEEDED")
+            self.assertEqual(repo.checkpoint(handle.task_id, handle.run_id), 1)
+            self.assertEqual(repo.final_result_count(handle.task_id), 1)
+
+    async def test_legacy_v010_runspec_without_scope_metadata_still_recovers(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            adapter, repo, handle, store = self.create_harness(
+                root,
+                case_ids=("smoke-001", "smoke-002"),
+            )
+            with repo._session_factory.begin() as session:
+                run = session.get(RunORM, handle.run_id)
+                self.assertIsNotNone(run)
+                task = session.get(EvaluationTaskORM, handle.task_id)
+                self.assertIsNotNone(task)
+                legacy_spec = json.loads(task.task_spec_json)
+                legacy_spec.pop("selection", None)
+                legacy_spec.pop("case_record_ids", None)
+                legacy_spec.pop("case_count", None)
+                legacy_spec.pop("incident_count", None)
+                task.task_spec_json = json.dumps(legacy_spec, sort_keys=True, separators=(",", ":"))
+                legacy_run_spec = json.loads(run.run_spec_json)
+                legacy_run_spec["task_spec"] = legacy_spec
+                run.run_spec_json = json.dumps(legacy_run_spec, sort_keys=True, separators=(",", ":"))
+                run.run_spec_sha256 = hashlib.sha256(run.run_spec_json.encode("utf-8")).hexdigest()
+
+            self.assertEqual(
+                tuple(case.external_id for case in repo.cases(handle.task_id, handle.run_id)),
+                ("smoke-001", "smoke-002"),
+            )
+            self.assertEqual(
+                await RunnerEngine(
+                    repository=repo,
+                    artifact_store=store,
+                    adapter=adapter,
+                    runtime_factory=DeterministicSmokeAgent,
+                ).run(handle.task_id, handle.run_id),
+                "SUCCEEDED",
+            )
+
+    async def test_provider_request_id_is_persisted_without_raw_response(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            adapter, repo, handle, store = self.create_harness(
+                root,
+                case_ids=("smoke-001",),
+            )
+
+            status = await RunnerEngine(
+                repository=repo,
+                artifact_store=store,
+                adapter=adapter,
+                runtime_factory=ProviderRequestIdSmokeAgent,
+            ).run(handle.task_id, handle.run_id)
+
+            self.assertEqual(status, "SUCCEEDED")
+            artifacts = list((root / "artifacts").glob("sha256/*/*/*"))
+            self.assertEqual(len(artifacts), 1)
+            trajectory = json.loads(artifacts[0].read_text(encoding="utf-8"))
+            self.assertEqual(
+                trajectory["provider_request_ids"],
+                ["provider-response-123"],
+            )
+            self.assertNotIn("raw_response", trajectory)
+
+    async def test_real_budget_boundary_settles_gateway_and_prioritizes_completion(self):
+        for case_ids, expected_status in (
+            (("smoke-001",), "SUCCEEDED"),
+            (("smoke-001", "smoke-002"), "BUDGET_EXHAUSTED"),
+        ):
+            with self.subTest(case_ids=case_ids):
+                with tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    adapter, repo, handle, store = self.create_harness(
+                        root,
+                        budget={
+                            "max_cases": 1,
+                            "max_tokens": 500_000,
+                            "max_cost": "0.10",
+                        },
+                        case_ids=case_ids,
+                    )
+                    revision_id = DeterministicSmokeAgent.revision().id
+                    signer = CapabilitySigner(
+                        b"g" * 32,
+                        now=lambda: 1_000,
+                        budget_store=InMemoryCapabilityBudgetStore(),
+                    )
+                    token = signer.issue(
+                        CapabilityClaims(
+                            run_id=handle.run_id,
+                            agent_revision_id=revision_id,
+                            allowed_model_roles=("agent",),
+                            max_tokens=500_000,
+                            max_cost=Decimal("0.10"),
+                            issued_at=1_000,
+                            expires_at=1_300,
+                            nonce="real-budget-boundary",
+                        )
+                    )
+
+                    class Provider:
+                        calls = 0
+
+                        async def complete(self, _request):
+                            self.calls += 1
+                            return ModelResponse(
+                                text="unused",
+                                usage=Usage(prompt=387_452, completion=23_958),
+                                provider_request_id="provider-boundary-123",
+                            )
+
+                    provider = Provider()
+                    gateway = ModelGateway(
+                        provider=provider,
+                        pricing=Pricing(
+                            input_per_million="0.14",
+                            output_per_million="0.28",
+                        ),
+                        capability_signer=signer,
+                    )
+                    guard = CapabilityBudgetGuard(
+                        signer=signer,
+                        token=token,
+                        run_id=handle.run_id,
+                        agent_revision_id=revision_id,
+                    )
+
+                    status = await RunnerEngine(
+                        repository=repo,
+                        artifact_store=store,
+                        adapter=adapter,
+                        runtime_factory=lambda: BoundaryGatewayAgent(
+                            gateway,
+                            token,
+                            handle.run_id,
+                        ),
+                        model_budget_guard=guard,
+                    ).run(handle.task_id, handle.run_id)
+
+                    self.assertEqual(
+                        status,
+                        expected_status,
+                        repo.attempt_errors(handle.task_id),
+                    )
+                    self.assertEqual(provider.calls, 1)
+                    self.assertEqual(repo.final_result_count(handle.task_id), 1)
+                    settled = signer.budget_snapshot(
+                        token,
+                        expected_run=handle.run_id,
+                        expected_agent=revision_id,
+                    )
+                    self.assertEqual(settled.reserved_tokens, 0)
+                    self.assertEqual(settled.reserved_cost, Decimal("0"))
+                    self.assertEqual(settled.consumed_tokens, 411_410)
+                    self.assertEqual(
+                        settled.consumed_cost,
+                        Decimal("0.06095152"),
+                    )
+                    artifact = next((root / "artifacts").glob("sha256/*/*/*"))
+                    trajectory = json.loads(artifact.read_text(encoding="utf-8"))
+                    self.assertEqual(
+                        trajectory["provider_request_ids"],
+                        ["provider-boundary-123"],
+                    )
+                    self.assertNotIn("raw_response", trajectory)
 
     async def test_pause_and_resume_happen_only_at_committed_checkpoint(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -190,6 +455,41 @@ class RunnerEngineTest(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(repo.final_result_count(handle.task_id), 3)
 
+    def test_run_freezes_cases_from_multiple_incidents_without_duplicates(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            adapter = SecRLAdapter()
+            all_cases = adapter.enumerate_cases(adapter.dataset_ref(), adapter.scope_all())
+            selected = (all_cases[0].id, all_cases[-1].id)
+            repo = RunnerRepository(
+                create_engine_and_session(root / "platform.sqlite3", create=True)
+            )
+            handle = repo.create_benchmark_run(
+                name="multi-incident",
+                adapter=adapter,
+                agent_revision=DeterministicSmokeAgent.revision(),
+                case_ids=selected,
+            )
+
+            stored = repo.cases(handle.task_id, handle.run_id)
+
+            self.assertEqual([case.external_id for case in stored], list(selected))
+            self.assertEqual(len({case.ordinal for case in stored}), 2)
+
+    def test_run_rejects_duplicate_selected_cases(self):
+        with tempfile.TemporaryDirectory() as directory:
+            adapter = ProtocolSmokeAdapter.load_default()
+            repo = RunnerRepository(
+                create_engine_and_session(Path(directory) / "platform.sqlite3", create=True)
+            )
+            with self.assertRaisesRegex(ValueError, "duplicate"):
+                repo.create_protocol_smoke_run(
+                    name="duplicate",
+                    adapter=adapter,
+                    agent_revision=DeterministicSmokeAgent.revision(),
+                    case_ids=("smoke-001", "smoke-001"),
+                )
+
     async def test_case_and_token_budgets_commit_current_evidence_then_stop(self):
         for budget, runtime_factory in (({"max_cases": 1}, DeterministicSmokeAgent),):
             with self.subTest(budget=budget):
@@ -209,6 +509,29 @@ class RunnerEngineTest(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(status, "BUDGET_EXHAUSTED")
                     self.assertEqual(repo.final_result_count(handle.task_id), 1)
                     self.assertEqual(repo.checkpoint(handle.task_id, handle.run_id), 1)
+
+    async def test_max_cases_equal_to_or_above_selected_cases_succeeds(self):
+        for case_ids, max_cases in (
+            (("smoke-001",), 1),
+            (("smoke-001", "smoke-002"), 2),
+            (("smoke-001", "smoke-002"), 3),
+        ):
+            with self.subTest(case_ids=case_ids, max_cases=max_cases):
+                with tempfile.TemporaryDirectory() as directory:
+                    adapter, repo, handle, store = self.create_harness(
+                        Path(directory),
+                        budget={"max_cases": max_cases},
+                        case_ids=case_ids,
+                    )
+                    status = await RunnerEngine(
+                        repository=repo,
+                        artifact_store=store,
+                        adapter=adapter,
+                        runtime_factory=DeterministicSmokeAgent,
+                    ).run(handle.task_id, handle.run_id)
+
+                    self.assertEqual(status, "SUCCEEDED")
+                    self.assertEqual(repo.final_result_count(handle.task_id), len(case_ids))
 
     async def test_hard_budget_exhaustion_wins_over_pause_request(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -298,16 +621,24 @@ class RunnerEngineTest(unittest.IsolatedAsyncioTestCase):
                 model_budget_guard=guard,
             ).run(handle.task_id, handle.run_id)
 
-            self.assertEqual(status, "BUDGET_EXHAUSTED")
+            self.assertEqual(status, "SUCCEEDED")
             self.assertEqual(repo.final_result_count(handle.task_id), 1)
             self.assertEqual(provider.calls, 1)
+            settled = signer.budget_snapshot(
+                token,
+                expected_run=handle.run_id,
+                expected_agent=DeterministicSmokeAgent.revision().id,
+            )
+            self.assertEqual(settled.reserved_tokens, 0)
+            self.assertEqual(settled.reserved_cost, Decimal("0"))
+            self.assertEqual(settled.consumed_tokens, token_limit)
 
-    async def test_model_budget_rejection_before_dispatch_is_terminal(self):
+    async def test_model_budget_rejection_before_dispatch_commits_final_case(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             adapter, repo, handle, store = self.create_harness(
                 root,
-                budget={"max_tokens": 1, "max_cost": "0"},
+                budget={"max_tokens": 1_000, "max_cost": "0"},
                 case_ids=("smoke-001",),
             )
             signer = CapabilitySigner(
@@ -320,7 +651,7 @@ class RunnerEngineTest(unittest.IsolatedAsyncioTestCase):
                     run_id=handle.run_id,
                     agent_revision_id=DeterministicSmokeAgent.revision().id,
                     allowed_model_roles=("agent",),
-                    max_tokens=1,
+                    max_tokens=1_000,
                     max_cost=Decimal("0"),
                     issued_at=1_000,
                     expires_at=1_300,
@@ -338,7 +669,7 @@ class RunnerEngineTest(unittest.IsolatedAsyncioTestCase):
             provider = Provider()
             gateway = ModelGateway(
                 provider=provider,
-                pricing=Pricing(input_per_million=0, output_per_million=0),
+                pricing=Pricing(input_per_million=1, output_per_million=1),
                 capability_signer=signer,
             )
             guard = CapabilityBudgetGuard(
@@ -358,7 +689,7 @@ class RunnerEngineTest(unittest.IsolatedAsyncioTestCase):
                 model_budget_guard=guard,
             ).run(handle.task_id, handle.run_id)
 
-            self.assertEqual(status, "BUDGET_EXHAUSTED")
+            self.assertEqual(status, "SUCCEEDED")
             self.assertEqual(repo.final_result_count(handle.task_id), 1)
             self.assertEqual(provider.calls, 0)
 
@@ -415,7 +746,12 @@ class RunnerEngineTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(calls, 1)
             self.assertEqual(
                 repo.attempt_errors(handle.task_id),
-                ({"code": "TIMEOUT", "retryable": False},),
+                ({
+                    "code": "TIMEOUT",
+                    "retryable": False,
+                    "safe_to_retry": False,
+                    "usage_may_have_occurred": True,
+                },),
             )
 
     async def test_permanent_agent_action_error_fails_without_retry(self):
@@ -823,6 +1159,36 @@ class RunnerEngineTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(
                 repo.attempt_errors(handle.task_id),
                 ({"code": "AGENT_RUNTIME_ERROR"},),
+            )
+
+    async def test_run_spec_configuration_failure_after_prepare_does_not_stay_running(self):
+        with tempfile.TemporaryDirectory() as directory:
+            adapter, repo, handle, store = self.create_harness(
+                Path(directory), case_ids=("smoke-001",)
+            )
+            with repo._session_factory.begin() as session:
+                run = session.get(RunORM, handle.run_id)
+                run_spec = json.loads(run.run_spec_json)
+                run_spec["limits"]["max_steps"] = 0
+                run.run_spec_json = json.dumps(
+                    run_spec, sort_keys=True, separators=(",", ":")
+                )
+                run.run_spec_sha256 = hashlib.sha256(
+                    run.run_spec_json.encode("utf-8")
+                ).hexdigest()
+
+            status = await RunnerEngine(
+                repository=repo,
+                artifact_store=store,
+                adapter=adapter,
+                runtime_factory=DeterministicSmokeAgent,
+            ).run(handle.task_id, handle.run_id)
+
+            self.assertEqual(status, "FAILED")
+            self.assertEqual(repo.task_status(handle.task_id), "FAILED")
+            self.assertEqual(
+                repo.attempt_errors(handle.task_id),
+                ({"code": "RUNNER_CONFIGURATION_ERROR", "retryable": False},),
             )
 
     async def test_scenario_lease_is_released_when_episode_start_fails(self):

@@ -20,8 +20,9 @@ from secrl_platform import __version__ as PLATFORM_VERSION
 from secrl_platform.api.dependencies import ApiContext
 from secrl_platform.agents.service import AgentServiceTransport
 from secrl_platform.api.errors import ApiError, error_payload
-from secrl_platform.api.routes import artifacts, auth, resources, runs, tasks
+from secrl_platform.api.routes import artifacts, auth, preflight, resources, runs, tasks
 from secrl_platform.auth.sessions import SessionStore
+from secrl_platform.benchmarks.secrl import SecRLMySQLQueryExecutor
 from secrl_platform.config import (
     DEFAULT_AGENT_SERVICE_ALLOWLIST,
     DEFAULT_MODEL_PROVIDER_ALLOWLIST,
@@ -56,6 +57,7 @@ def create_app(
                 model_provider_resolver,
                 agent_service_transport,
                 agent_service_resolver,
+                enable_environment_probe=True,
             )
         yield
 
@@ -75,6 +77,7 @@ def create_app(
             model_provider_resolver,
             agent_service_transport,
             agent_service_resolver,
+            enable_environment_probe=False,
         )
 
     @app.middleware("http")
@@ -128,6 +131,7 @@ def create_app(
 
     app.include_router(auth.router, prefix="/api/v1")
     app.include_router(resources.router, prefix="/api/v1")
+    app.include_router(preflight.router, prefix="/api/v1")
     app.include_router(tasks.router, prefix="/api/v1")
     app.include_router(runs.router, prefix="/api/v1")
     app.include_router(artifacts.router, prefix="/api/v1")
@@ -196,7 +200,34 @@ def _context(
     model_provider_resolver: Callable[[str, int], object] | None,
     agent_service_transport: AgentServiceTransport | None,
     agent_service_resolver: Callable[[str, int], object] | None,
+    enable_environment_probe: bool,
 ) -> ApiContext:
+    environment_probe_fn = None
+    if (
+        enable_environment_probe
+        and settings is not None
+        and settings.secrl_runtime_enabled
+        and settings.secrl_mysql_password is not None
+        and bool(settings.secrl_mysql_password.get_secret_value())
+    ):
+        executor = SecRLMySQLQueryExecutor(
+            user=settings.secrl_mysql_user,
+            password=settings.secrl_mysql_password.get_secret_value(),
+            database=settings.secrl_mysql_database,
+        )
+
+        def probe(incident_ids: tuple[str, ...]) -> dict[str, bool]:
+            availability: dict[str, bool] = {}
+            for incident_id in incident_ids:
+                result = executor.query_sql(incident_id, "SELECT 1")
+                availability[incident_id] = (
+                    isinstance(result, tuple)
+                    and len(result) == 2
+                    and result[1] is True
+                )
+            return availability
+
+        environment_probe_fn = probe
     return ApiContext(
         session_factory=session_factory,
         artifact_store=artifact_store,
@@ -223,7 +254,10 @@ def _context(
             settings is not None
             and settings.secrl_runtime_enabled
             and settings.secrl_mysql_password is not None
+            and bool(settings.secrl_mysql_password.get_secret_value())
         ),
+        secrl_environment_probe=environment_probe_fn,
+        runner_configured=(settings is None or settings.runner_poll_seconds > 0),
     )
 
 

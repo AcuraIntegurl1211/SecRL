@@ -1,7 +1,12 @@
 from pathlib import Path
 import importlib.util
+import os
+import subprocess
+import sys
+import tempfile
 import unittest
 from unittest import mock
+from zipfile import ZipFile
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -20,11 +25,34 @@ class ComposePackagingTest(unittest.TestCase):
     def test_compose_keeps_web_local_and_incident_mysql_profiled(self):
         compose = (ROOT / "compose.yaml").read_text()
         self.assertIn('127.0.0.1:${SECRL_PORT:-8080}:8080', compose)
-        self.assertIn('profiles: ["incident_34", "secrl-all"]', compose)
+        self.assertIn('profiles: ["incident_34"]', compose)
+        self.assertNotIn("secrl-all", compose)
         self.assertIn('profiles: ["smoke"]', compose)
         self.assertNotIn("/var/run/docker.sock", compose)
         self.assertIn("SECRL_MYSQL_ROOT_PASSWORD:-", compose)
         self.assertIn("SECRL_AGENT_SERVICE_CAPABILITY_SECRET:-", compose)
+
+    def test_each_incident_requires_an_explicit_profile(self):
+        compose = (ROOT / "compose.yaml").read_text()
+        for incident_id in (5, 34, 38, 39, 55, 134, 166, 322):
+            self.assertIn(
+                f'profiles: ["incident_{incident_id}"]',
+                compose,
+            )
+        self.assertNotIn('profiles: ["secrl-all"]', compose)
+
+    def test_release_gate_has_a_single_incident_smoke_without_an_all_profile(self):
+        workflow = (ROOT / ".github" / "workflows" / "secrl-lite-release-gate.yml").read_text()
+        self.assertIn("SECRL_SECRL_RUNTIME_ENABLED=true", workflow)
+        self.assertIn("SECRL_MYSQL_ROOT_PASSWORD", workflow)
+        self.assertIn("--profile incident_34", workflow)
+        self.assertIn("incident-34", workflow)
+        self.assertNotIn("--profile secrl-all", workflow)
+
+    def test_single_incident_smoke_uses_one_explicit_scope_source(self):
+        smoke = (ROOT / "scripts" / "lite-incident-smoke.py").read_text()
+        self.assertIn("scope_mode=INCIDENTS", smoke)
+        self.assertNotIn("&case_ids={case_id}", smoke)
 
     def test_platform_receives_documented_admin_and_capability_settings(self):
         compose = (ROOT / "compose.yaml").read_text()
@@ -32,6 +60,32 @@ class ComposePackagingTest(unittest.TestCase):
 
         self.assertIn("SECRL_INITIAL_ADMIN_USERNAME:", platform_environment)
         self.assertIn("SECRL_AGENT_SERVICE_CAPABILITY_SECRET:", platform_environment)
+
+    def test_platform_receives_sec_rl_incident_runtime_settings(self):
+        compose = (ROOT / "compose.yaml").read_text()
+        platform_environment = compose.split("x-mysql:", 1)[0]
+
+        self.assertIn("SECRL_SECRL_RUNTIME_ENABLED:", platform_environment)
+        self.assertIn("SECRL_MYSQL_USER:", platform_environment)
+        self.assertIn("SECRL_MYSQL_PASSWORD:", platform_environment)
+        self.assertIn("SECRL_MYSQL_DATABASE:", platform_environment)
+
+    def test_platform_maps_compose_mysql_credentials_to_settings_names(self):
+        compose = (ROOT / "compose.yaml").read_text()
+        platform_environment = compose.split("x-mysql:", 1)[0]
+
+        self.assertIn("SECRL_SECRL_MYSQL_USER: ${SECRL_MYSQL_USER", platform_environment)
+        self.assertIn("SECRL_SECRL_MYSQL_PASSWORD: ${SECRL_MYSQL_PASSWORD", platform_environment)
+        self.assertIn("SECRL_SECRL_MYSQL_DATABASE: ${SECRL_MYSQL_DATABASE", platform_environment)
+
+    def test_mysql_bootstrap_uses_the_configured_database_name(self):
+        compose = (ROOT / "compose.yaml").read_text()
+        mysql_section = compose.split("x-mysql:", 1)[1].split("services:", 1)[0]
+
+        self.assertIn(
+            "SECRL_MYSQL_DATABASE: ${SECRL_MYSQL_DATABASE:-env_monitor_db}",
+            mysql_section,
+        )
 
     def test_https_proxy_headers_reach_api_cookie_policy(self):
         compose = (ROOT / "compose.yaml").read_text()
@@ -89,7 +143,7 @@ class ComposePackagingTest(unittest.TestCase):
         api_start = compose.index("\n  api:\n")
         api_end = compose.index("\n  runner:\n", api_start)
         api = compose[api_start:api_end]
-        self.assertIn("networks:\n      - control\n      - egress", api)
+        self.assertIn("networks:\n      - control\n      - incident\n      - egress", api)
         self.assertNotIn("- egress", agent)
 
         web_start = compose.index("\n  web:\n")
@@ -133,6 +187,68 @@ class ComposePackagingTest(unittest.TestCase):
             '"secgym": ["questions/o1/test/*.json"]',
             setup,
         )
+
+    def test_built_wheel_imports_builtin_agents_with_runtime_assets(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            dist = root / "dist"
+            install = root / "install"
+            dist.mkdir()
+            install.mkdir()
+            subprocess.run(
+                [sys.executable, "-m", "pip", "wheel", str(ROOT), "--no-deps", "--no-build-isolation", "-w", str(dist)],
+                check=True,
+                cwd=ROOT,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
+            wheel = next(dist.glob("*.whl"))
+            with ZipFile(wheel) as archive:
+                names = set(archive.namelist())
+            self.assertTrue(
+                any(name.startswith("secgym/agents/react_examples/") and name.endswith(".txt") for name in names)
+            )
+            self.assertIn("secgym/agents/expel_train/insights.json", names)
+            self.assertIn("secgym/agents/expel_train/corrects.jsonl", names)
+            subprocess.run(
+                [sys.executable, "-m", "pip", "install", "--no-deps", "--target", str(install), str(wheel)],
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
+            env = {key: value for key, value in os.environ.items() if key not in {"PYTHONPATH"}}
+            env["PYTHONPATH"] = str(install)
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    "from secgym.agents.react_agent import ReActAgent; from secrl_platform.agents.builtin import builtin_manifest; print(ReActAgent.__name__, builtin_manifest('secrl-react-v1').agent_id)",
+                ],
+                cwd=root,
+                env=env,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
+            self.assertIn("ReActAgent secrl-react-v1", result.stdout)
+
+    def test_release_gate_bootstraps_wheel_for_no_isolation_wheel_test(self):
+        workflow = (ROOT / ".github" / "workflows" / "secrl-lite-release-gate.yml").read_text()
+        install_step = workflow.split("      - name: Platform core tests", 1)[0]
+
+        self.assertRegex(
+            install_step,
+            r"python -m pip install[^\n]*\bwheel(?:[<>= ]|$)",
+        )
+
+    def test_protocol_smoke_model_fixture_uses_approved_deepseek_endpoint(self):
+        smoke = (ROOT / "scripts" / "lite-protocol-smoke.py").read_text()
+
+        self.assertIn('"endpoint": "https://api.deepseek.com"', smoke)
+        self.assertNotIn('"endpoint": "https://api.openai.com/v1"', smoke)
 
     def test_every_platform_service_has_a_real_healthcheck(self):
         compose = (ROOT / "compose.yaml").read_text()

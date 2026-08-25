@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Mapping
 
 from fastapi import APIRouter, Depends
 from sqlalchemy import select
@@ -22,7 +23,14 @@ from secrl_platform.api.dependencies import (
 )
 from secrl_platform.api.errors import ApiError
 from secrl_platform.api.schemas import TaskCreateRequest, TaskCreateResponse
+from secrl_platform.api.scope import (
+    AmbiguousScopeError,
+    InvalidScopeError,
+    canonical_scope_mode,
+    task_scope_summary,
+)
 from secrl_platform.benchmarks.smoke import ProtocolSmokeAdapter
+from secrl_platform.benchmarks.protocol import Scope
 from secrl_platform.benchmarks.secrl import SecRLAdapter, SecRLRunSpec
 from secrl_platform.runner.recovery import RunnerRepository
 from secrl_platform.storage.orm import (
@@ -31,6 +39,7 @@ from secrl_platform.storage.orm import (
     LocalUserORM,
     ModelConfigRevisionORM,
     RunORM,
+    SecretRefORM,
 )
 
 
@@ -61,6 +70,7 @@ def list_tasks(
                 "task_spec_sha256": hashlib.sha256(
                     task.task_spec_json.encode("utf-8")
                 ).hexdigest(),
+                "scope": task_scope_summary(json.loads(task.task_spec_json)),
             }
             for task, run_id in tasks
         ]
@@ -75,12 +85,6 @@ def create_task(
     if payload.benchmark_id == "protocol-smoke":
         adapter = ProtocolSmokeAdapter.load_default()
     elif payload.benchmark_id == "secrl":
-        if not context.secrl_runtime_enabled:
-            raise ApiError(
-                503,
-                "SECRL_RUNTIME_UNAVAILABLE",
-                "SecRL environment credentials are not configured",
-            )
         adapter = SecRLAdapter(
             run_spec=SecRLRunSpec(
                 max_steps=payload.max_steps,
@@ -90,6 +94,91 @@ def create_task(
         )
     else:
         raise ApiError(422, "INVALID_TASK_SPEC", "Unknown benchmark revision")
+    try:
+        scope_mode = canonical_scope_mode(
+            scope_mode=payload.scope_mode,
+            case_ids=payload.case_ids,
+            incident_ids=payload.incident_ids,
+            all_cases=payload.all_cases,
+            allow_empty_all_benchmark=payload.benchmark_id != "secrl",
+        )
+    except AmbiguousScopeError as exc:
+        raise ApiError(
+            422,
+            "AMBIGUOUS_SCOPE",
+            "Choose exactly one scope mode and provide only its matching selection fields.",
+            details={
+                "scope_modes": ["CASES", "INCIDENTS", "ALL_BENCHMARK"],
+                "next_step": "Select CASES, INCIDENTS, or ALL_BENCHMARK and clear the other fields.",
+            },
+        ) from exc
+    except InvalidScopeError as exc:
+        raise ApiError(
+            422,
+            "INVALID_TASK_SCOPE",
+            "A Scope mode and selection are required before queuing a run.",
+            details={"next_step": "Select a Scope mode and matching Case, Incident, or Benchmark selection."},
+        ) from exc
+    try:
+        if payload.benchmark_id == "secrl":
+            selected_case_ids = adapter.resolve_case_ids(
+                case_ids=payload.case_ids if scope_mode == "CASES" else (),
+                incident_ids=payload.incident_ids if scope_mode == "INCIDENTS" else (),
+                all_cases=scope_mode == "ALL_BENCHMARK",
+            )
+        elif scope_mode == "ALL_BENCHMARK":
+            selected_case_ids = tuple(
+                case.id for case in adapter.enumerate_cases(adapter.dataset_ref(), Scope.all())
+            )
+        elif scope_mode == "INCIDENTS":
+            raise ValueError("Incident selection is only supported by the SecRL benchmark")
+        else:
+            selected_case_ids = tuple(payload.case_ids)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ApiError(
+            422,
+            "INVALID_TASK_SCOPE",
+            "The selected Cases or Incidents are invalid; choose an available Case, Incident, or Benchmark.",
+            details={"next_step": "Refresh the benchmark catalog and select a valid scope."},
+        ) from exc
+    resolved_incident_ids = (
+        adapter.incident_ids_for_case_ids(selected_case_ids)
+        if payload.benchmark_id == "secrl"
+        else ()
+    )
+    if payload.benchmark_id == "secrl":
+        if not context.secrl_runtime_enabled:
+            raise ApiError(
+                503,
+                "SECRL_RUNTIME_UNAVAILABLE",
+                "SecRL environment credentials are missing; configure the read-only Incident database credentials before queuing a run.",
+                details={
+                    "secret_status": "missing",
+                    "next_step": "Configure the SecRL Incident database credentials and rerun preflight.",
+                },
+            )
+        unavailable_incidents = _unavailable_incidents(context, resolved_incident_ids)
+        if unavailable_incidents:
+            raise ApiError(
+                503,
+                "SECRL_ENV_UNAVAILABLE",
+                "Selected SecRL Incident service(s) are unavailable; start the required Compose profile(s) before queuing a run.",
+                details={
+                    "unavailable_incidents": unavailable_incidents,
+                    "start_command": _incident_start_command(unavailable_incidents),
+                    "next_step": "Start the selected Incident profile(s) and rerun preflight.",
+                },
+            )
+    selection = {
+        "scope_mode": scope_mode,
+        "case_ids": list(payload.case_ids),
+        "incident_ids": list(payload.incident_ids),
+        "all_cases": scope_mode == "ALL_BENCHMARK",
+        "resolved_case_count": len(selected_case_ids),
+        "resolved_incident_count": len(resolved_incident_ids),
+        "dataset_revision": adapter.dataset_ref().version,
+        "dataset_sha256": adapter.dataset_ref().sha256,
+    }
     revision = _resolve_agent_revision(context, payload.agent_revision_id)
     model_id, model_sha256 = _resolve_model_revision(
         context, payload.model_config_revision_id
@@ -137,7 +226,7 @@ def create_task(
             name=payload.name,
             adapter=adapter,
             agent_revision=revision,
-            case_ids=payload.case_ids,
+            case_ids=selected_case_ids,
             budget=budget,
             model_config_revision_id=model_id,
             model_config_sha256=model_sha256,
@@ -147,6 +236,7 @@ def create_task(
                 "max_entry_return": payload.max_entry_return,
             },
             agent_parameters=parameters,
+            selection=selection,
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise ApiError(422, "INVALID_TASK_SPEC", "Invalid benchmark task") from exc
@@ -164,6 +254,26 @@ def create_task(
     )
 
 
+def _unavailable_incidents(
+    context: ApiContext,
+    incident_ids: tuple[str, ...],
+) -> list[str]:
+    if context.secrl_environment_probe is None:
+        return []
+    try:
+        result = context.secrl_environment_probe(incident_ids)
+        if isinstance(result, Mapping):
+            return [incident_id for incident_id in incident_ids if result.get(incident_id) is not True]
+        return [] if result is True else list(incident_ids)
+    except Exception:
+        return list(incident_ids)
+
+
+def _incident_start_command(incident_ids: list[str]) -> str:
+    profiles = " ".join(f"--profile {incident_id}" for incident_id in incident_ids)
+    return f"docker compose {profiles} up -d"
+
+
 def _resolve_model_revision(
     context: ApiContext,
     revision_id: str | None,
@@ -177,6 +287,27 @@ def _resolve_model_revision(
                 422,
                 "INVALID_TASK_SPEC",
                 "Model config is missing an encrypted credential",
+            )
+        secret = session.get(SecretRefORM, model.secret_ref_id)
+        if secret is None:
+            raise ApiError(
+                422,
+                "MODEL_CREDENTIAL_MISSING",
+                "Model config is missing an encrypted credential",
+                details={
+                    "secret_status": "missing",
+                    "next_step": "Save the model API key again before queuing a run.",
+                },
+            )
+        if secret.status == "INVALID":
+            raise ApiError(
+                422,
+                "MODEL_CREDENTIAL_INVALID",
+                "The selected model credential is marked invalid; save a new API key before queuing a run.",
+                details={
+                    "secret_status": "missing",
+                    "next_step": "Save a new model API key and rerun preflight.",
+                },
             )
         return model.id, model.sha256
 

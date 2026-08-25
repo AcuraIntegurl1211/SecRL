@@ -22,6 +22,8 @@ setup(
     include_package_data=True,
     package_data={
         "secgym": ["questions/o1/test/*.json"],
+        "secgym.agents": ["react_examples/*.txt"],
+        "secgym.agents.expel_train": ["*.json", "*.jsonl"],
         "secrl_platform.benchmarks": ["data/*.json"],
     },
     description="A benchmark for security question answering",

@@ -12,6 +12,21 @@ The platform uses one Runner process. Its lease and fencing token protect the
 active Run across a restart. Do not run a second worker against the same data
 directory.
 
+Before queueing, the UI calls `/api/v1/preflight`. A missing database,
+read-only SecRL Incident credential, model secret, or agent revision is
+reported as a named check with a next step; secret values are never returned.
+For SecRL, scope can be one or more Cases, one or more complete Incidents, or
+the full 589-case Benchmark. The API resolves and freezes the actual Case ID
+list, Dataset revision, Dataset SHA-256 and RunSpec before execution.
+
+OpenAI-compatible provider errors use stable codes. Connection failures and
+HTTP 429 responses may be retried because no provider usage is known. Malformed
+success JSON, empty choices/content, invalid usage, timeouts after dispatch,
+redirects, and HTTP 5xx responses are not transparently replayed because usage
+may already have occurred. The failure summary exposes only the code, retry
+decision, HTTP status, content type, response shape and request/correlation
+IDs; prompts, answers, credentials and raw responses are excluded.
+
 ## Artifacts and analysis
 
 Artifacts are content-addressed under `/data/artifacts/sha256/...`. The Run
