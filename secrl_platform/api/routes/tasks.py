@@ -32,6 +32,7 @@ from secrl_platform.storage.orm import (
     LocalUserORM,
     ModelConfigRevisionORM,
     RunORM,
+    SecretRefORM,
 )
 
 
@@ -213,6 +214,27 @@ def _resolve_model_revision(
                 422,
                 "INVALID_TASK_SPEC",
                 "Model config is missing an encrypted credential",
+            )
+        secret = session.get(SecretRefORM, model.secret_ref_id)
+        if secret is None:
+            raise ApiError(
+                422,
+                "MODEL_CREDENTIAL_MISSING",
+                "Model config is missing an encrypted credential",
+                details={
+                    "secret_status": "missing",
+                    "next_step": "Save the model API key again before queuing a run.",
+                },
+            )
+        if secret.status == "INVALID":
+            raise ApiError(
+                422,
+                "MODEL_CREDENTIAL_INVALID",
+                "The selected model credential is marked invalid; save a new API key before queuing a run.",
+                details={
+                    "secret_status": "missing",
+                    "next_step": "Save a new model API key and rerun preflight.",
+                },
             )
         return model.id, model.sha256
 

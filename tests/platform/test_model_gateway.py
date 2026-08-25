@@ -237,6 +237,15 @@ class OpenAICompatibleProviderTest(unittest.IsolatedAsyncioTestCase):
                 resolver=lambda _host, _port: ("127.0.0.1",),
             )
 
+    def test_endpoint_policy_requires_an_explicit_host_allowlist(self):
+        with self.assertRaises(ValueError):
+            OpenAICompatibleProvider(
+                base_url="https://provider.example/v1",
+                api_key="test-provider-key",
+                allowed_hosts=None,
+                resolver=lambda _host, _port: ("93.184.216.34",),
+            )
+
     async def test_injected_client_cannot_follow_provider_redirect(self):
         seen_hosts = []
 

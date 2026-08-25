@@ -32,7 +32,7 @@ class ApiContext:
     agent_service_resolver: Callable[[str, int], object] | None
     secret_store: SecretStore | None
     secrl_runtime_enabled: bool
-    secrl_environment_probe: Callable[[], bool] | None = None
+    secrl_environment_probe: Callable[[tuple[str, ...]], bool] | None = None
     runner_configured: bool = False
 
 

@@ -593,6 +593,76 @@ class RunnerRepository:
             self._release_lease(session, run_id)
             return task.status
 
+    def fail_configuration(
+        self,
+        *,
+        task_id: str,
+        run_id: str,
+        code: str,
+    ) -> str:
+        """Fail a queued run after safe, pre-execution configuration validation."""
+        with self._session_factory.begin() as session:
+            task, run = self._get_task_run(session, task_id, run_id)
+            if task.status in {
+                "SUCCEEDED",
+                "BUDGET_EXHAUSTED",
+                "CANCELED",
+            }:
+                return task.status
+
+            task_spec: dict[str, Any] = {}
+            try:
+                parsed_task_spec = json.loads(task.task_spec_json)
+                if isinstance(parsed_task_spec, dict):
+                    task_spec = parsed_task_spec
+            except (TypeError, ValueError, json.JSONDecodeError):
+                pass
+            run_spec: dict[str, Any] = {}
+            try:
+                parsed_run_spec = json.loads(run.run_spec_json)
+                if isinstance(parsed_run_spec, dict):
+                    run_spec = parsed_run_spec
+            except (TypeError, ValueError, json.JSONDecodeError):
+                pass
+            run_task_spec = run_spec.get("task_spec")
+            if not isinstance(run_task_spec, dict):
+                run_task_spec = {}
+            record_ids = tuple(
+                task_spec.get("case_record_ids", ())
+                or run_task_spec.get("case_record_ids", ())
+            )
+            if record_ids and session.get(CaseRecordORM, record_ids[0]) is not None:
+                attempt_no = (
+                    session.scalar(
+                        select(func.count(CaseAttemptORM.id)).where(
+                            CaseAttemptORM.run_id == run_id,
+                            CaseAttemptORM.case_id == record_ids[0],
+                        )
+                    )
+                    or 0
+                ) + 1
+                session.add(
+                    CaseAttemptORM(
+                        run_id=run_id,
+                        case_id=record_ids[0],
+                        attempt_no=attempt_no,
+                        status="FAILED",
+                        is_final=False,
+                        error_json=canonical_json(
+                            {"code": code, "retryable": False}
+                        ),
+                        metrics_json="{}",
+                        trajectory_summary_json="{}",
+                    )
+                )
+            if task.status != "FAILED":
+                _transition_task(task, "FAILED")
+            task.finished_at = utc_now()
+            run.status = "FAILED"
+            if run_id in self._fences:
+                self._release_lease(session, run_id)
+            return task.status
+
     def retry_attempt(
         self,
         *,

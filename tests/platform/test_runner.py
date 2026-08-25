@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 import hashlib
+import json
 from decimal import Decimal
 from pathlib import Path
 
@@ -32,6 +33,7 @@ from secrl_platform.runner.recovery import (
 from secrl_platform.runner.state import InvalidTransition, RunStateMachine
 from secrl_platform.storage.artifacts import LocalArtifactStore
 from secrl_platform.storage.database import create_engine_and_session
+from secrl_platform.storage.orm import RunORM
 
 
 class RunStateTest(unittest.TestCase):
@@ -887,6 +889,36 @@ class RunnerEngineTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(
                 repo.attempt_errors(handle.task_id),
                 ({"code": "AGENT_RUNTIME_ERROR"},),
+            )
+
+    async def test_run_spec_configuration_failure_after_prepare_does_not_stay_running(self):
+        with tempfile.TemporaryDirectory() as directory:
+            adapter, repo, handle, store = self.create_harness(
+                Path(directory), case_ids=("smoke-001",)
+            )
+            with repo._session_factory.begin() as session:
+                run = session.get(RunORM, handle.run_id)
+                run_spec = json.loads(run.run_spec_json)
+                run_spec["limits"]["max_steps"] = 0
+                run.run_spec_json = json.dumps(
+                    run_spec, sort_keys=True, separators=(",", ":")
+                )
+                run.run_spec_sha256 = hashlib.sha256(
+                    run.run_spec_json.encode("utf-8")
+                ).hexdigest()
+
+            status = await RunnerEngine(
+                repository=repo,
+                artifact_store=store,
+                adapter=adapter,
+                runtime_factory=DeterministicSmokeAgent,
+            ).run(handle.task_id, handle.run_id)
+
+            self.assertEqual(status, "FAILED")
+            self.assertEqual(repo.task_status(handle.task_id), "FAILED")
+            self.assertEqual(
+                repo.attempt_errors(handle.task_id),
+                ({"code": "RUNNER_CONFIGURATION_ERROR", "retryable": False},),
             )
 
     async def test_scenario_lease_is_released_when_episode_start_fails(self):

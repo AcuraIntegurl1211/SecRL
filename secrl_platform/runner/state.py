@@ -3,7 +3,7 @@ from __future__ import annotations
 
 ALLOWED_TRANSITIONS = {
     "DRAFT": frozenset({"QUEUED", "CANCELED"}),
-    "QUEUED": frozenset({"RUNNING", "CANCELED"}),
+    "QUEUED": frozenset({"RUNNING", "FAILED", "CANCELED"}),
     "RUNNING": frozenset(
         {
             "PAUSE_REQUESTED",

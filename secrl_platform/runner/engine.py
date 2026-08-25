@@ -70,16 +70,27 @@ class RunnerEngine:
         status = self._repository.prepare_for_run(task_id, run_id)
         if status != "RUNNING":
             return status
-        cases = self._repository.cases(task_id, run_id)
-        task_budget = self._repository.budget_spec(task_id)
-        run_limits = self._repository.run_limits(task_id, run_id)
-        case_by_id = {
-            case.id: case
-            for case in self._adapter.enumerate_cases(
-                self._adapter.dataset_ref(),
-                Scope(case_ids=tuple(case.external_id for case in cases)),
+        try:
+            cases = self._repository.cases(task_id, run_id)
+            task_budget = self._repository.budget_spec(task_id)
+            run_limits = self._repository.run_limits(task_id, run_id)
+            case_by_id = {
+                case.id: case
+                for case in self._adapter.enumerate_cases(
+                    self._adapter.dataset_ref(),
+                    Scope(case_ids=tuple(case.external_id for case in cases)),
+                )
+            }
+        except Exception as error:
+            _LOGGER.error(
+                "runner pre-engine configuration rejected exception_type=%s",
+                type(error).__name__,
             )
-        }
+            return self._repository.fail_configuration(
+                task_id=task_id,
+                run_id=run_id,
+                code="RUNNER_CONFIGURATION_ERROR",
+            )
         while self._repository.checkpoint(task_id, run_id) < len(cases):
             self._repository.heartbeat(run_id)
             if self._repository.budget_reached(task_id, run_id):

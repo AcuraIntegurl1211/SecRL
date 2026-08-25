@@ -172,7 +172,7 @@ describe("core operational pages", () => {
 
   it("queues complete SecRL Incidents with their counts and frozen selection fields", async () => {
     let taskBody: Record<string, unknown> | null = null;
-    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input);
       if (path.endsWith("/agents")) return new Response(JSON.stringify([{ id: "agent-db-1", name: "SecRL baseline", kind: "BUILT_IN", sha256: "a".repeat(64), manifest: { agent_id: "secrl-baseline-v1", parameter_schema: { properties: {} } } }]), { status: 200 });
       if (path.endsWith("/models")) return new Response(JSON.stringify([{ id: "model-db-1", name: "DeepSeek", model: "deepseek-chat", credential_configured: true, pricing_configured: true, sha256: "b".repeat(64) }]), { status: 200 });
@@ -183,7 +183,8 @@ describe("core operational pages", () => {
         return new Response(JSON.stringify({ run_id: "secrl-run-created" }), { status: 201 });
       }
       throw new Error(`unexpected request ${path}`);
-    }));
+    });
+    vi.stubGlobal("fetch", fetchMock);
     const user = userEvent.setup();
     renderPage(<NewEvaluationPage />);
     expect(await screen.findByLabelText("Benchmark revision")).toHaveValue("secrl");
@@ -201,6 +202,11 @@ describe("core operational pages", () => {
       all_cases: false,
       model_config_revision_id: "model-db-1",
     });
+    const preflightRequest = fetchMock.mock.calls
+      .map(([input]) => String(input))
+      .find((path) => path.includes("/preflight"));
+    expect(preflightRequest).toContain("incident_ids=incident_5");
+    expect(preflightRequest).toContain("incident_ids=incident_34");
   });
 
   it("does not claim an Agent Service is healthy before a real manifest check", async () => {

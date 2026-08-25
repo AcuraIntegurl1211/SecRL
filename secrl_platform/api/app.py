@@ -208,6 +208,7 @@ def _context(
         and settings is not None
         and settings.secrl_runtime_enabled
         and settings.secrl_mysql_password is not None
+        and bool(settings.secrl_mysql_password.get_secret_value())
     ):
         executor = SecRLMySQLQueryExecutor(
             user=settings.secrl_mysql_user,
@@ -215,9 +216,12 @@ def _context(
             database=settings.secrl_mysql_database,
         )
 
-        def probe() -> bool:
-            result = executor.query_sql("incident_5", "SELECT 1")
-            return isinstance(result, tuple) and len(result) == 2 and result[1] is True
+        def probe(incident_ids: tuple[str, ...]) -> bool:
+            for incident_id in incident_ids:
+                result = executor.query_sql(incident_id, "SELECT 1")
+                if not (isinstance(result, tuple) and len(result) == 2 and result[1] is True):
+                    return False
+            return True
 
         environment_probe_fn = probe
     return ApiContext(
@@ -246,6 +250,7 @@ def _context(
             settings is not None
             and settings.secrl_runtime_enabled
             and settings.secrl_mysql_password is not None
+            and bool(settings.secrl_mysql_password.get_secret_value())
         ),
         secrl_environment_probe=environment_probe_fn,
         runner_configured=(settings is None or settings.runner_poll_seconds > 0),

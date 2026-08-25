@@ -1128,6 +1128,42 @@
               ],
               "title": "Agent Revision Id"
             }
+          },
+          {
+            "in": "query",
+            "name": "case_ids",
+            "required": false,
+            "schema": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Case Ids",
+              "type": "array"
+            }
+          },
+          {
+            "in": "query",
+            "name": "incident_ids",
+            "required": false,
+            "schema": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Incident Ids",
+              "type": "array"
+            }
+          },
+          {
+            "in": "query",
+            "name": "all_cases",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "All Cases",
+              "type": "boolean"
+            }
           }
         ],
         "responses": {

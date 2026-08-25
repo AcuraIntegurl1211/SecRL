@@ -1101,7 +1101,7 @@ class ApiTest(unittest.TestCase):
         original_context = self.app.state.api_context
         self.app.state.api_context = replace(
             original_context,
-            secrl_environment_probe=lambda: False,
+            secrl_environment_probe=lambda _incidents: False,
         )
         unavailable = self.client.get(
             "/api/v1/preflight",
@@ -1118,6 +1118,139 @@ class ApiTest(unittest.TestCase):
         )
         agent_check = next(item for item in unregistered.json()["checks"] if item["name"] == "agent_revision")
         self.assertEqual(agent_check["status"], "missing")
+
+    def test_preflight_probes_the_selected_incidents(self):
+        self.login()
+        observed: list[tuple[str, ...]] = []
+        original_context = self.app.state.api_context
+        self.app.state.api_context = replace(
+            original_context,
+            secrl_environment_probe=lambda incidents: observed.append(incidents) or True,
+        )
+
+        response = self.client.get(
+            "/api/v1/preflight",
+            params={
+                "benchmark_id": "secrl",
+                "agent_revision_id": DeterministicSmokeAgent.revision().id,
+                "incident_ids": ["incident_34"],
+            },
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(observed, [("incident_34",)])
+        environment_check = next(item for item in response.json()["checks"] if item["name"] == "environment")
+        self.assertEqual(environment_check["status"], "ready")
+        self.app.state.api_context = original_context
+
+    def test_preflight_and_queue_block_an_invalid_model_secret(self):
+        self.login()
+        model = self.client.post(
+            "/api/v1/models",
+            headers={
+                "X-CSRF-Token": self.csrf_token,
+                "X-Model-API-Key": "sk-invalid-fixture",
+            },
+            json={
+                "name": "invalid-fixture",
+                "provider": "openai-compatible",
+                "endpoint": "https://models.invalid/v1",
+                "model": "fixture",
+                "parameters": {"max_output_tokens": 16},
+            },
+        )
+        self.assertEqual(model.status_code, 201, model.text)
+        model_id = model.json()["id"]
+        with self.session_factory.begin() as session:
+            stored = session.get(ModelConfigRevisionORM, model_id)
+            self.assertIsNotNone(stored)
+            secret = session.get(SecretRefORM, stored.secret_ref_id)
+            self.assertIsNotNone(secret)
+            secret.status = "INVALID"
+
+        preflight = self.client.get(
+            "/api/v1/preflight",
+            params={
+                "benchmark_id": "protocol-smoke",
+                "agent_revision_id": DeterministicSmokeAgent.revision().id,
+                "model_config_revision_id": model_id,
+            },
+        )
+        self.assertEqual(preflight.status_code, 200, preflight.text)
+        model_check = next(item for item in preflight.json()["checks"] if item["name"] == "model_secret")
+        self.assertEqual(model_check["status"], "missing")
+        self.assertEqual(model_check["code"], "MODEL_CREDENTIAL_INVALID")
+        self.assertEqual(model_check["secret_status"], "missing")
+
+        queued = self.client.post(
+            "/api/v1/tasks",
+            headers={"X-CSRF-Token": self.csrf_token},
+            json={**valid_smoke_task(), "model_config_revision_id": model_id},
+        )
+        self.assertEqual(queued.status_code, 422, queued.text)
+        self.assertEqual(queued.json()["error"]["code"], "MODEL_CREDENTIAL_INVALID")
+
+    def test_empty_secrl_password_is_reported_by_preflight(self):
+        settings = Settings(
+            data_dir=Path(self.directory.name),
+            master_key="00" * 32,
+            session_secret="s" * 32,
+            model_provider_allowlist=("models.invalid",),
+            secrl_runtime_enabled=True,
+            secrl_mysql_password="",
+        )
+        app = create_app(
+            settings=settings,
+            session_factory=self.session_factory,
+            artifact_store=self.artifact_store,
+            model_provider_resolver=lambda _host, _port: ("93.184.216.34",),
+        )
+        with TestClient(app) as client:
+            login = client.post(
+                "/api/v1/auth/login",
+                json={"username": "admin", "password": "correct horse battery staple"},
+            )
+            self.assertEqual(login.status_code, 200, login.text)
+            response = client.get(
+                "/api/v1/preflight",
+                params={
+                    "benchmark_id": "secrl",
+                    "agent_revision_id": DeterministicSmokeAgent.revision().id,
+                },
+            )
+        self.assertEqual(response.status_code, 200, response.text)
+        environment_check = next(item for item in response.json()["checks"] if item["name"] == "environment")
+        self.assertEqual(environment_check["code"], "SECRL_ENV_NOT_CONFIGURED")
+
+    def test_runner_configuration_failure_is_persisted_instead_of_left_queued(self):
+        self.login()
+        created = self.client.post(
+            "/api/v1/tasks",
+            headers={"X-CSRF-Token": self.csrf_token},
+            json=valid_smoke_task(),
+        )
+        self.assertEqual(created.status_code, 201, created.text)
+        with self.session_factory.begin() as session:
+            task = session.get(EvaluationTaskORM, created.json()["id"])
+            task.task_spec_json = "{"
+
+        status = asyncio.run(
+            run_pending_once(
+                settings=self.settings,
+                session_factory=self.session_factory,
+                artifact_store=self.artifact_store,
+            )
+        )
+
+        self.assertEqual(status, "FAILED")
+        with self.session_factory() as session:
+            task = session.get(EvaluationTaskORM, created.json()["id"])
+            run = session.get(RunORM, created.json()["run_id"])
+            self.assertEqual(task.status, "FAILED")
+            self.assertEqual(run.status, "FAILED")
+        detail = self.client.get(f"/api/v1/runs/{created.json()['run_id']}")
+        self.assertEqual(detail.status_code, 200, detail.text)
+        self.assertEqual(detail.json()["failure"]["code"], "RUNNER_CONFIGURATION_ERROR")
 
     def test_retry_cannot_escape_frozen_case_record_scope(self):
         self.login()

@@ -98,6 +98,9 @@ export function NewEvaluationPage() {
     try {
       const preflightQuery = new URLSearchParams({ benchmark_id: benchmark, agent_revision_id: agent });
       if (model) preflightQuery.set("model_config_revision_id", model);
+      caseIds.forEach((caseId) => preflightQuery.append("case_ids", caseId));
+      incidentIds.forEach((incidentId) => preflightQuery.append("incident_ids", incidentId));
+      if (allCases) preflightQuery.set("all_cases", "true");
       const preflight = await apiFetch<PreflightResponse>(`/api/v1/preflight?${preflightQuery.toString()}`);
       const blocked = preflight.checks.find((check) => check.status === "missing");
       if (blocked) {

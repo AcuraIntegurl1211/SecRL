@@ -317,8 +317,8 @@ def _validated_model_endpoint(
         literal = None
     if literal is not None and not literal.is_global:
         raise ValueError("model provider endpoint must not use a private address")
-    if allowed_hosts is None:
-        return base_url, (host,)
+    if not allowed_hosts:
+        raise ValueError("model provider host allowlist is required")
     normalized_allowlist = {value.lower() for value in allowed_hosts}
     if host not in normalized_allowlist:
         raise ValueError("model provider host is not allowlisted")
