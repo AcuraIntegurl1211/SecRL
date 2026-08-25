@@ -216,12 +216,16 @@ def _context(
             database=settings.secrl_mysql_database,
         )
 
-        def probe(incident_ids: tuple[str, ...]) -> bool:
+        def probe(incident_ids: tuple[str, ...]) -> dict[str, bool]:
+            availability: dict[str, bool] = {}
             for incident_id in incident_ids:
                 result = executor.query_sql(incident_id, "SELECT 1")
-                if not (isinstance(result, tuple) and len(result) == 2 and result[1] is True):
-                    return False
-            return True
+                availability[incident_id] = (
+                    isinstance(result, tuple)
+                    and len(result) == 2
+                    and result[1] is True
+                )
+            return availability
 
         environment_probe_fn = probe
     return ApiContext(

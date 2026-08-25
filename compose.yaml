@@ -138,49 +138,49 @@ services:
 
   incident-34:
     <<: *mysql
-    profiles: ["incident_34", "secrl-all"]
+    profiles: ["incident_34"]
     volumes:
       - incident_34_data:/var/lib/mysql
       - ./docker/mysql/init-incident.sh:/docker-entrypoint-initdb.d/10-init-incident.sh:ro
   incident-38:
     <<: *mysql
-    profiles: ["incident_38", "secrl-all"]
+    profiles: ["incident_38"]
     volumes:
       - incident_38_data:/var/lib/mysql
       - ./docker/mysql/init-incident.sh:/docker-entrypoint-initdb.d/10-init-incident.sh:ro
   incident-39:
     <<: *mysql
-    profiles: ["incident_39", "secrl-all"]
+    profiles: ["incident_39"]
     volumes:
       - incident_39_data:/var/lib/mysql
       - ./docker/mysql/init-incident.sh:/docker-entrypoint-initdb.d/10-init-incident.sh:ro
   incident-5:
     <<: *mysql
-    profiles: ["incident_5", "secrl-all"]
+    profiles: ["incident_5"]
     volumes:
       - incident_5_data:/var/lib/mysql
       - ./docker/mysql/init-incident.sh:/docker-entrypoint-initdb.d/10-init-incident.sh:ro
   incident-55:
     <<: *mysql
-    profiles: ["incident_55", "secrl-all"]
+    profiles: ["incident_55"]
     volumes:
       - incident_55_data:/var/lib/mysql
       - ./docker/mysql/init-incident.sh:/docker-entrypoint-initdb.d/10-init-incident.sh:ro
   incident-134:
     <<: *mysql
-    profiles: ["incident_134", "secrl-all"]
+    profiles: ["incident_134"]
     volumes:
       - incident_134_data:/var/lib/mysql
       - ./docker/mysql/init-incident.sh:/docker-entrypoint-initdb.d/10-init-incident.sh:ro
   incident-166:
     <<: *mysql
-    profiles: ["incident_166", "secrl-all"]
+    profiles: ["incident_166"]
     volumes:
       - incident_166_data:/var/lib/mysql
       - ./docker/mysql/init-incident.sh:/docker-entrypoint-initdb.d/10-init-incident.sh:ro
   incident-322:
     <<: *mysql
-    profiles: ["incident_322", "secrl-all"]
+    profiles: ["incident_322"]
     volumes:
       - incident_322_data:/var/lib/mysql
       - ./docker/mysql/init-incident.sh:/docker-entrypoint-initdb.d/10-init-incident.sh:ro

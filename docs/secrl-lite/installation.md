@@ -70,8 +70,15 @@ Incident MySQL is opt-in and has no host port:
 
 ```sh
 docker compose --profile incident_34 up -d
-docker compose --profile secrl-all up -d
+docker compose --profile incident_5 --profile incident_34 up -d
 ```
+
+Each Incident has its own explicit Compose profile. The default
+`docker compose up -d` starts no Incident database, and this release does not
+provide an aggregate profile that can accidentally start all eight databases.
+When a task selects multiple Incidents, pass exactly those profiles to Compose.
+The preflight response reports unavailable Incidents and gives the corresponding
+profile command when a selected service is not running.
 
 Use a separate, non-checked-in value for `SECRL_MYSQL_ROOT_PASSWORD` and
 `SECRL_MYSQL_PASSWORD` when an Incident profile is enabled.
@@ -79,6 +86,24 @@ Use a separate, non-checked-in value for `SECRL_MYSQL_ROOT_PASSWORD` and
 To make SecRL Incident selection and preflight available to the API and
 Runner, also set `SECRL_SECRL_RUNTIME_ENABLED=true` in `.env`. The API only
 reports the credential as configured or missing; it never returns the value.
+
+### Low-memory hosts
+
+On a host with limited memory, run the platform services and only the Incident
+needed by the current task. Start additional profiles one at a time when a
+task explicitly selects them; do not start an all-Incident profile. The pinned
+MySQL service has a 2 GiB container limit, so reserve at least 4 GiB for the
+platform plus one Incident and verify health before queuing a run:
+
+```sh
+docker compose up -d --wait api runner web
+docker compose --profile incident_34 up -d --wait incident-34
+docker compose ps
+```
+
+If an Incident is not running, preflight returns `SECRL_ENV_UNAVAILABLE` with
+the exact `--profile incident_*` command required to start it. This keeps
+resource selection explicit and does not require Docker Socket access.
 
 ## Stop and upgrade
 

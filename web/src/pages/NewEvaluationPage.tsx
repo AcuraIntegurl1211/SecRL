@@ -104,7 +104,11 @@ export function NewEvaluationPage() {
       const preflight = await apiFetch<PreflightResponse>(`/api/v1/preflight?${preflightQuery.toString()}`);
       const blocked = preflight.checks.find((check) => check.status === "missing");
       if (blocked) {
-        setError(blocked.message);
+        const unavailable = blocked.unavailable_incidents?.length
+          ? ` Unavailable: ${blocked.unavailable_incidents.join(", ")}.`
+          : "";
+        const startCommand = blocked.start_command ? ` Start it with: ${blocked.start_command}` : "";
+        setError(`${blocked.message}${unavailable}${startCommand}`);
         return;
       }
       const result = await apiFetch<{ run_id: string }>("/api/v1/tasks", { method: "POST", json: {

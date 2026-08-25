@@ -1094,6 +1094,9 @@ class ApiTest(unittest.TestCase):
         serialized = json.dumps(payload)
         self.assertNotIn("master_key", serialized)
         self.assertNotIn("missing-model-secret-value", serialized)
+        environment_check = next(item for item in payload["checks"] if item["name"] == "environment")
+        self.assertEqual(environment_check["status"], "missing")
+        self.assertEqual(environment_check["code"], "SECRL_ENV_UNAVAILABLE")
         model_check = next(item for item in payload["checks"] if item["name"] == "model_secret")
         self.assertEqual(model_check["status"], "missing")
         self.assertEqual(model_check["secret_status"], "missing")
@@ -1142,6 +1145,40 @@ class ApiTest(unittest.TestCase):
         environment_check = next(item for item in response.json()["checks"] if item["name"] == "environment")
         self.assertEqual(environment_check["status"], "ready")
         self.app.state.api_context = original_context
+
+    def test_preflight_reports_each_unavailable_incident_and_start_command(self):
+        self.login()
+        original_context = self.app.state.api_context
+        self.app.state.api_context = replace(
+            original_context,
+            secrl_runtime_enabled=True,
+            secrl_environment_probe=lambda _incidents: {
+                "incident_34": True,
+                "incident_5": False,
+            },
+        )
+
+        response = self.client.get(
+            "/api/v1/preflight",
+            params={
+                "benchmark_id": "secrl",
+                "agent_revision_id": DeterministicSmokeAgent.revision().id,
+                "incident_ids": ["incident_5", "incident_34"],
+            },
+        )
+
+        self.app.state.api_context = original_context
+        self.assertEqual(response.status_code, 200, response.text)
+        environment_check = next(
+            item for item in response.json()["checks"] if item["name"] == "environment"
+        )
+        self.assertEqual(environment_check["status"], "missing")
+        self.assertEqual(environment_check["code"], "SECRL_ENV_UNAVAILABLE")
+        self.assertEqual(environment_check["unavailable_incidents"], ["incident_5"])
+        self.assertEqual(
+            environment_check["start_command"],
+            "docker compose --profile incident_5 up -d",
+        )
 
     def test_preflight_and_queue_block_an_invalid_model_secret(self):
         self.login()

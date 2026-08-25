@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 
 from fastapi import Depends, Request
 from sqlalchemy import select
@@ -32,7 +32,7 @@ class ApiContext:
     agent_service_resolver: Callable[[str, int], object] | None
     secret_store: SecretStore | None
     secrl_runtime_enabled: bool
-    secrl_environment_probe: Callable[[tuple[str, ...]], bool] | None = None
+    secrl_environment_probe: Callable[[tuple[str, ...]], Mapping[str, bool] | bool] | None = None
     runner_configured: bool = False
 
 

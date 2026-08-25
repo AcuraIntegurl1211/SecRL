@@ -209,6 +209,26 @@ describe("core operational pages", () => {
     expect(preflightRequest).toContain("incident_ids=incident_34");
   });
 
+  it("shows unavailable Incident profiles and the safe Compose start command", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path.endsWith("/agents")) return new Response(JSON.stringify([{ id: "agent-db-1", name: "SecRL baseline", kind: "BUILT_IN", sha256: "a".repeat(64), manifest: { agent_id: "secrl-baseline-v1", parameter_schema: { properties: {} } } }]), { status: 200 });
+      if (path.endsWith("/models")) return new Response(JSON.stringify([]), { status: 200 });
+      if (path.endsWith("/benchmarks")) return new Response(JSON.stringify([{ manifest: { benchmark_id: "secrl", name: "SecRL" }, dataset: { case_count: 589, incidents: { incident_34: 82 } } }]), { status: 200 });
+      if (path.includes("/preflight")) return new Response(JSON.stringify({ ready: false, benchmark_id: "secrl", checks: [{ name: "database", status: "ready", message: "ok" }, { name: "environment", status: "missing", code: "SECRL_ENV_UNAVAILABLE", message: "Selected Incident unavailable", unavailable_incidents: ["incident_34"], start_command: "docker compose --profile incident_34 up -d" }, { name: "model_secret", status: "missing", message: "model" }, { name: "agent_revision", status: "ready", message: "ok" }, { name: "runner", status: "ready", message: "ok" }] }), { status: 200 });
+      throw new Error(`unexpected request ${path}`);
+    }));
+    const user = userEvent.setup();
+    renderPage(<NewEvaluationPage />);
+    expect(await screen.findByLabelText("Benchmark revision")).toHaveValue("secrl");
+    await user.selectOptions(screen.getByLabelText("Incident selection"), "incident_34");
+    await user.click(screen.getByRole("button", { name: /Continue/ }));
+    await user.click(screen.getByRole("button", { name: /Continue/ }));
+    await user.click(screen.getByRole("button", { name: /Continue/ }));
+    await user.click(screen.getByRole("button", { name: /Queue evaluation/ }));
+    expect(await screen.findByText(/docker compose --profile incident_34 up -d/)).toBeInTheDocument();
+  });
+
   it("does not claim an Agent Service is healthy before a real manifest check", async () => {
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input);

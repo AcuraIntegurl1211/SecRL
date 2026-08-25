@@ -25,11 +25,29 @@ class ComposePackagingTest(unittest.TestCase):
     def test_compose_keeps_web_local_and_incident_mysql_profiled(self):
         compose = (ROOT / "compose.yaml").read_text()
         self.assertIn('127.0.0.1:${SECRL_PORT:-8080}:8080', compose)
-        self.assertIn('profiles: ["incident_34", "secrl-all"]', compose)
+        self.assertIn('profiles: ["incident_34"]', compose)
+        self.assertNotIn("secrl-all", compose)
         self.assertIn('profiles: ["smoke"]', compose)
         self.assertNotIn("/var/run/docker.sock", compose)
         self.assertIn("SECRL_MYSQL_ROOT_PASSWORD:-", compose)
         self.assertIn("SECRL_AGENT_SERVICE_CAPABILITY_SECRET:-", compose)
+
+    def test_each_incident_requires_an_explicit_profile(self):
+        compose = (ROOT / "compose.yaml").read_text()
+        for incident_id in (5, 34, 38, 39, 55, 134, 166, 322):
+            self.assertIn(
+                f'profiles: ["incident_{incident_id}"]',
+                compose,
+            )
+        self.assertNotIn('profiles: ["secrl-all"]', compose)
+
+    def test_release_gate_has_a_single_incident_smoke_without_an_all_profile(self):
+        workflow = (ROOT / ".github" / "workflows" / "secrl-lite-release-gate.yml").read_text()
+        self.assertIn("SECRL_SECRL_RUNTIME_ENABLED=true", workflow)
+        self.assertIn("SECRL_MYSQL_ROOT_PASSWORD", workflow)
+        self.assertIn("--profile incident_34", workflow)
+        self.assertIn("incident-34", workflow)
+        self.assertNotIn("--profile secrl-all", workflow)
 
     def test_platform_receives_documented_admin_and_capability_settings(self):
         compose = (ROOT / "compose.yaml").read_text()

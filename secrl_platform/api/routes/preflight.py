@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy import text
 
@@ -59,24 +61,49 @@ def preflight(
                     details={"next_step": "Refresh the benchmark catalog and select a valid scope."},
                 ) from exc
             if context.secrl_runtime_enabled:
-                environment_ready = True
+                environment_status = {incident_id: False for incident_id in selected_incidents}
                 if context.secrl_environment_probe is not None:
                     try:
-                        environment_ready = context.secrl_environment_probe(selected_incidents)
+                        probe_result = context.secrl_environment_probe(selected_incidents)
+                        if isinstance(probe_result, Mapping):
+                            environment_status = {
+                                incident_id: probe_result.get(incident_id, False)
+                                is True
+                                for incident_id in selected_incidents
+                            }
+                        else:
+                            environment_status = {
+                                incident_id: probe_result is True
+                                for incident_id in selected_incidents
+                            }
                     except Exception:
-                        environment_ready = False
-                checks.append(
-                    _check(
-                        "environment",
-                        "ready" if environment_ready else "missing",
-                        (
-                            "SecRL Incident database connection is available."
-                            if environment_ready
-                            else "SecRL Incident database is unreachable; verify the read-only credentials and Incident service."
-                        ),
-                        code=None if environment_ready else "SECRL_ENV_UNAVAILABLE",
+                        environment_status = {
+                            incident_id: False for incident_id in selected_incidents
+                        }
+                unavailable_incidents = [
+                    incident_id
+                    for incident_id, available in environment_status.items()
+                    if not available
+                ]
+                if unavailable_incidents:
+                    checks.append(
+                        _check(
+                            "environment",
+                            "missing",
+                            "Selected SecRL Incident service(s) are unavailable; start the required Compose profile(s) and retry preflight.",
+                            code="SECRL_ENV_UNAVAILABLE",
+                            unavailable_incidents=unavailable_incidents,
+                            start_command=_incident_start_command(unavailable_incidents),
+                        )
                     )
-                )
+                else:
+                    checks.append(
+                        _check(
+                            "environment",
+                            "ready",
+                            "SecRL Incident database connection is available.",
+                        )
+                    )
             else:
                 checks.append(
                     _check(
@@ -84,6 +111,7 @@ def preflight(
                         "missing",
                         "SecRL environment credentials are missing; configure the read-only Incident database credentials.",
                         code="SECRL_ENV_NOT_CONFIGURED",
+                        start_command=_incident_start_command(selected_incidents),
                     )
                 )
         else:
@@ -193,8 +221,14 @@ def _selected_incidents(
     return tuple(selected)
 
 
-def _check(name: str, status: str, message: str, *, code: str | None = None) -> dict[str, str]:
+def _incident_start_command(incident_ids: tuple[str, ...] | list[str]) -> str:
+    profiles = " ".join(f"--profile {incident_id}" for incident_id in incident_ids)
+    return f"docker compose {profiles} up -d"
+
+
+def _check(name: str, status: str, message: str, *, code: str | None = None, **details: object) -> dict[str, object]:
     result = {"name": name, "status": status, "message": message}
     if code is not None:
         result["code"] = code
+    result.update(details)
     return result

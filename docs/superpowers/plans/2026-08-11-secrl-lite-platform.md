@@ -1497,7 +1497,7 @@ forward SIGTERM and wait for both children
 
 - [x] **Step 3: Define Compose profiles**
 
-Publish Web as `127.0.0.1:${SECRL_PORT:-8080}:8080`. Add `smoke`, one profile per Incident, `secrl-all`, and `agent-service-reference`. MySQL services have no host ports, use read-only source mounts during init, named data volumes, health checks, resource limits, and pinned multi-architecture image digests.
+Publish Web as `127.0.0.1:${SECRL_PORT:-8080}:8080`. Add `smoke`, one explicit profile per Incident, and `agent-service-reference`. MySQL services have no host ports, use read-only source mounts during init, named data volumes, health checks, resource limits, and pinned multi-architecture image digests. Operators pass only the profiles selected for the current task; there is no aggregate all-Incident profile.
 
 - [x] **Step 4: Add environment example**
 

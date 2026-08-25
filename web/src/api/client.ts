@@ -94,6 +94,8 @@ export type PreflightCheck = {
   message: string;
   code?: string;
   secret_status?: "configured" | "missing";
+  unavailable_incidents?: string[];
+  start_command?: string;
 };
 
 export type PreflightResponse = {
