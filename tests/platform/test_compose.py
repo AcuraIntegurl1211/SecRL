@@ -38,6 +38,15 @@ class ComposePackagingTest(unittest.TestCase):
         self.assertIn("SECRL_INITIAL_ADMIN_USERNAME:", platform_environment)
         self.assertIn("SECRL_AGENT_SERVICE_CAPABILITY_SECRET:", platform_environment)
 
+    def test_platform_receives_sec_rl_incident_runtime_settings(self):
+        compose = (ROOT / "compose.yaml").read_text()
+        platform_environment = compose.split("x-mysql:", 1)[0]
+
+        self.assertIn("SECRL_SECRL_RUNTIME_ENABLED:", platform_environment)
+        self.assertIn("SECRL_MYSQL_USER:", platform_environment)
+        self.assertIn("SECRL_MYSQL_PASSWORD:", platform_environment)
+        self.assertIn("SECRL_MYSQL_DATABASE:", platform_environment)
+
     def test_https_proxy_headers_reach_api_cookie_policy(self):
         compose = (ROOT / "compose.yaml").read_text()
         nginx = (ROOT / "docker" / "lite" / "nginx.conf").read_text()
@@ -194,6 +203,12 @@ class ComposePackagingTest(unittest.TestCase):
             install_step,
             r"python -m pip install[^\n]*\bwheel(?:[<>= ]|$)",
         )
+
+    def test_protocol_smoke_model_fixture_uses_approved_deepseek_endpoint(self):
+        smoke = (ROOT / "scripts" / "lite-protocol-smoke.py").read_text()
+
+        self.assertIn('"endpoint": "https://api.deepseek.com"', smoke)
+        self.assertNotIn('"endpoint": "https://api.openai.com/v1"', smoke)
 
     def test_every_platform_service_has_a_real_healthcheck(self):
         compose = (ROOT / "compose.yaml").read_text()
