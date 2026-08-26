@@ -36,6 +36,21 @@ from secrl_platform.storage.database import create_engine_and_session
 logger = logging.getLogger("secrl_platform.api")
 
 
+def _enforce_dev_autoauth_fence(settings: Settings) -> None:
+    if not settings.dev_autoauth:
+        return
+    if (settings.dev_autoauth_confirm or "").strip().lower() != "yes":
+        raise RuntimeError(
+            "SECRL_DEV_AUTOAUTH requires SECRL_DEV_AUTOAUTH_CONFIRM=yes; "
+            "auto-authentication is restricted to local development use"
+        )
+    logger.warning(
+        "Dev auto-authentication is ENABLED: every request is served as the "
+        "local admin without credentials; never enable outside a private "
+        "development machine"
+    )
+
+
 def create_app(
     *,
     settings: Settings | None = None,
@@ -49,6 +64,7 @@ def create_app(
     async def lifespan(app: FastAPI):
         if session_factory is None:
             effective_settings = settings or Settings()
+            _enforce_dev_autoauth_fence(effective_settings)
             _upgrade_database(effective_settings.database_path)
             app.state.api_context = _context(
                 create_engine_and_session(effective_settings.database_path),
@@ -69,17 +85,8 @@ def create_app(
         redoc_url=None,
         openapi_url=None,
     )
-    if settings is not None and settings.dev_autoauth:
-        if (settings.dev_autoauth_confirm or "").strip().lower() != "yes":
-            raise RuntimeError(
-                "SECRL_DEV_AUTOAUTH requires SECRL_DEV_AUTOAUTH_CONFIRM=yes; "
-                "auto-authentication is restricted to local development use"
-            )
-        logger.warning(
-            "Dev auto-authentication is ENABLED: every request is served as the "
-            "local admin without credentials; never enable outside a private "
-            "development machine"
-        )
+    if settings is not None:
+        _enforce_dev_autoauth_fence(settings)
     if session_factory is not None:
         app.state.api_context = _context(
             session_factory,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -98,6 +99,24 @@ class DevAutoAuthTest(unittest.TestCase):
                 session_factory=self.session_factory,
                 artifact_store=self.artifact_store,
             )
+
+    def test_autoauth_confirmation_enforced_on_noarg_factory_path(self) -> None:
+        """The uvicorn factory path calls create_app() without settings; the
+        confirmation fence must still fire via lifespan-time settings."""
+        from unittest import mock
+
+        env = {
+            "SECRL_DATA_DIR": str(self.root),
+            "SECRL_MASTER_KEY": "00" * 32,
+            "SECRL_SESSION_SECRET": "s" * 32,
+            "SECRL_DEV_AUTOAUTH": "true",
+            "SECRL_MODEL_PROVIDER_ALLOWLIST": '["api.deepseek.com"]',
+        }
+        with mock.patch.dict(os.environ, env, clear=False):
+            app = create_app()
+            with self.assertRaises(RuntimeError):
+                with TestClient(app):
+                    pass
 
     def test_autoauth_without_admin_user_fails_closed(self) -> None:
         app = create_app(
