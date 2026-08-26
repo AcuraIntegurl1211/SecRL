@@ -34,17 +34,38 @@ class ApiContext:
     secrl_runtime_enabled: bool
     secrl_environment_probe: Callable[[tuple[str, ...]], Mapping[str, bool] | bool] | None = None
     runner_configured: bool = False
+    dev_autoauth: bool = False
 
 
 def get_context(request: Request) -> ApiContext:
     return request.app.state.api_context
 
 
+def _dev_autoauth_user(context: ApiContext) -> LocalUserORM:
+    with context.session_factory() as session:
+        user = session.scalar(
+            select(LocalUserORM).where(
+                LocalUserORM.username == "admin",
+                LocalUserORM.status == "ACTIVE",
+            )
+        )
+    if user is None:
+        raise ApiError(
+            500,
+            "AUTOAUTH_UNAVAILABLE",
+            "Dev auto-authentication is enabled but no active local admin account exists",
+        )
+    return user
+
+
 def require_user(
     request: Request,
     context: ApiContext = Depends(get_context),
 ) -> LocalUserORM:
-    user = require_session_user(request, context)
+    if context.dev_autoauth:
+        user = _dev_autoauth_user(context)
+    else:
+        user = require_session_user(request, context)
     _require_rotated_password(context, user)
     return user
 
@@ -53,6 +74,8 @@ def require_session_user(
     request: Request,
     context: ApiContext = Depends(get_context),
 ) -> LocalUserORM:
+    if context.dev_autoauth:
+        return _dev_autoauth_user(context)
     user = context.sessions.authenticate(request.cookies.get(SESSION_COOKIE))
     if user is None:
         raise ApiError(401, "AUTHENTICATION_REQUIRED", "Authentication is required")
@@ -63,7 +86,10 @@ def require_csrf_user(
     request: Request,
     context: ApiContext = Depends(get_context),
 ) -> LocalUserORM:
-    user = require_csrf_session_user(request, context)
+    if context.dev_autoauth:
+        user = _dev_autoauth_user(context)
+    else:
+        user = require_csrf_session_user(request, context)
     _require_rotated_password(context, user)
     return user
 
@@ -72,6 +98,8 @@ def require_csrf_session_user(
     request: Request,
     context: ApiContext = Depends(get_context),
 ) -> LocalUserORM:
+    if context.dev_autoauth:
+        return _dev_autoauth_user(context)
     session_id = request.cookies.get(SESSION_COOKIE)
     if context.sessions.authenticate(session_id) is None:
         raise ApiError(401, "AUTHENTICATION_REQUIRED", "Authentication is required")
