@@ -33,6 +33,25 @@ created administrator is restricted to the password-change endpoint until the
 initial deployment password has been replaced with a new value of at least 12
 characters.
 
+## Local development auto-authentication
+
+On a private development machine the login step can be skipped by starting
+the API with both:
+
+```sh
+SECRL_DEV_AUTOAUTH=true
+SECRL_DEV_AUTOAUTH_CONFIRM=yes
+```
+
+Every request is then served as the local `admin` account without a session
+cookie or CSRF token, and the web console opens directly into the workspace.
+The API refuses to start when the flag is set without the confirmation value,
+and it fails closed if no active admin account exists. The initial-password
+rotation gate still applies, so a fresh deployment completes its one-time
+password change first. Never enable these variables in production, shared
+hosts, or any deployment whose port is reachable beyond the machine itself;
+the Compose files intentionally do not pass them through.
+
 ## macOS and Windows setup boundary
 
 On macOS, run the same Compose commands from Terminal after installing Docker

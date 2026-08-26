@@ -25,6 +25,8 @@ class Settings(BaseSettings):
     secrl_mysql_user: str = "benchmark_ro"
     secrl_mysql_password: SecretStr | None = None
     secrl_mysql_database: str = "env_monitor_db"
+    dev_autoauth: bool = False
+    dev_autoauth_confirm: str | None = None
 
     @field_validator("master_key")
     @classmethod
