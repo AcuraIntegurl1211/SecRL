@@ -432,6 +432,150 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(audit.status_code, 200, audit.text)
         self.assertEqual(audit.json()[0]["action"], "human_review.append")
 
+    def _register_secrl_baseline_agent(self, headers):
+        registered = self.client.post(
+            "/api/v1/agents",
+            json={"kind": "BUILT_IN", "revision_id": "secrl-baseline-v1"},
+            headers=headers,
+        )
+        self.assertEqual(registered.status_code, 201, registered.text)
+        return registered.json()["id"]
+
+    def _create_model_revision(self, headers, name, *, complete=True):
+        payload = {
+            "name": name,
+            "provider": "openai-compatible",
+            "endpoint": "https://models.invalid/v1",
+            "model": "fixture-model",
+            "parameters": (
+                {"max_output_tokens": 64, "temperature": 0}
+                if complete
+                else {"temperature": 0}
+            ),
+            "pricing": (
+                {"input_per_million": "1", "output_per_million": "2"}
+                if complete
+                else {}
+            ),
+        }
+        model = self.client.post(
+            "/api/v1/models",
+            json=payload,
+            headers={**headers, "X-Model-API-Key": "encrypted-test-key"},
+        )
+        self.assertEqual(model.status_code, 201, model.text)
+        return model.json()
+
+    _SPLIT_CASE_ID = "incident_134:0:f85431d5ee76a2f65908ea5dc308418ff5328582d4ee45c0b73b80eaa0dd5ec7"
+
+    def test_secrl_split_evaluator_model_freezes_separate_profile(self):
+        self.login()
+        headers = {"X-CSRF-Token": self.csrf_token}
+        agent_id = self._register_secrl_baseline_agent(headers)
+        agent_model = self._create_model_revision(headers, "agent model")
+        evaluator_model = self._create_model_revision(headers, "evaluator model")
+        created = self.client.post(
+            "/api/v1/tasks",
+            json={
+                "name": "split evaluator",
+                "benchmark_id": "secrl",
+                "agent_revision_id": agent_id,
+                "model_config_revision_id": agent_model["id"],
+                "evaluator_model_config_revision_id": evaluator_model["id"],
+                "case_ids": [self._SPLIT_CASE_ID],
+            },
+            headers=headers,
+        )
+        self.assertEqual(created.status_code, 201, created.text)
+        with self.session_factory() as session:
+            task = session.get(EvaluationTaskORM, created.json()["id"])
+            run = session.get(RunORM, created.json()["run_id"])
+            task_spec = json.loads(task.task_spec_json)
+            run_spec = json.loads(run.run_spec_json)
+        self.assertEqual(task_spec["model_config_revision_id"], agent_model["id"])
+        self.assertEqual(
+            task_spec["evaluator_model_config_revision_id"], evaluator_model["id"]
+        )
+        self.assertEqual(
+            task_spec["evaluator_model_config_sha256"], evaluator_model["sha256"]
+        )
+        self.assertEqual(
+            task_spec["evaluator_profile"]["model_revision"],
+            evaluator_model["sha256"],
+        )
+        self.assertEqual(
+            run_spec["task_spec"]["evaluator_model_config_sha256"],
+            evaluator_model["sha256"],
+        )
+
+    def test_secrl_split_evaluator_same_config_normalizes_to_legacy_spec(self):
+        self.login()
+        headers = {"X-CSRF-Token": self.csrf_token}
+        agent_id = self._register_secrl_baseline_agent(headers)
+        agent_model = self._create_model_revision(headers, "shared model")
+        created = self.client.post(
+            "/api/v1/tasks",
+            json={
+                "name": "same-config split",
+                "benchmark_id": "secrl",
+                "agent_revision_id": agent_id,
+                "model_config_revision_id": agent_model["id"],
+                "evaluator_model_config_revision_id": agent_model["id"],
+                "case_ids": [self._SPLIT_CASE_ID],
+            },
+            headers=headers,
+        )
+        self.assertEqual(created.status_code, 201, created.text)
+        with self.session_factory() as session:
+            task = session.get(EvaluationTaskORM, created.json()["id"])
+            task_spec = json.loads(task.task_spec_json)
+        self.assertNotIn("evaluator_model_config_revision_id", task_spec)
+        self.assertNotIn("evaluator_model_config_sha256", task_spec)
+        self.assertEqual(
+            task_spec["evaluator_profile"]["model_revision"], agent_model["sha256"]
+        )
+
+    def test_secrl_split_evaluator_unknown_revision_rejected(self):
+        self.login()
+        headers = {"X-CSRF-Token": self.csrf_token}
+        agent_id = self._register_secrl_baseline_agent(headers)
+        agent_model = self._create_model_revision(headers, "agent model")
+        created = self.client.post(
+            "/api/v1/tasks",
+            json={
+                "name": "bad evaluator ref",
+                "benchmark_id": "secrl",
+                "agent_revision_id": agent_id,
+                "model_config_revision_id": agent_model["id"],
+                "evaluator_model_config_revision_id": "00000000-0000-0000-0000-000000000000",
+                "case_ids": [self._SPLIT_CASE_ID],
+            },
+            headers=headers,
+        )
+        self.assertEqual(created.status_code, 422, created.text)
+        self.assertEqual(created.json()["error"]["code"], "INVALID_TASK_SPEC")
+
+    def test_secrl_split_evaluator_requires_output_limit_and_pricing(self):
+        self.login()
+        headers = {"X-CSRF-Token": self.csrf_token}
+        agent_id = self._register_secrl_baseline_agent(headers)
+        agent_model = self._create_model_revision(headers, "agent model")
+        incomplete = self._create_model_revision(headers, "incomplete evaluator", complete=False)
+        created = self.client.post(
+            "/api/v1/tasks",
+            json={
+                "name": "incomplete evaluator",
+                "benchmark_id": "secrl",
+                "agent_revision_id": agent_id,
+                "model_config_revision_id": agent_model["id"],
+                "evaluator_model_config_revision_id": incomplete["id"],
+                "case_ids": [self._SPLIT_CASE_ID],
+            },
+            headers=headers,
+        )
+        self.assertEqual(created.status_code, 422, created.text)
+        self.assertEqual(created.json()["error"]["code"], "INVALID_TASK_SPEC")
+
     def test_secrl_builtin_agent_and_task_are_persisted_with_frozen_limits(self):
         self.login()
         headers = {"X-CSRF-Token": self.csrf_token}

@@ -189,6 +189,48 @@ def create_task(
             "INVALID_TASK_SPEC",
             "SecRL tasks require a frozen evaluator model config",
         )
+    evaluator_model_id, evaluator_model_sha256 = None, None
+    if payload.evaluator_model_config_revision_id is not None:
+        if payload.benchmark_id != "secrl":
+            raise ApiError(
+                422,
+                "INVALID_TASK_SPEC",
+                "Split evaluator model config is only supported for SecRL tasks",
+            )
+        evaluator_model_id, evaluator_model_sha256 = _resolve_model_revision(
+            context, payload.evaluator_model_config_revision_id
+        )
+        if evaluator_model_id == model_id:
+            evaluator_model_id, evaluator_model_sha256 = None, None
+        else:
+            with context.session_factory() as session:
+                evaluator_model = session.get(
+                    ModelConfigRevisionORM, evaluator_model_id
+                )
+                evaluator_parameters = (
+                    json.loads(evaluator_model.parameters_json)
+                    if evaluator_model is not None
+                    else {}
+                )
+                evaluator_pricing = (
+                    json.loads(evaluator_model.pricing_json)
+                    if evaluator_model is not None
+                    else {}
+                )
+            evaluator_output_limit = evaluator_parameters.get(
+                "max_output_tokens", evaluator_parameters.get("max_tokens")
+            )
+            if (
+                not isinstance(evaluator_output_limit, int)
+                or evaluator_output_limit < 1
+                or evaluator_pricing.get("input_per_million") is None
+                or evaluator_pricing.get("output_per_million") is None
+            ):
+                raise ApiError(
+                    422,
+                    "INVALID_TASK_SPEC",
+                    "SecRL split evaluator config requires output limits and frozen pricing",
+                )
     if revision.manifest.agent_id in BUILTIN_AGENT_IDS:
         if model_id is None:
             raise ApiError(
@@ -230,6 +272,8 @@ def create_task(
             budget=budget,
             model_config_revision_id=model_id,
             model_config_sha256=model_sha256,
+            evaluator_model_config_revision_id=evaluator_model_id,
+            evaluator_model_config_sha256=evaluator_model_sha256,
             run_limits={
                 "max_steps": payload.max_steps,
                 "max_str_len": payload.max_str_len,

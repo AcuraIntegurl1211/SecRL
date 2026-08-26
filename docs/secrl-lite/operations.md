@@ -19,6 +19,13 @@ For SecRL, scope can be one or more Cases, one or more complete Incidents, or
 the full 589-case Benchmark. The API resolves and freezes the actual Case ID
 list, Dataset revision, Dataset SHA-256 and RunSpec before execution.
 
+SecRL tasks may optionally score with a separate frozen evaluator model
+config: pass `evaluator_model_config_revision_id` at task creation (or pick
+"Evaluator model" in the UI). The evaluator config must have a saved
+credential, an output token limit and frozen pricing; it is bound into the
+frozen evaluator profile by its own SHA-256. Omitting the field keeps the
+historical behavior where the agent model config serves both roles.
+
 OpenAI-compatible provider errors use stable codes. Connection failures and
 HTTP 429 responses may be retried because no provider usage is known. Malformed
 success JSON, empty choices/content, invalid usage, timeouts after dispatch,

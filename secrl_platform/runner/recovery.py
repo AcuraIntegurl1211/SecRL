@@ -93,12 +93,18 @@ class RunnerRepository:
         budget: dict[str, Any] | None = None,
         model_config_revision_id: str | None = None,
         model_config_sha256: str | None = None,
+        evaluator_model_config_revision_id: str | None = None,
+        evaluator_model_config_sha256: str | None = None,
         run_limits: dict[str, int] | None = None,
         agent_parameters: dict[str, Any] | None = None,
         selection: dict[str, Any] | None = None,
     ) -> RunHandle:
         if case_ids is not None and len(case_ids) != len(set(case_ids)):
             raise ValueError("runner task scope contains duplicate cases")
+        if (evaluator_model_config_revision_id is None) != (
+            evaluator_model_config_sha256 is None
+        ):
+            raise ValueError("evaluator model config id and hash are required together")
         scope = Scope(case_ids=case_ids) if case_ids is not None else Scope.all()
         cases = adapter.enumerate_cases(adapter.dataset_ref(), scope)
         if not cases:
@@ -114,6 +120,15 @@ class RunnerRepository:
         if any(not isinstance(value, int) or value < 1 for value in frozen_limits.values()):
             raise ValueError("run limits must be positive integers")
         manifest = adapter.manifest()
+        if evaluator_model_config_revision_id is not None:
+            if evaluator_model_config_revision_id == model_config_revision_id:
+                raise ValueError(
+                    "split evaluator config must differ from the agent model config"
+                )
+            if manifest.benchmark_id != "secrl":
+                raise ValueError(
+                    "split evaluator config is only supported for SecRL tasks"
+                )
         with self._session_factory.begin() as session:
             benchmark_sha256 = _sha256(
                 {"manifest": manifest.model_dump(mode="json"), "kind": "benchmark"}
@@ -231,10 +246,20 @@ class RunnerRepository:
                     raise ValueError("model config hash is required")
                 task_spec["model_config_revision_id"] = model_config_revision_id
                 task_spec["model_config_sha256"] = model_config_sha256
+            if evaluator_model_config_revision_id is not None:
+                task_spec["evaluator_model_config_revision_id"] = (
+                    evaluator_model_config_revision_id
+                )
+                task_spec["evaluator_model_config_sha256"] = (
+                    evaluator_model_config_sha256
+                )
+            evaluator_binding_sha256 = (
+                evaluator_model_config_sha256 or model_config_sha256
+            )
             if manifest.benchmark_id == "secrl":
                 task_spec["evaluator_profile"] = official_secrl_profile(
                     formal=True,
-                    model_revision=model_config_sha256 or "static-evaluator-v1",
+                    model_revision=evaluator_binding_sha256 or "static-evaluator-v1",
                 ).model_dump(mode="json")
             task = EvaluationTaskORM(
                 name=name,
