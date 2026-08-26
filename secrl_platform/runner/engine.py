@@ -5,13 +5,18 @@ import hashlib
 import json
 import logging
 import os
+import secrets
+import time
 from collections.abc import Callable
 from decimal import Decimal
 from typing import Any
 
 from secrl_platform.agents.capabilities import (
     CapabilityBudgetError,
+    CapabilityClaims,
+    CapabilityScopeError,
     CapabilitySigner,
+    ExpiredCapability,
 )
 from secrl_platform.agents.protocol import AgentRuntime, EpisodeContext, UsageSnapshot
 from secrl_platform.agents.service import AgentServiceError
@@ -58,6 +63,7 @@ class RunnerEngine:
         runtime_factory: Callable[[], AgentRuntime],
         after_artifact_write: Callable[[str, ArtifactRef], None] | None = None,
         model_budget_guard: "CapabilityBudgetGuard | None" = None,
+        capability_rotator: "CapabilityTokenRotator | None" = None,
     ) -> None:
         self._repository = repository
         self._artifact_store = artifact_store
@@ -65,6 +71,7 @@ class RunnerEngine:
         self._runtime_factory = runtime_factory
         self._after_artifact_write = after_artifact_write
         self._model_budget_guard = model_budget_guard
+        self._capability_rotator = capability_rotator
 
     async def run(self, task_id: str, run_id: str) -> str:
         status = self._repository.prepare_for_run(task_id, run_id)
@@ -99,6 +106,8 @@ class RunnerEngine:
             stored_case = cases[index]
             attempt = self._repository.start_attempt(run_id, stored_case.record_id)
             try:
+                if self._capability_rotator is not None:
+                    self._capability_rotator.refresh_if_needed()
                 runtime = self._runtime_factory()
                 model_access = getattr(runtime, "model_access", None)
                 if model_access not in {"none", "platform_gateway"}:
@@ -283,6 +292,11 @@ class RunnerEngine:
             await runtime.reset(context)
             runtime_started = True
             for sequence in range(1, context.max_steps + 1):
+                if self._capability_rotator is not None:
+                    # A single case can outlive the token lifetime on its own;
+                    # re-check between steps, while the previous token is still
+                    # valid enough to refresh.
+                    self._capability_rotator.refresh_if_needed()
                 if budget_guard is not None and budget_guard.exhausted():
                     budget_exhausted = True
                     result = EvaluationResult(
@@ -478,6 +492,16 @@ class CapabilityBudgetGuard:
                 "model budget ledger is behind the persisted run anchor"
             )
 
+    def apply_capability_token(self, token: str) -> None:
+        """Rebind the guard to a refreshed token with identical claims."""
+        self._claims = self._signer.verify(
+            token,
+            expected_run=self._run_id,
+            expected_agent=self._agent_revision_id,
+        )
+        self._token = token
+        self._binding = hashlib.sha256(token.encode("utf-8")).hexdigest()
+
     def exhausted(self) -> bool:
         snapshot = self._snapshot()
         return (
@@ -513,3 +537,117 @@ class CapabilityBudgetGuard:
             expected_run=self._run_id,
             expected_agent=self._agent_revision_id,
         )
+
+
+class _CapabilityTokenSlot:
+    """Bookkeeping for one long-lived capability token and its holders."""
+
+    __slots__ = ("signer", "token", "claims", "lease_is_active", "targets")
+
+    def __init__(
+        self,
+        *,
+        signer: CapabilitySigner,
+        token: str,
+        claims: CapabilityClaims,
+        lease_is_active: Callable[[str, str], bool] | None,
+    ) -> None:
+        self.signer = signer
+        self.token = token
+        self.claims = claims
+        self.lease_is_active = lease_is_active
+        self.targets: list[Callable[[str], None]] = []
+
+
+class CapabilityTokenRotator:
+    """Refreshes expiring capability tokens and propagates them to holders.
+
+    Dispatch issues each capability once with a 300 second lifetime, but a
+    multi-case evaluation routinely outlives it. The engine calls
+    :meth:`refresh_if_needed` before every case attempt and between agent
+    steps; tokens within the refresh threshold are re-signed via
+    ``CapabilitySigner.refresh`` under an active run lease. When the previous
+    token already expired, the tracked claims are re-issued under the same
+    lease gate so a boundary landing past expiry cannot strand the run.
+    """
+
+    def __init__(
+        self,
+        *,
+        now: Callable[[], int | float] = time.time,
+        threshold_seconds: int = 60,
+    ) -> None:
+        if threshold_seconds <= 0:
+            raise ValueError("capability refresh threshold must be positive")
+        self._now = now
+        self._threshold_seconds = threshold_seconds
+        self._slots: dict[str, _CapabilityTokenSlot] = {}
+
+    def register(
+        self,
+        slot: str,
+        *,
+        signer: CapabilitySigner,
+        token: str,
+        lease_is_active: Callable[[str, str], bool] | None,
+    ) -> None:
+        if slot in self._slots:
+            raise ValueError(f"capability slot was already registered: {slot}")
+        self._slots[slot] = _CapabilityTokenSlot(
+            signer=signer,
+            token=token,
+            claims=signer.inspect(token),
+            lease_is_active=lease_is_active,
+        )
+
+    def add_target(self, slot: str, apply_token: Callable[[str], None]) -> None:
+        self._require_slot(slot).targets.append(apply_token)
+
+    def current_token(self, slot: str) -> str:
+        return self._require_slot(slot).token
+
+    def refresh_if_needed(self) -> None:
+        now = int(self._now())
+        for name in self._slots:
+            self._refresh_slot(name, now)
+
+    def _refresh_slot(self, name: str, now: int) -> None:
+        slot = self._slots[name]
+        if slot.claims.expires_at - now > self._threshold_seconds:
+            return
+        try:
+            refreshed = slot.signer.refresh(slot.token)
+        except ExpiredCapability:
+            refreshed = self._reissue_expired(slot)
+        slot.claims = slot.signer.verify(refreshed)
+        slot.token = refreshed
+        for apply_token in slot.targets:
+            apply_token(refreshed)
+
+    def _reissue_expired(self, slot: _CapabilityTokenSlot) -> str:
+        # signer.refresh() verifies the old token and therefore refuses an
+        # already-expired one. Re-mint the tracked claims under the same
+        # active-lease gate with the original lifetime preserved.
+        if slot.lease_is_active is None or not slot.lease_is_active(
+            slot.claims.run_id,
+            slot.claims.agent_revision_id,
+        ):
+            raise CapabilityScopeError(
+                "capability refresh requires an active run lease"
+            )
+        issued_at = int(self._now())
+        reissued = slot.claims.model_copy(
+            update={
+                "issued_at": issued_at,
+                "expires_at": issued_at
+                + (slot.claims.expires_at - slot.claims.issued_at),
+                "nonce": secrets.token_urlsafe(18),
+            }
+        )
+        return slot.signer.issue(reissued)
+
+    def _require_slot(self, name: str) -> _CapabilityTokenSlot:
+        try:
+            return self._slots[name]
+        except KeyError:
+            raise ValueError(f"unknown capability slot: {name}") from None

@@ -189,6 +189,10 @@ class EvaluatorGatewayClient:
     def bind_attempt(self, *, run_id: str, case_id: str, attempt_id: str) -> None:
         self._attempt = (run_id, case_id, attempt_id)
 
+    def apply_capability_token(self, capability_token: str) -> None:
+        """Swap in a refreshed capability token issued for the same claims."""
+        self._capability_token = SecretStr(capability_token)
+
     def complete(
         self,
         *,

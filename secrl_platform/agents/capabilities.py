@@ -161,14 +161,7 @@ class CapabilitySigner:
         signature = hmac.new(self._secret, payload, hashlib.sha256).digest()
         return f"{_b64encode(payload)}.{_b64encode(signature)}"
 
-    def verify(
-        self,
-        token: str,
-        *,
-        expected_run: str | None = None,
-        expected_agent: str | None = None,
-        model_role: str | None = None,
-    ) -> CapabilityClaims:
+    def _parse_verified_payload(self, token: str) -> CapabilityClaims:
         try:
             payload_text, signature_text = token.split(".")
             payload = _b64decode(payload_text)
@@ -179,9 +172,19 @@ class CapabilitySigner:
         if not hmac.compare_digest(signature, expected_signature):
             raise InvalidCapability("invalid capability token")
         try:
-            claims = CapabilityClaims.model_validate_json(payload)
+            return CapabilityClaims.model_validate_json(payload)
         except ValueError as exc:
             raise InvalidCapability("invalid capability token") from exc
+
+    def verify(
+        self,
+        token: str,
+        *,
+        expected_run: str | None = None,
+        expected_agent: str | None = None,
+        model_role: str | None = None,
+    ) -> CapabilityClaims:
+        claims = self._parse_verified_payload(token)
         now = int(self._now())
         if claims.expires_at <= now:
             raise ExpiredCapability("capability token expired")
@@ -198,6 +201,14 @@ class CapabilitySigner:
         if model_role is not None and model_role not in claims.allowed_model_roles:
             raise CapabilityScopeError("capability model role is not allowed")
         return claims
+
+    def inspect(self, token: str) -> CapabilityClaims:
+        """Return signature-verified claims without enforcing expiry or scope.
+
+        Read-only view for token holders that must track claims (for example
+        the runner's token rotator) without triggering temporal validation.
+        """
+        return self._parse_verified_payload(token)
 
     def authorize_usage(
         self,

@@ -1206,6 +1206,83 @@ class RunnerEngineTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(status, "FAILED")
             self.assertTrue(failing.released)
 
+    async def test_expired_capability_fails_multi_case_run_with_agent_runtime_error(self):
+        """Pins the v0.1.2 production symptom: a run that outlives the initial
+        300s capability token dies on the next case with AGENT_RUNTIME_ERROR."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            adapter = ProtocolSmokeAdapter.load_default()
+            repo = RunnerRepository(
+                create_engine_and_session(root / "platform.sqlite3", create=True)
+            )
+            handle = repo.create_protocol_smoke_run(
+                name="capability-expiry",
+                adapter=adapter,
+                agent_revision=DeterministicSmokeAgent.revision(),
+                case_ids=("smoke-001", "smoke-002"),
+                budget={"max_tokens": 1_000_000, "max_cost": "10"},
+            )
+            clock = [0]
+            signer = CapabilitySigner(
+                b"x" * 32,
+                now=lambda: clock[0],
+                budget_store=InMemoryCapabilityBudgetStore(),
+            )
+            token = signer.issue(
+                CapabilityClaims(
+                    run_id=handle.run_id,
+                    agent_revision_id=DeterministicSmokeAgent.revision().id,
+                    allowed_model_roles=("agent",),
+                    max_tokens=1_000_000,
+                    max_cost=Decimal("10"),
+                    issued_at=0,
+                    expires_at=300,
+                    nonce="expiring-token",
+                )
+            )
+
+            class Provider:
+                calls = 0
+
+                async def complete(self, _request):
+                    self.calls += 1
+                    return ModelResponse(text="ok", usage=Usage(prompt=10, completion=1))
+
+            provider = Provider()
+            gateway = ModelGateway(
+                provider=provider,
+                pricing=Pricing(input_per_million=0, output_per_million=0),
+                capability_signer=signer,
+            )
+            guard = CapabilityBudgetGuard(
+                signer=signer,
+                token=token,
+                run_id=handle.run_id,
+                agent_revision_id=DeterministicSmokeAgent.revision().id,
+            )
+
+            def slow_first_case(_case_id, _artifact):
+                clock[0] = 310
+
+            status = await RunnerEngine(
+                repository=repo,
+                artifact_store=LocalArtifactStore(root / "artifacts"),
+                adapter=adapter,
+                runtime_factory=lambda: GatewaySmokeAgent(
+                    gateway, token, handle.run_id
+                ),
+                model_budget_guard=guard,
+                after_artifact_write=slow_first_case,
+            ).run(handle.task_id, handle.run_id)
+
+            self.assertEqual(status, "FAILED")
+            # Case 1 completed its three gateway calls; case 2 never reached one.
+            self.assertEqual(provider.calls, 3)
+            self.assertEqual(
+                repo.attempt_errors(handle.task_id),
+                ({"code": "AGENT_RUNTIME_ERROR"},),
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
