@@ -395,6 +395,17 @@
             "title": "Case Ids",
             "type": "array"
           },
+          "evaluator_model_config_revision_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Evaluator Model Config Revision Id"
+          },
           "incident_ids": {
             "items": {
               "type": "string"
@@ -435,6 +446,12 @@
             ],
             "title": "Model Config Revision Id"
           },
+          "name": {
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          },
           "scope_mode": {
             "anyOf": [
               {
@@ -450,12 +467,6 @@
               }
             ],
             "title": "Scope Mode"
-          },
-          "name": {
-            "maxLength": 256,
-            "minLength": 1,
-            "title": "Name",
-            "type": "string"
           }
         },
         "required": [
@@ -1126,6 +1137,23 @@
                 }
               ],
               "title": "Model Config Revision Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "evaluator_model_config_revision_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 128,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Evaluator Model Config Revision Id"
             }
           },
           {

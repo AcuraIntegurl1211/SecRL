@@ -23,6 +23,7 @@ class TaskCreateRequest(ApiModel):
     benchmark_id: str
     agent_revision_id: str
     model_config_revision_id: str | None = None
+    evaluator_model_config_revision_id: str | None = None
     scope_mode: ScopeMode | None = None
     case_ids: tuple[str, ...] = Field(default_factory=tuple, max_length=589)
     incident_ids: tuple[str, ...] = Field(default_factory=tuple, max_length=8)

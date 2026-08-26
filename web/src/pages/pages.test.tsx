@@ -228,6 +228,43 @@ describe("core operational pages", () => {
     expect(preflightRequest).toContain("scope_mode=INCIDENTS");
   });
 
+  it("splits the evaluator onto a separate frozen model config for SecRL", async () => {
+    let taskBody: Record<string, unknown> | null = null;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (path.endsWith("/agents")) return new Response(JSON.stringify([{ id: "agent-db-1", name: "SecRL baseline", kind: "BUILT_IN", sha256: "a".repeat(64), manifest: { agent_id: "secrl-baseline-v1", parameter_schema: { properties: {} } } }]), { status: 200 });
+      if (path.endsWith("/models")) return new Response(JSON.stringify([{ id: "model-flash", name: "DeepSeek flash", model: "deepseek-v4-flash", credential_configured: true, pricing_configured: true, sha256: "b".repeat(64) }, { id: "model-pro", name: "DeepSeek pro", model: "deepseek-v4-pro", credential_configured: true, pricing_configured: true, sha256: "c".repeat(64) }]), { status: 200 });
+      if (path.endsWith("/benchmarks")) return new Response(JSON.stringify([{ manifest: { benchmark_id: "secrl", name: "SecRL" }, dataset: { case_count: 589, incidents: { incident_5: 98 } } }]), { status: 200 });
+      if (path.includes("/preflight")) return new Response(JSON.stringify({ ready: true, benchmark_id: "secrl", scope: { mode: "CASES", case_count: 1, incident_count: 1 }, checks: [{ name: "database", status: "ready", message: "ok" }] }), { status: 200 });
+      if (path.endsWith("/tasks") && init?.method === "POST") {
+        taskBody = JSON.parse(String(init.body));
+        return new Response(JSON.stringify({ run_id: "split-run-created" }), { status: 201 });
+      }
+      throw new Error(`unexpected request ${path}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+    renderPage(<NewEvaluationPage />);
+    expect(await screen.findByLabelText("Benchmark revision")).toHaveValue("secrl");
+    await user.type(screen.getByLabelText("Case IDs"), "incident_134:0:f85431d5ee76a2f65908ea5dc308418ff5328582d4ee45c0b73b80eaa0dd5ec7");
+    await user.click(screen.getByRole("button", { name: /Continue/ }));
+    await user.selectOptions(screen.getByLabelText("Model revision (optional)"), "model-flash");
+    await user.selectOptions(screen.getByLabelText("Evaluator model (optional)"), "model-pro");
+    await user.click(screen.getByRole("button", { name: /Continue/ }));
+    await user.click(screen.getByRole("button", { name: /Continue/ }));
+    await user.click(screen.getByRole("button", { name: /Queue evaluation/ }));
+    expect(taskBody).toMatchObject({
+      model_config_revision_id: "model-flash",
+      evaluator_model_config_revision_id: "model-pro",
+    });
+    const preflightRequest = fetchMock.mock.calls
+      .map(([input]) => String(input))
+      .filter((path) => path.includes("/preflight"))
+      .at(-1);
+    expect(preflightRequest).toContain("model_config_revision_id=model-flash");
+    expect(preflightRequest).toContain("evaluator_model_config_revision_id=model-pro");
+  });
+
   it("shows unavailable Incident profiles and the safe Compose start command", async () => {
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
       const path = String(input);

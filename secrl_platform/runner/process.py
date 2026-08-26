@@ -321,12 +321,13 @@ def _resolve_model_provider(
     task_spec: dict,
     model_id: str,
     resolver,
+    sha_key: str = "model_config_sha256",
 ) -> tuple[DeferredSecretProvider, str, dict, dict]:
     model = session.get(ModelConfigRevisionORM, model_id)
     if (
         model is None
         or model.secret_ref_id is None
-        or task_spec.get("model_config_sha256") != model.sha256
+        or task_spec.get(sha_key) != model.sha256
     ):
         raise RunnerConfigurationError("task model config is invalid")
     secret = session.get(SecretRefORM, model.secret_ref_id)
@@ -422,6 +423,21 @@ def _resolve_adapter(
                 model_id=task.model_config_revision_id,
                 resolver=model_provider_resolver,
             )
+        evaluator_bundle = None
+        evaluator_model_id = (
+            task_spec.get("evaluator_model_config_revision_id")
+            if isinstance(task_spec, dict)
+            else None
+        )
+        if isinstance(evaluator_model_id, str) and evaluator_model_id:
+            evaluator_bundle = _resolve_model_provider(
+                settings=settings,
+                session=session,
+                task_spec=task_spec,
+                model_id=evaluator_model_id,
+                resolver=model_provider_resolver,
+                sha_key="evaluator_model_config_sha256",
+            )
     if hashlib.sha256(run.run_spec_json.encode("utf-8")).hexdigest() != run.run_spec_sha256:
         raise RunnerConfigurationError("task RunSpec hash changed")
     benchmark_id = task_spec.get("benchmark_id")
@@ -453,14 +469,19 @@ def _resolve_adapter(
         raise RunnerConfigurationError("SecRL evaluator profile is invalid") from exc
     expected_profile = official_secrl_profile(
         formal=True,
-        model_revision=task_spec.get("model_config_sha256", ""),
+        model_revision=(
+            task_spec.get("evaluator_model_config_sha256")
+            or task_spec.get("model_config_sha256", "")
+        ),
     )
     if frozen_profile != expected_profile:
         raise RunnerConfigurationError("SecRL evaluator profile is not approved")
     if secrl_evaluator_resolver is not None:
         evaluator = secrl_evaluator_resolver(frozen_profile)
     else:
-        provider, model_name, model_parameters, pricing = model_bundle
+        provider, model_name, model_parameters, pricing = (
+            evaluator_bundle if evaluator_bundle is not None else model_bundle
+        )
         signer = capability_signer(settings)
         token = _issue_capability(
             signer,

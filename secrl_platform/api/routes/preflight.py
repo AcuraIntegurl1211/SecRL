@@ -32,6 +32,7 @@ router = APIRouter(tags=["preflight"])
 def preflight(
     benchmark_id: str = Query("secrl", min_length=1, max_length=64),
     model_config_revision_id: str | None = Query(None, max_length=128),
+    evaluator_model_config_revision_id: str | None = Query(None, max_length=128),
     agent_revision_id: str | None = Query(None, max_length=128),
     scope_mode: ScopeMode | None = Query(None),
     case_ids: tuple[str, ...] = Query(default=()),
@@ -189,6 +190,52 @@ def preflight(
             )
             model_check["secret_status"] = "missing"
             checks.append(model_check)
+
+        if evaluator_model_config_revision_id:
+            if evaluator_model_config_revision_id == model_config_revision_id:
+                checks.append(
+                    _check(
+                        "evaluator_model_secret",
+                        "not_applicable",
+                        "Evaluator uses the same frozen model config as the agent.",
+                    )
+                )
+            else:
+                evaluator_model = session.get(
+                    ModelConfigRevisionORM, evaluator_model_config_revision_id
+                )
+                evaluator_secret = (
+                    session.get(SecretRefORM, evaluator_model.secret_ref_id)
+                    if evaluator_model and evaluator_model.secret_ref_id
+                    else None
+                )
+                if evaluator_model is None or evaluator_secret is None:
+                    checks.append(
+                        _check(
+                            "evaluator_model_secret",
+                            "missing",
+                            "The selected evaluator model has no configured credential; save an API key before queuing a run.",
+                            code="EVALUATOR_MODEL_CREDENTIAL_MISSING",
+                        )
+                    )
+                    checks[-1]["secret_status"] = "missing"
+                elif evaluator_secret.status == "INVALID":
+                    check = _check(
+                        "evaluator_model_secret",
+                        "missing",
+                        "The selected evaluator credential is marked invalid; save a new API key before queuing a run.",
+                        code="EVALUATOR_CREDENTIAL_INVALID",
+                    )
+                    check["secret_status"] = "invalid"
+                    checks.append(check)
+                else:
+                    check = _check(
+                        "evaluator_model_secret",
+                        "ready",
+                        "Split evaluator credential is configured (value withheld).",
+                    )
+                    check["secret_status"] = "configured"
+                    checks.append(check)
 
         agent_exists = False
         if agent_revision_id == DeterministicSmokeAgent.revision().id:
