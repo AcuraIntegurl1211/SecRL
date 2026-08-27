@@ -278,6 +278,10 @@ class LegacyGatewayClient:
         self._episode = episode
         self._provider_request_ids.clear()
 
+    def apply_capability_token(self, capability_token: str) -> None:
+        """Swap in a refreshed capability token issued for the same claims."""
+        self._capability_token = SecretStr(capability_token)
+
     @property
     def provider_request_ids(self) -> tuple[str, ...]:
         return tuple(self._provider_request_ids)

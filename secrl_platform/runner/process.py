@@ -6,6 +6,7 @@ import json
 import logging
 import secrets
 import time
+from collections.abc import Callable
 from decimal import Decimal
 
 import httpx
@@ -54,7 +55,11 @@ from secrl_platform.models.secrets import (
     SecretStore,
     encrypted_secret_from_json,
 )
-from secrl_platform.runner.engine import CapabilityBudgetGuard, RunnerEngine
+from secrl_platform.runner.engine import (
+    CapabilityBudgetGuard,
+    CapabilityTokenRotator,
+    RunnerEngine,
+)
 from secrl_platform.runner.recovery import RunnerRepository
 from secrl_platform.storage.artifacts import LocalArtifactStore
 from secrl_platform.storage.database import create_engine_and_session
@@ -86,7 +91,11 @@ class RunnerProcess:
         return await self._engine.run(task_id, run_id)
 
 
-def capability_signer(settings: Settings) -> CapabilitySigner:
+def capability_signer(
+    settings: Settings,
+    *,
+    lease_is_active: Callable[[str, str], bool] | None = None,
+) -> CapabilitySigner:
     configured_secret = settings.agent_service_capability_secret
     if configured_secret is None:
         key = hashlib.sha256(
@@ -97,6 +106,7 @@ def capability_signer(settings: Settings) -> CapabilitySigner:
     return CapabilitySigner(
         key,
         budget_store=FileCapabilityBudgetStore(settings.data_dir / "capability-ledger"),
+        lease_is_active=lease_is_active,
     )
 
 
@@ -133,15 +143,18 @@ async def run_pending_once(
     owned_client: httpx.AsyncClient | None = None
     try:
         try:
-            runtime_factory, budget_guard, owned_client = _resolve_runtime(
-                settings=settings,
-                session_factory=sessions,
-                task_id=task_id,
-                run_id=run_id,
-                agent_service_transport=agent_service_transport,
-                agent_service_resolver=agent_service_resolver,
-                model_provider_resolver=model_provider_resolver,
-                builtin_runtime_resolver=builtin_runtime_resolver,
+            runtime_factory, budget_guard, owned_client, capability_rotator = (
+                _resolve_runtime(
+                    settings=settings,
+                    session_factory=sessions,
+                    task_id=task_id,
+                    run_id=run_id,
+                    agent_service_transport=agent_service_transport,
+                    agent_service_resolver=agent_service_resolver,
+                    model_provider_resolver=model_provider_resolver,
+                    builtin_runtime_resolver=builtin_runtime_resolver,
+                    lease_is_active=repository.run_lease_is_active,
+                )
             )
             adapter = _resolve_adapter(
                 settings=settings,
@@ -151,6 +164,8 @@ async def run_pending_once(
                 secrl_query_executor=secrl_query_executor,
                 model_provider_resolver=model_provider_resolver,
                 secrl_evaluator_resolver=secrl_evaluator_resolver,
+                lease_is_active=repository.run_lease_is_active,
+                capability_rotator=capability_rotator,
             )
         except RunnerConfigurationError as error:
             return repository.fail_configuration(
@@ -174,6 +189,7 @@ async def run_pending_once(
             adapter=adapter,
             runtime_factory=runtime_factory,
             model_budget_guard=budget_guard,
+            capability_rotator=capability_rotator,
         )
         return await engine.run(task_id, run_id)
     finally:
@@ -191,6 +207,7 @@ def _resolve_runtime(
     agent_service_resolver,
     model_provider_resolver,
     builtin_runtime_resolver,
+    lease_is_active: Callable[[str, str], bool] | None = None,
 ):
     with session_factory() as session:
         task = session.get(EvaluationTaskORM, task_id)
@@ -227,7 +244,7 @@ def _resolve_runtime(
         if manifest.agent_id == revision.manifest.agent_id:
             if agent.sha256 != revision.manifest_sha256 or manifest != revision.manifest:
                 raise RunnerConfigurationError("built-in agent revision is not allowlisted")
-            return DeterministicSmokeAgent, None, None
+            return DeterministicSmokeAgent, None, None, None
         if manifest.agent_id not in BUILTIN_AGENT_IDS:
             raise RunnerConfigurationError("built-in agent revision is not allowlisted")
         approved = builtin_manifest(manifest.agent_id)
@@ -236,8 +253,15 @@ def _resolve_runtime(
         if model_bundle is None:
             raise RunnerConfigurationError("SecRL built-in agent requires a model config")
         provider, model_name, model_parameters, pricing = model_bundle
-        signer = capability_signer(settings)
+        signer = capability_signer(settings, lease_is_active=lease_is_active)
         token = _issue_capability(signer, run_id, manifest.agent_id, budget)
+        rotator = CapabilityTokenRotator()
+        rotator.register(
+            "agent",
+            signer=signer,
+            token=token,
+            lease_is_active=lease_is_active,
+        )
         gateway = ModelGateway(
             provider=provider,
             pricing=Pricing(
@@ -256,6 +280,7 @@ def _resolve_runtime(
             agent_revision_id=manifest.agent_id,
             max_output_tokens=max_output_tokens,
         )
+        rotator.add_target("agent", model_client.apply_capability_token)
         parameters = dict(agent_parameters)
         frozen_max_steps = limits.get("max_steps", 15)
 
@@ -275,22 +300,32 @@ def _resolve_runtime(
                 max_steps=frozen_max_steps,
             )
 
-        return builtin_factory, CapabilityBudgetGuard(
+        guard = CapabilityBudgetGuard(
             signer=signer,
             token=token,
             run_id=run_id,
             agent_revision_id=manifest.agent_id,
-        ), None
+        )
+        rotator.add_target("agent", guard.apply_capability_token)
+        return builtin_factory, guard, None, rotator
 
     if agent_kind != "SERVICE" or endpoint is None or service_manifest_sha256 is None:
         raise RunnerConfigurationError("Agent Service registration is incomplete")
-    signer = capability_signer(settings)
+    signer = capability_signer(settings, lease_is_active=lease_is_active)
     token = _issue_capability(signer, run_id, manifest.agent_id, budget)
+    rotator = CapabilityTokenRotator()
+    rotator.register(
+        "agent",
+        signer=signer,
+        token=token,
+        lease_is_active=lease_is_active,
+    )
     owned_client = None
     transport = agent_service_transport
     if transport is None:
         owned_client = httpx.AsyncClient(follow_redirects=False, trust_env=False)
         transport = HttpxAgentServiceTransport(owned_client)
+    current_token = {"value": token}
 
     def service_factory():
         return AgentServiceRuntime.from_settings(
@@ -298,7 +333,7 @@ def _resolve_runtime(
                 endpoint=endpoint,
                 expected_manifest_sha256=service_manifest_sha256,
                 agent_revision_id=manifest.agent_id,
-                capability_token=token,
+                capability_token=current_token["value"],
             ),
             transport=transport,
             settings=settings,
@@ -311,7 +346,11 @@ def _resolve_runtime(
         run_id=run_id,
         agent_revision_id=manifest.agent_id,
     )
-    return service_factory, guard, owned_client
+    rotator.add_target(
+        "agent", lambda value: current_token.update(value=value)
+    )
+    rotator.add_target("agent", guard.apply_capability_token)
+    return service_factory, guard, owned_client, rotator
 
 
 def _resolve_model_provider(
@@ -395,6 +434,8 @@ def _resolve_adapter(
     secrl_query_executor,
     model_provider_resolver,
     secrl_evaluator_resolver,
+    lease_is_active: Callable[[str, str], bool] | None = None,
+    capability_rotator: CapabilityTokenRotator | None = None,
 ):
     with session_factory() as session:
         task = session.get(EvaluationTaskORM, task_id)
@@ -482,7 +523,7 @@ def _resolve_adapter(
         provider, model_name, model_parameters, pricing = (
             evaluator_bundle if evaluator_bundle is not None else model_bundle
         )
-        signer = capability_signer(settings)
+        signer = capability_signer(settings, lease_is_active=lease_is_active)
         token = _issue_capability(
             signer,
             run_id,
@@ -501,16 +542,24 @@ def _resolve_adapter(
             ),
             capability_signer=signer,
         )
-        evaluator = SecRLEvaluator(
-            frozen_profile,
-            model_client=EvaluatorGatewayClient(
-                gateway=gateway,
-                model=model_name,
-                capability_token=token,
-                agent_revision_id=agent_manifest.agent_id,
-                max_output_tokens=max_output_tokens,
-            ),
+        evaluator_client = EvaluatorGatewayClient(
+            gateway=gateway,
+            model=model_name,
+            capability_token=token,
+            agent_revision_id=agent_manifest.agent_id,
+            max_output_tokens=max_output_tokens,
         )
+        if capability_rotator is not None:
+            capability_rotator.register(
+                "evaluator",
+                signer=signer,
+                token=token,
+                lease_is_active=lease_is_active,
+            )
+            capability_rotator.add_target(
+                "evaluator", evaluator_client.apply_capability_token
+            )
+        evaluator = SecRLEvaluator(frozen_profile, model_client=evaluator_client)
     return SecRLAdapter(
         query_executor=executor,
         run_spec=frozen_limits,

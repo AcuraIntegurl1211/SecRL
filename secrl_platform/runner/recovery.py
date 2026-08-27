@@ -731,6 +731,31 @@ class RunnerRepository:
         with self._session_factory.begin() as session:
             self._renew_lease(session, run_id)
 
+    def run_lease_is_active(
+        self,
+        run_id: str,
+        agent_revision_id: str | None = None,
+    ) -> bool:
+        """Best-effort probe used to authorize capability token refresh.
+
+        ``agent_revision_id`` exists to match the signer callback contract;
+        the lease only attests runner liveness for the run, while token scope
+        stays pinned to the agent revision by the capability claims.
+        """
+        fence = self._fences.get(run_id)
+        with self._session_factory() as session:
+            lease = session.scalar(
+                select(AppSettingORM).where(AppSettingORM.key == _lease_key(run_id))
+            )
+        if lease is None or fence is None:
+            return False
+        payload = json.loads(lease.value_json)
+        return (
+            payload.get("owner_id") == self._owner_id
+            and int(payload.get("fence", -1)) == fence
+            and float(payload.get("expires_at", 0)) > float(self._now())
+        )
+
     def budget_reached(self, task_id: str, run_id: str) -> bool:
         with self._session_factory() as session:
             task, _run = self._get_task_run(session, task_id, run_id)
