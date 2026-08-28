@@ -864,6 +864,8 @@ class ApiTest(unittest.TestCase):
                 "/api/v1/runs/{id}/attributions",
                 "/api/v1/runs/{id}/artifacts",
                 "/api/v1/runs/{id}/audit",
+                "/api/v1/runs/{id}/progress",
+                "/api/v1/overview",
                 "/api/v1/attributions/{id}/reviews",
                 "/api/v1/artifacts/{id}/metadata",
                 "/api/v1/artifacts/{id}",

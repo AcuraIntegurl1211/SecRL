@@ -105,6 +105,34 @@ describe("core operational pages", () => {
     expect(await screen.findByText("1 Case across 1 Incident · legacy scope inferred")).toBeInTheDocument();
   });
 
+  it("shows live progress metrics while a run is active", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path.endsWith("/runs/run-1")) {
+        return new Response(JSON.stringify({ id: "run-1", task_id: "task-1", status: "RUNNING", checkpoint: 4, run_spec_sha256: "a".repeat(64) }), { status: 200 });
+      }
+      if (path.endsWith("/runs/run-1/progress")) {
+        return new Response(JSON.stringify({
+          run_id: "run-1", task_id: "task-1", task_status: "RUNNING",
+          frozen_case_count: 11, completed: 4, failed: 1, correct: 2,
+          reward_sum: 2, average_reward: 0.5,
+          tokens: { agent: 12000, evaluator: 800, total: 12800 },
+          estimated_cost: "0.1460", budget: { max_tokens: 500000, max_cost: "3", max_cases: null },
+          elapsed_seconds: 301.2, current_case_index: 4,
+        }), { status: 200 });
+      }
+      throw new Error(`unexpected request ${path}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<MemoryRouter initialEntries={["/runs/run-1"]}><Routes><Route path="/runs/:id" element={<RunDetailPage />} /></Routes></MemoryRouter>);
+    expect(await screen.findByText("4/11")).toBeInTheDocument();
+    expect(screen.getByText("Average reward")).toBeInTheDocument();
+    expect(screen.getByText("0.5")).toBeInTheDocument();
+    expect(screen.getByText("12,800")).toBeInTheDocument();
+    expect(screen.getByText("$0.1460")).toBeInTheDocument();
+    expect(screen.getByText("5:01")).toBeInTheDocument();
+  });
+
   it("renders a run detail route without loading the whole trajectory", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ id: "run-1", task_id: "task-1", status: "QUEUED", checkpoint: 0, run_spec_sha256: "a".repeat(64) }), { status: 200 })));
     render(<MemoryRouter initialEntries={["/runs/run-1"]}><Routes><Route path="/runs/:id" element={<RunDetailPage />} /></Routes></MemoryRouter>);
@@ -342,6 +370,38 @@ describe("core operational pages", () => {
     expect(screen.queryByText("healthy")).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Check Reference" }));
     expect(await screen.findByText("valid")).toBeInTheDocument();
+  });
+
+  it("shows the live average reward from the overview endpoint", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path.endsWith("/health")) return new Response(JSON.stringify({ status: "ok" }), { status: 200 });
+      if (path.endsWith("/overview")) return new Response(JSON.stringify({ active_tasks: 0, completed_runs_24h: 3, average_reward_24h: 0.31 }), { status: 200 });
+      if (path.endsWith("/tasks")) return new Response(JSON.stringify([]), { status: 200 });
+      throw new Error(`unexpected request ${path}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    renderPage(<DashboardPage />);
+    expect(await screen.findByText("0.31")).toBeInTheDocument();
+    expect(screen.getByText("Average reward")).toBeInTheDocument();
+  });
+
+  it("inlines live progress for active runs in the queue list", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path.endsWith("/tasks")) {
+        return new Response(JSON.stringify([
+          { id: "task-active", name: "Active run", status: "RUNNING", task_spec_sha256: "a".repeat(64), run_id: "run-active", scope: { mode: "INCIDENTS", case_count: 11, incident_count: 1 } },
+        ]), { status: 200 });
+      }
+      if (path.endsWith("/runs/run-active/progress")) {
+        return new Response(JSON.stringify({ completed: 7, frozen_case_count: 11, average_reward: 0.286, estimated_cost: "0.1421" }), { status: 200 });
+      }
+      throw new Error(`unexpected request ${path}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    renderPage(<RunsPage />);
+    expect(await screen.findByText(/7\/11 · reward 0.286 · \$0.1421/)).toBeInTheDocument();
   });
 
   it("renders comparable result metrics instead of a raw status payload", async () => {

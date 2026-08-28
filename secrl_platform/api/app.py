@@ -20,7 +20,15 @@ from secrl_platform import __version__ as PLATFORM_VERSION
 from secrl_platform.api.dependencies import ApiContext
 from secrl_platform.agents.service import AgentServiceTransport
 from secrl_platform.api.errors import ApiError, error_payload
-from secrl_platform.api.routes import artifacts, auth, preflight, resources, runs, tasks
+from secrl_platform.api.routes import (
+    artifacts,
+    auth,
+    overview,
+    preflight,
+    resources,
+    runs,
+    tasks,
+)
 from secrl_platform.auth.sessions import SessionStore
 from secrl_platform.benchmarks.secrl import SecRLMySQLQueryExecutor
 from secrl_platform.config import (
@@ -152,6 +160,7 @@ def create_app(
     app.include_router(preflight.router, prefix="/api/v1")
     app.include_router(tasks.router, prefix="/api/v1")
     app.include_router(runs.router, prefix="/api/v1")
+    app.include_router(overview.router, prefix="/api/v1")
     app.include_router(artifacts.router, prefix="/api/v1")
 
     def custom_openapi() -> dict:

@@ -63,6 +63,87 @@ def get_run(
         return _run_payload(run, task, failed_attempt)
 
 
+@router.get("/runs/{id}/progress", tags=["runs"])
+def get_run_progress(
+    id: str,
+    _user: LocalUserORM = Depends(require_user),
+    context: ApiContext = Depends(get_context),
+) -> dict:
+    with context.session_factory() as session:
+        run = session.get(RunORM, id)
+        if run is None:
+            raise ApiError(404, "RUN_NOT_FOUND", "Run was not found")
+        task = session.get(EvaluationTaskORM, run.task_id)
+        if task is None:
+            raise ApiError(404, "RUN_NOT_FOUND", "Run was not found")
+        attempts = session.scalars(
+            select(CaseAttemptORM)
+            .where(CaseAttemptORM.run_id == id)
+            .order_by(CaseAttemptORM.created_at, CaseAttemptORM.id)
+        ).all()
+        spec = json.loads(task.task_spec_json)
+        budget = json.loads(task.budget_json)
+        completed = 0
+        failed = 0
+        correct = 0
+        rewards: list[float] = []
+        agent_tokens = 0
+        evaluator_tokens = 0
+        cost = Decimal("0")
+        for attempt in attempts:
+            if attempt.status == "SUCCEEDED":
+                completed += 1
+            elif attempt.status == "FAILED":
+                failed += 1
+            if attempt.status != "SUCCEEDED":
+                continue
+            metrics = json.loads(attempt.metrics_json or "{}")
+            if metrics.get("correct") is True:
+                correct += 1
+            reward = metrics.get("reward")
+            if isinstance(reward, (int, float)):
+                rewards.append(float(reward))
+            agent_tokens += int(metrics.get("prompt_tokens", 0) or 0) + int(
+                metrics.get("completion_tokens", 0) or 0
+            )
+            evaluator_tokens += int(
+                metrics.get("evaluator_prompt_tokens", 0) or 0
+            ) + int(metrics.get("evaluator_completion_tokens", 0) or 0)
+            cost += Decimal(str(metrics.get("estimated_cost", "0") or "0")) + Decimal(
+                str(metrics.get("evaluator_estimated_cost", "0") or "0")
+            )
+        elapsed_seconds = None
+        if task.started_at is not None:
+            from datetime import datetime, timezone
+
+            end = task.finished_at or datetime.now(timezone.utc)
+            elapsed_seconds = max(0.0, (end - task.started_at).total_seconds())
+        return {
+            "run_id": run.id,
+            "task_id": task.id,
+            "task_status": task.status,
+            "frozen_case_count": int(spec.get("case_count", 0) or 0),
+            "completed": completed,
+            "failed": failed,
+            "correct": correct,
+            "reward_sum": sum(rewards) if rewards else None,
+            "average_reward": (sum(rewards) / len(rewards)) if rewards else None,
+            "tokens": {
+                "agent": agent_tokens,
+                "evaluator": evaluator_tokens,
+                "total": agent_tokens + evaluator_tokens,
+            },
+            "estimated_cost": str(cost),
+            "budget": {
+                "max_tokens": budget.get("max_tokens"),
+                "max_cost": budget.get("max_cost"),
+                "max_cases": budget.get("max_cases"),
+            },
+            "elapsed_seconds": elapsed_seconds,
+            "current_case_index": run.next_case_index,
+        }
+
+
 @router.post("/runs/{id}:pause", tags=["runs"])
 def pause_run(
     id: str,
