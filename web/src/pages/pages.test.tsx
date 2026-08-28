@@ -42,6 +42,29 @@ describe("core operational pages", () => {
     expect(await screen.findByRole("heading", { name: "Dashboard ready" })).toBeInTheDocument();
   });
 
+  it("sends an optional per-model request timeout", async () => {
+    let posted: Record<string, unknown> | null = null;
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (path.endsWith("/models") && init?.method === "POST") {
+        posted = JSON.parse(String(init.body));
+        return new Response(JSON.stringify({ id: "model-1", sha256: "a".repeat(64) }), { status: 201 });
+      }
+      return new Response(JSON.stringify([]), { status: 200 });
+    }));
+    const user = userEvent.setup();
+    renderPage(<ModelsPage />);
+    await user.click(await screen.findByRole("button", { name: /Add model/ }));
+    await user.type(screen.getByLabelText("Name"), "timeout model");
+    await user.type(screen.getByLabelText("Model"), "fixture-model");
+    await user.type(screen.getByLabelText("Endpoint"), "https://models.invalid/v1");
+    await user.type(screen.getByLabelText("API key"), "sk-test-key");
+    await user.type(screen.getByLabelText("Request timeout (s)"), "120");
+    await user.click(screen.getByRole("button", { name: /Save encrypted revision/ }));
+    expect(await screen.findByRole("button", { name: /Add model/ })).toBeInTheDocument();
+    expect(posted).toMatchObject({ parameters: expect.objectContaining({ timeout_seconds: 120 }) });
+  });
+
   it.each([
     [ModelsPage, "Models"],
     [AgentsPage, "Agents"],

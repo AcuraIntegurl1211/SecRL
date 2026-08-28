@@ -261,6 +261,19 @@
             ],
             "title": "Temperature"
           },
+          "timeout_seconds": {
+            "anyOf": [
+              {
+                "maximum": 600.0,
+                "minimum": 1.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Timeout Seconds"
+          },
           "top_p": {
             "anyOf": [
               {

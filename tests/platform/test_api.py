@@ -1205,6 +1205,41 @@ class ApiTest(unittest.TestCase):
 
         self.assertEqual(asyncio.run(execute_registered_service_task()), "SUCCEEDED")
 
+    def test_model_revision_stores_configured_request_timeout(self):
+        self.login()
+        headers = {"X-CSRF-Token": self.csrf_token}
+        created = self.client.post(
+            "/api/v1/models",
+            json={
+                "name": "timeout model",
+                "provider": "openai-compatible",
+                "endpoint": "https://models.invalid/v1",
+                "model": "fixture-model",
+                "parameters": {"max_output_tokens": 512, "timeout_seconds": 120},
+                "pricing": {"input_per_million": "1", "output_per_million": "2"},
+            },
+            headers={**headers, "X-Model-API-Key": "encrypted-test-key"},
+        )
+        self.assertEqual(created.status_code, 201, created.text)
+        with self.session_factory() as session:
+            model = session.get(ModelConfigRevisionORM, created.json()["id"])
+            parameters = json.loads(model.parameters_json)
+        self.assertEqual(parameters["timeout_seconds"], 120)
+
+        for invalid in (0, 601):
+            rejected = self.client.post(
+                "/api/v1/models",
+                json={
+                    "name": f"bad timeout {invalid}",
+                    "provider": "openai-compatible",
+                    "endpoint": "https://models.invalid/v1",
+                    "model": "fixture-model",
+                    "parameters": {"max_output_tokens": 512, "timeout_seconds": invalid},
+                },
+                headers={**headers, "X-Model-API-Key": "encrypted-test-key"},
+            )
+            self.assertEqual(rejected.status_code, 422, rejected.text)
+
     def test_model_responses_do_not_echo_parameter_values(self):
         self.login()
         headers = {"X-CSRF-Token": self.csrf_token}

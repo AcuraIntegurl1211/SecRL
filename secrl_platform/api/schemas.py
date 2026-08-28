@@ -58,6 +58,7 @@ class ModelParameters(ApiModel):
     top_p: float | None = None
     max_output_tokens: int | None = Field(default=None, ge=0)
     max_tokens: int | None = Field(default=None, ge=0)
+    timeout_seconds: float | None = Field(default=None, ge=1, le=600)
     seed: int | None = Field(default=None, ge=0)
     stop: str | tuple[str, ...] | None = None
     frequency_penalty: float | None = None

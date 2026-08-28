@@ -264,12 +264,14 @@ class LegacyGatewayClient:
         capability_token: str,
         agent_revision_id: str,
         max_output_tokens: int,
+        timeout_seconds: float | None = None,
     ) -> None:
         self._gateway = gateway
         self._model = model
         self._capability_token = SecretStr(capability_token)
         self._agent_revision_id = agent_revision_id
         self._max_output_tokens = max_output_tokens
+        self._timeout_seconds = float(timeout_seconds) if timeout_seconds is not None else None
         self._episode: EpisodeContext | None = None
         self.total_usage_summary: dict[str, dict[str, int]] = {}
         self._provider_request_ids: list[str] = []
@@ -321,6 +323,7 @@ class LegacyGatewayClient:
             agent_revision_id=self._agent_revision_id,
             capability_token=self._capability_token,
             max_output_tokens=self._max_output_tokens,
+            **({"timeout_seconds": self._timeout_seconds} if self._timeout_seconds is not None else {}),
         )
         response = asyncio.run(self._gateway.complete(request))
         provider_request_id = _safe_provider_request_id(
