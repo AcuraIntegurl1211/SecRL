@@ -34,6 +34,12 @@ may already have occurred. The failure summary exposes only the code, retry
 decision, HTTP status, content type, response shape and request/correlation
 IDs; prompts, answers, credentials and raw responses are excluded.
 
+Each model revision may carry an optional `timeout_seconds` parameter
+(1-600 seconds; default 30) alongside `max_output_tokens` and frozen pricing.
+It bounds every provider call the agent and the evaluator make for runs that
+use that revision; slow, high-context reasoning calls that exceed it fail as
+`TIMEOUT` instead of hanging the attempt.
+
 ## Artifacts and analysis
 
 Artifacts are content-addressed under `/data/artifacts/sha256/...`. The Run

@@ -178,12 +178,14 @@ class EvaluatorGatewayClient:
         capability_token: str,
         agent_revision_id: str,
         max_output_tokens: int,
+        timeout_seconds: float | None = None,
     ) -> None:
         self._gateway = gateway
         self._model = model
         self._capability_token = SecretStr(capability_token)
         self._agent_revision_id = agent_revision_id
         self._max_output_tokens = max_output_tokens
+        self._timeout_seconds = float(timeout_seconds) if timeout_seconds is not None else None
         self._attempt: tuple[str, str, str] | None = None
 
     def bind_attempt(self, *, run_id: str, case_id: str, attempt_id: str) -> None:
@@ -223,6 +225,7 @@ class EvaluatorGatewayClient:
             capability_token=self._capability_token,
             max_output_tokens=self._max_output_tokens,
             max_attempts=1,
+            **({"timeout_seconds": self._timeout_seconds} if self._timeout_seconds is not None else {}),
         )
         response = asyncio.run(self._gateway.complete(request))
         usage = response.usage

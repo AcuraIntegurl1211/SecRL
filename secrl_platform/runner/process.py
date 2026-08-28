@@ -6,7 +6,7 @@ import json
 import logging
 import secrets
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from decimal import Decimal
 
 import httpx
@@ -279,6 +279,7 @@ def _resolve_runtime(
             capability_token=token,
             agent_revision_id=manifest.agent_id,
             max_output_tokens=max_output_tokens,
+            timeout_seconds=_model_timeout_from_parameters(model_parameters),
         )
         rotator.add_target("agent", model_client.apply_capability_token)
         parameters = dict(agent_parameters)
@@ -400,6 +401,20 @@ def _resolve_model_provider(
         ),
     )
     return provider, model.model, parameters, pricing
+
+
+def _model_timeout_from_parameters(parameters: Mapping[str, Any]) -> int | None:
+    value = parameters.get("timeout_seconds")
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise RunnerConfigurationError("model timeout must be a number of seconds")
+    timeout = float(value)
+    if not 1 <= timeout <= 600:
+        raise RunnerConfigurationError(
+            "model timeout must be between 1 and 600 seconds"
+        )
+    return int(round(timeout))
 
 
 def _issue_capability(
@@ -548,6 +563,7 @@ def _resolve_adapter(
             capability_token=token,
             agent_revision_id=agent_manifest.agent_id,
             max_output_tokens=max_output_tokens,
+            timeout_seconds=_model_timeout_from_parameters(model_parameters),
         )
         if capability_rotator is not None:
             capability_rotator.register(
