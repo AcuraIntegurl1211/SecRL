@@ -3,9 +3,11 @@ import { Link, useParams } from "react-router-dom";
 import { apiFetch, ApiClientError } from "../api/client";
 import { EmptyState, ErrorState, LoadingState, PageTitle } from "../components/PageStates";
 import { HealthBadge } from "../components/HealthBadge";
+import { MetricValue } from "../components/MetricValue";
 
 type RunFailure = { code: string; retryable?: boolean; usage_may_have_occurred?: boolean; response_shape?: string };
 type Run = { id: string; task_id: string; status: string; checkpoint: number; run_spec_sha256: string; failure?: RunFailure };
+type RunProgress = { run_id: string; task_id: string; task_status: string; frozen_case_count: number; completed: number; failed: number; correct: number; reward_sum: number | null; average_reward: number | null; tokens: { agent: number; evaluator: number; total: number }; estimated_cost: string; budget: { max_tokens: number | null; max_cost: string | null; max_cases: number | null }; elapsed_seconds: number | null; current_case_index: number };
 type Artifact = { id: string; kind: string; sha256: string; size_bytes: number; download_url: string };
 type CaseAttempt = { case_id: string; attempt_id: string; status: string; metrics: Record<string, unknown>; trajectory_artifact: Artifact | null };
 type TrajectoryStep = { step: number; total_steps: number; artifact_sha256: string; exchange: Record<string, unknown> };
@@ -28,6 +30,7 @@ export function RunDetailPage() {
   const [attributions, setAttributions] = useState<Attribution[] | null>(null);
   const [audit, setAudit] = useState<AuditEvent[] | null>(null);
   const [loadingTab, setLoadingTab] = useState(false);
+  const [progress, setProgress] = useState<RunProgress | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -35,6 +38,19 @@ export function RunDetailPage() {
     void apiFetch<Run>(`/api/v1/runs/${id}`)
       .then(setRun)
       .catch((reason) => setError(message(reason, "Unable to load run")));
+  }, [id]);
+
+  useEffect(() => {
+    if (!id) return undefined;
+    let mounted = true;
+    const poll = () => {
+      void apiFetch<RunProgress>(`/api/v1/runs/${id}/progress`)
+        .then((next) => { if (mounted) setProgress(next); })
+        .catch(() => { if (mounted) setProgress(null); });
+    };
+    poll();
+    const timer = setInterval(poll, 5000);
+    return () => { mounted = false; clearInterval(timer); };
   }, [id]);
 
   async function loadCases(): Promise<CaseAttempt[]> {
@@ -112,6 +128,14 @@ export function RunDetailPage() {
       <button className="button button-quiet" onClick={() => void transition("resume")} disabled={run.status !== 'PAUSED'}>Resume</button>
       <button className="button button-danger" onClick={() => void transition("cancel")} disabled={['SUCCEEDED', 'FAILED', 'CANCELED'].includes(run.status)}>Cancel</button>
     </div>
+    {progress && progress.budget && typeof progress.frozen_case_count === "number" && <div className="metric-grid" aria-label="Live run progress">
+      <MetricValue value={`${progress.completed}/${progress.frozen_case_count}`} label="Cases completed" detail={progress.failed > 0 ? `${progress.failed} failed` : "Updates every 5 s"} />
+      <MetricValue value={progress.correct} label="Correct answers" detail={`${progress.frozen_case_count} frozen in scope`} />
+      <MetricValue value={progress.average_reward ?? "—"} label="Average reward" detail={progress.reward_sum !== null ? `sum ${Number(progress.reward_sum.toFixed(3))}` : "no scored cases yet"} />
+      <MetricValue value={(progress.tokens?.total ?? 0).toLocaleString()} label="Tokens" detail={`agent ${(progress.tokens?.agent ?? 0).toLocaleString()} · evaluator ${(progress.tokens?.evaluator ?? 0).toLocaleString()}`} />
+      <MetricValue value={`$${Number(progress.estimated_cost ?? 0).toFixed(4)}`} label="Estimated cost" detail={progress.budget.max_cost !== null && progress.budget.max_cost !== undefined ? `cap $${progress.budget.max_cost}` : "no cost cap"} />
+      <MetricValue value={typeof progress.elapsed_seconds === "number" ? formatDuration(progress.elapsed_seconds) : "—"} label="Elapsed" detail={`checkpoint ${run.checkpoint}`} />
+    </div>}
     <div className="tabs" role="tablist">{tabs.map((name) => <button key={name} role="tab" aria-selected={tab === name} className={tab === name ? "tab-active" : ""} onClick={() => void selectTab(name)}>{name}</button>)}</div>
     <div className="tab-panel">
       {loadingTab && <LoadingState label={`Loading ${tab.toLowerCase()}`} />}
@@ -128,4 +152,12 @@ export function RunDetailPage() {
 
 function message(reason: unknown, fallback: string) {
   return reason instanceof ApiClientError ? reason.message : fallback;
+}
+
+function formatDuration(seconds: number) {
+  const total = Math.floor(seconds);
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  return h > 0 ? `${h}h ${String(m).padStart(2, "0")}m` : `${m}:${String(s).padStart(2, "0")}`;
 }

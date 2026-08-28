@@ -9,19 +9,22 @@ import { MetricValue } from "../components/MetricValue";
 export function DashboardPage() {
   const [tasks, setTasks] = useState<TaskSummary[] | null>(null);
   const [apiHealth, setApiHealth] = useState<"ok" | "error" | null>(null);
+  const [averageReward, setAverageReward] = useState<number | null | undefined>(undefined);
   const [error, setError] = useState<string | null>(null);
   useEffect(() => {
     let mounted = true;
     let timer: ReturnType<typeof setTimeout> | undefined;
     const load = async () => {
       try {
-        const [next, health] = await Promise.all([
+        const [next, health, overview] = await Promise.all([
           apiFetch<TaskSummary[]>("/api/v1/tasks"),
           apiFetch<{ status: string }>("/api/v1/health"),
+          apiFetch<{ average_reward_24h: number | null }>("/api/v1/overview").catch(() => null),
         ]);
         if (!mounted) return;
         setTasks(next);
         setApiHealth(health.status === "ok" ? "ok" : "error");
+        setAverageReward(overview === null ? undefined : overview.average_reward_24h);
         if (next.some((task) => ["QUEUED", "RUNNING", "PAUSED", "PAUSE_REQUESTED", "INTERRUPTED"].includes(task.status))) {
           timer = setTimeout(() => void load(), 5000);
         }
@@ -40,7 +43,7 @@ export function DashboardPage() {
     <div className="metric-grid">
       <MetricValue value={metric(active.length)} label="Active tasks" detail="Updates while a task is running" />
       <MetricValue value={metric(completed)} label="Completed runs" detail="Last 24 hours" />
-      <MetricValue value="—" label="Average reward" detail="Frozen benchmark revisions" />
+      <MetricValue value={averageReward === undefined ? "…" : averageReward ?? "—"} label="Average reward" detail="Scored cases · completed runs, 24 h" />
       <MetricValue value="—" label="Artifact integrity" detail="SHA-256 verified" />
     </div>
     {error && <ErrorState message={error} />}
