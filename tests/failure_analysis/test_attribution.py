@@ -70,6 +70,45 @@ class AttributionTest(unittest.TestCase):
     def setUpClass(cls):
         cls.taxonomy = load_taxonomy(TAXONOMY_PATH)
 
+    def test_explanation_details_never_submitted_cases(self):
+        features = feature_record(
+            submitted_flag=False,
+            steps=15,
+            max_steps=15,
+            empty_results=9,
+            sql_failure=3,
+            sql_success=4,
+            duplicates=2,
+        )
+        attribution = attribute_record(features, self.taxonomy)
+        self.assertEqual(attribution.primary_cause_candidate, "UNKNOWN")
+        for fragment in (
+            "used all 15 steps without submitting",
+            "9 queries returned empty results",
+            "3 SQL errors vs 4 successful queries",
+            "2 duplicate queries",
+        ):
+            self.assertIn(fragment, attribution.explanation)
+
+    def test_explanation_details_placeholder_submissions(self):
+        features = feature_record(
+            submitted="<answer>",
+            submitted_flag=True,
+            steps=3,
+            max_steps=15,
+        )
+        attribution = attribute_record(features, self.taxonomy)
+        self.assertIn("placeholder", attribution.explanation)
+
+    def test_explanation_present_on_answer_classification(self):
+        features = feature_record(
+            submitted="170.54.121.63",
+            gold_match="exact",
+        )
+        attribution = attribute_record(features, self.taxonomy)
+        self.assertEqual(attribution.primary_cause_candidate, "ANSWER")
+        self.assertIn("primary cause classified as ANSWER", attribution.explanation)
+
     def test_reward_one_is_always_a_correct_control(self):
         features = feature_record(
             reward=1.0,

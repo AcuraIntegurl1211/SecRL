@@ -107,6 +107,7 @@ def build_row(
             attribution.secondary_cause_candidates
         ),
         "confidence": attribution.confidence,
+        "explanation": attribution.explanation,
         "evidence": [item.as_dict() for item in features.evidence],
         "needs_human_review": attribution.needs_human_review,
         "human_review_reasons": list(attribution.human_review_reasons),

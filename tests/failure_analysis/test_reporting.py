@@ -57,6 +57,7 @@ ROW_FIELDS = {
     "agent_completion_tokens",
     "agent_total_tokens",
     "evaluator_tokens",
+    "explanation",
     "primary_cause_candidate",
     "primary_cause_status",
     "secondary_cause_candidates",

@@ -387,6 +387,7 @@ class AttributionORM(TimestampedORM, Base):
     label: Mapped[str] = mapped_column(String(128), index=True)
     confidence: Mapped[float] = mapped_column(Float)
     evidence_json: Mapped[str] = mapped_column(Text)
+    explanation: Mapped[str] = mapped_column(Text, default="")
 
 
 class HumanReviewORM(TimestampedORM, Base):
