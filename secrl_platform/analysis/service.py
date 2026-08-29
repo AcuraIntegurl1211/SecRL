@@ -359,6 +359,7 @@ class AnalysisRunRepository:
                         taxonomy=str(payload.get("taxonomy_version", "taxonomy_v1")),
                         label=str(payload.get("candidate_primary", "UNKNOWN")),
                         confidence=confidence,
+                        explanation=str(payload.get("explanation", "")),
                         evidence_json=canonical_json(payload.get("evidence", [])),
                     )
                 )

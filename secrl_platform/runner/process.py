@@ -191,10 +191,61 @@ async def run_pending_once(
             model_budget_guard=budget_guard,
             capability_rotator=capability_rotator,
         )
-        return await engine.run(task_id, run_id)
+        status = await engine.run(task_id, run_id)
+        if settings.auto_failure_analysis and status == "SUCCEEDED":
+            _auto_run_failure_analysis(
+                run_id=run_id,
+                session_factory=sessions,
+                artifact_store=artifacts,
+                settings=settings,
+            )
+        return status
     finally:
         if owned_client is not None:
             await owned_client.aclose()
+
+
+def _auto_run_failure_analysis(
+    *,
+    run_id: str,
+    session_factory: sessionmaker[Session],
+    artifact_store: LocalArtifactStore,
+    settings: Settings,
+) -> None:
+    """Best-effort automatic failure analysis for a completed SecRL run.
+
+    Never raises: analysis problems are logged and left for a manual retry,
+    and runs that already have a registered analysis are skipped.
+    """
+    from secrl_platform.analysis.service import AnalysisRunRepository, analyze_completed_run
+    from secrl_platform.storage.orm import AnalysisRunORM
+
+    try:
+        with session_factory() as session:
+            existing = (
+                session.query(AnalysisRunORM)
+                .filter(AnalysisRunORM.run_id == run_id)
+                .count()
+            )
+        if existing:
+            return
+        registered = analyze_completed_run(
+            run_id=run_id,
+            session_factory=session_factory,
+            artifact_store=artifact_store,
+        )
+        logger.info(
+            "automatic failure analysis registered run_id=%s analysis_run_id=%s",
+            run_id,
+            registered.analysis_run_id,
+        )
+    except Exception as error:
+        logger.warning(
+            "automatic failure analysis skipped run_id=%s reason=%s detail=%s",
+            run_id,
+            type(error).__name__,
+            str(error)[:200],
+        )
 
 
 def _resolve_runtime(

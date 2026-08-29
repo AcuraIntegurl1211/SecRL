@@ -337,6 +337,7 @@ def list_run_attributions(
                 "taxonomy": attribution.taxonomy,
                 "label": attribution.label,
                 "confidence": attribution.confidence,
+                "explanation": getattr(attribution, "explanation", ""),
                 "evidence": json.loads(attribution.evidence_json),
             }
             for attribution, case_id in rows

@@ -32,6 +32,7 @@ from secrl_platform.storage.orm import (
     AgentRevisionORM,
     AppSettingORM,
     ArtifactORM,
+    AnalysisRunORM,
     AttributionORM,
     AuditEventORM,
     BenchmarkRevisionORM,
@@ -687,7 +688,9 @@ class ApiTest(unittest.TestCase):
         history = self.client.get(
             f"/api/v1/runs/{created.json()['run_id']}/analysis"
         )
-        self.assertEqual(len(history.json()), 1)
+        # automatic failure analysis registered revision 1 on completion;
+        # the explicit :analyze call above appends revision 2.
+        self.assertEqual(len(history.json()), 2)
         restricted = self.client.get(
             f"/api/v1/artifacts/{analyzed.json()['manifest_artifact_id']}"
         )
@@ -2080,7 +2083,7 @@ class ApiTest(unittest.TestCase):
             session_factory = create_engine_and_session(settings.database_path)
             with session_factory() as session:
                 revision = session.scalar(text("SELECT version_num FROM alembic_version"))
-            self.assertEqual(revision, "0004_analysis_review_persistence")
+            self.assertEqual(revision, "0005_attribution_explanation")
 
     def test_human_review_api_is_persistent_append_only_and_audited(self):
         self.login()
@@ -2141,6 +2144,108 @@ class ApiTest(unittest.TestCase):
             self.assertEqual(session.get(AttributionORM, attribution_id).label, "ANSWER")
             self.assertEqual(session.query(HumanReviewORM).count(), 2)
             self.assertEqual(session.query(AuditEventORM).filter_by(action="human_review.append").count(), 2)
+
+    def test_secrl_succeeded_run_triggers_automatic_failure_analysis(self):
+        self.login()
+        headers = {"X-CSRF-Token": self.csrf_token}
+        registered = self.client.post(
+            "/api/v1/agents",
+            json={"kind": "BUILT_IN", "revision_id": "secrl-baseline-v1"},
+            headers=headers,
+        )
+        self.assertEqual(registered.status_code, 201, registered.text)
+        model = self.client.post(
+            "/api/v1/models",
+            json={
+                "name": "auto-analysis model",
+                "provider": "openai-compatible",
+                "endpoint": "https://models.invalid/v1",
+                "model": "fixture-model",
+                "parameters": {"max_output_tokens": 64, "temperature": 0},
+                "pricing": {"input_per_million": "1", "output_per_million": "2"},
+            },
+            headers={**headers, "X-Model-API-Key": "encrypted-test-key"},
+        )
+        self.assertEqual(model.status_code, 201, model.text)
+        case_id = "incident_134:0:f85431d5ee76a2f65908ea5dc308418ff5328582d4ee45c0b73b80eaa0dd5ec7"
+        created = self.client.post(
+            "/api/v1/tasks",
+            json={
+                "name": "auto analysis",
+                "benchmark_id": "secrl",
+                "agent_revision_id": registered.json()["id"],
+                "model_config_revision_id": model.json()["id"],
+                "case_ids": [case_id],
+            },
+            headers=headers,
+        )
+        self.assertEqual(created.status_code, 201, created.text)
+
+        class Runtime:
+            model_access = "none"
+            model_gateway_binding = None
+            name = "auto-analysis-runtime"
+
+            async def reset(self, episode):
+                pass
+
+            async def act(self, _observation):
+                return SubmitAction(type="submit", answer="170.54.121.63")
+
+            def usage(self):
+                return UsageSnapshot()
+
+            async def close(self):
+                return None
+
+        status = asyncio.run(
+            run_pending_once(
+                settings=self.settings,
+                session_factory=self.session_factory,
+                artifact_store=self.artifact_store,
+                model_provider_resolver=lambda _host, _port: ("93.184.216.34",),
+                secrl_query_executor=lambda _scenario, _query: ([], True),
+                builtin_runtime_resolver=lambda *_args: Runtime(),
+                secrl_evaluator_resolver=lambda profile: SecRLEvaluator(
+                    profile,
+                    model_client=lambda _prompt, _parameters: {
+                        "text": "Analysis: fixture\nIs_Answer_Correct: True",
+                        "usage": {"prompt_tokens": 5, "completion_tokens": 2},
+                    },
+                ),
+            )
+        )
+        self.assertEqual(status, "SUCCEEDED")
+
+        with self.session_factory() as session:
+            rows = session.query(AnalysisRunORM).filter_by(run_id=created.json()["run_id"]).all()
+        self.assertEqual(len(rows), 1, "auto failure analysis should register exactly one analysis run")
+        self.assertEqual(rows[0].taxonomy_version, "taxonomy_v1")
+
+    def test_smoke_run_does_not_trigger_failure_analysis(self):
+        self.login()
+        headers = {"X-CSRF-Token": self.csrf_token}
+        agent = self.client.post(
+            "/api/v1/agents",
+            json={"kind": "BUILT_IN", "revision_id": "builtin-deterministic-smoke-v1"},
+            headers=headers,
+        )
+        self.assertEqual(agent.status_code, 201, agent.text)
+        payload = valid_smoke_task()
+        payload["agent_revision_id"] = agent.json()["id"]
+        payload["budget"] = {}
+        task = self.client.post("/api/v1/tasks", json=payload, headers=headers)
+        self.assertEqual(task.status_code, 201, task.text)
+        status = asyncio.run(
+            run_pending_once(
+                settings=self.settings,
+                session_factory=self.session_factory,
+                artifact_store=self.artifact_store,
+            )
+        )
+        self.assertEqual(status, "SUCCEEDED")
+        with self.session_factory() as session:
+            self.assertEqual(session.query(AnalysisRunORM).count(), 0)
 
 
 if __name__ == "__main__":

@@ -94,3 +94,4 @@ class Attribution:
     reviewed_secondary: list[str] = field(default_factory=list)
     review_status: str = "unreviewed"
     review_notes: str = ""
+    explanation: str = ""

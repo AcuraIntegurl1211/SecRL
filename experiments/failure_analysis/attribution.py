@@ -63,6 +63,38 @@ def _secondary_causes(features: FeatureRecord, primary: str | None) -> list[str]
     return secondary
 
 
+def _explanation(features: FeatureRecord, primary: str | None) -> str:
+    """Human-readable reason composed from the recorded run features."""
+    parts: list[str] = []
+    if not features.submitted:
+        if features.steps >= features.max_steps:
+            parts.append(
+                f"agent used all {features.max_steps} steps without submitting an answer"
+            )
+        else:
+            parts.append("run ended without a submission")
+    elif features.submitted_answer.strip() in ("", "<answer>"):
+        parts.append(
+            "agent submitted an empty/placeholder answer after failed exploration"
+        )
+    if features.empty_result_count:
+        parts.append(
+            f"{features.empty_result_count} queries returned empty results "
+            "(wrong filter, table, or schema expectation)"
+        )
+    if features.sql_failure:
+        parts.append(
+            f"{features.sql_failure} SQL errors vs {features.sql_success} successful queries"
+        )
+    if features.duplicate_query_count:
+        parts.append(
+            f"{features.duplicate_query_count} duplicate queries suggest looping"
+        )
+    if primary is not None and primary != "UNKNOWN":
+        parts.append(f"primary cause classified as {primary}")
+    return "; ".join(parts) if parts else "no distinguishing signals recorded"
+
+
 def _candidate(
     features: FeatureRecord,
     taxonomy: dict[str, Any],
@@ -82,6 +114,7 @@ def _candidate(
         primary_cause_status=status,
         secondary_cause_candidates=_secondary_causes(features, primary),
         confidence=confidence,
+        explanation=_explanation(features, primary),
         needs_human_review=bool(reasons),
         human_review_reasons=reasons,
     )
