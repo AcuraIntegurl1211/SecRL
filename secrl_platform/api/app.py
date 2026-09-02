@@ -264,6 +264,11 @@ def _context(
             if settings is not None
             else DEFAULT_MODEL_PROVIDER_ALLOWLIST
         ),
+        allow_insecure_model_endpoints=(
+            tuple(settings.allow_insecure_model_endpoints)
+            if settings is not None
+            else ()
+        ),
         model_provider_resolver=model_provider_resolver,
         agent_service_allowlist=(
             settings.agent_service_allowlist

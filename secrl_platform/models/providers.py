@@ -288,11 +288,13 @@ def validate_model_endpoint(
     *,
     allowed_hosts: tuple[str, ...] | None,
     resolver: Callable[[str, int], object] | None = None,
+    insecure_hosts: tuple[str, ...] = (),
 ) -> str:
     endpoint, _addresses = _validated_model_endpoint(
         base_url,
         allowed_hosts=allowed_hosts,
         resolver=resolver,
+        insecure_hosts=insecure_hosts,
     )
     return endpoint
 
@@ -302,9 +304,27 @@ def _validated_model_endpoint(
     *,
     allowed_hosts: tuple[str, ...] | None,
     resolver: Callable[[str, int], object] | None = None,
+    insecure_hosts: tuple[str, ...] = (),
 ) -> tuple[str, tuple[str, ...]]:
     parsed = urlsplit(base_url)
-    if parsed.scheme != "https" or not parsed.hostname:
+    if not parsed.hostname:
+        raise ValueError("model provider endpoint must include a hostname")
+    scheme = parsed.scheme.lower()
+    host = parsed.hostname.lower()
+    insecure_allowed = bool(
+        scheme == "http"
+        and insecure_hosts
+        and host in {value.lower() for value in insecure_hosts}
+    )
+    if scheme == "https":
+        pass
+    elif scheme == "http" and insecure_allowed:
+        pass
+    elif scheme == "http":
+        raise ValueError(
+            "model provider endpoint uses HTTP and its host is not approved for insecure transport"
+        )
+    else:
         raise ValueError("model provider endpoint must use HTTPS")
     if parsed.username is not None or parsed.password is not None:
         raise ValueError("model provider endpoint must not include user information")
@@ -322,7 +342,7 @@ def _validated_model_endpoint(
     normalized_allowlist = {value.lower() for value in allowed_hosts}
     if host not in normalized_allowlist:
         raise ValueError("model provider host is not allowlisted")
-    port = parsed.port or 443
+    port = parsed.port or (80 if scheme == "http" else 443)
     resolve = resolver or _resolve_host
     try:
         raw_addresses = resolve(host, port)

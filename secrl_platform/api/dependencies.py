@@ -26,6 +26,7 @@ class ApiContext:
     artifact_store: LocalArtifactStore
     sessions: SessionStore
     model_provider_allowlist: tuple[str, ...]
+    allow_insecure_model_endpoints: tuple[str, ...]
     model_provider_resolver: Callable[[str, int], object] | None
     agent_service_allowlist: tuple[str, ...]
     agent_service_transport: AgentServiceTransport | None

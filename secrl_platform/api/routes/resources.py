@@ -75,6 +75,7 @@ def create_model(
             payload.endpoint,
             allowed_hosts=context.model_provider_allowlist,
             resolver=context.model_provider_resolver,
+            insecure_hosts=context.allow_insecure_model_endpoints,
         )
     except ValueError:
         raise ApiError(

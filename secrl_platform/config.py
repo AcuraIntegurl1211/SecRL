@@ -21,6 +21,7 @@ class Settings(BaseSettings):
     agent_service_allowlist: tuple[str, ...] = DEFAULT_AGENT_SERVICE_ALLOWLIST
     agent_service_capability_secret: SecretStr | None = None
     model_provider_allowlist: tuple[str, ...] = DEFAULT_MODEL_PROVIDER_ALLOWLIST
+    allow_insecure_model_endpoints: tuple[str, ...] = ()
     secrl_runtime_enabled: bool = False
     secrl_mysql_user: str = "benchmark_ro"
     secrl_mysql_password: SecretStr | None = None
