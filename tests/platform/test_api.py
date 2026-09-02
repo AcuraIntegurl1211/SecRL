@@ -1210,6 +1210,71 @@ class ApiTest(unittest.TestCase):
 
         self.assertEqual(asyncio.run(execute_registered_service_task()), "SUCCEEDED")
 
+    def test_http_endpoint_allowed_only_for_explicitly_approved_host(self):
+        from fastapi.testclient import TestClient
+
+        insecure_settings = Settings(
+            data_dir=Path(self.directory.name),
+            master_key="00" * 32,
+            session_secret="s" * 32,
+            model_provider_allowlist=("176.97.70.58",),
+            allow_insecure_model_endpoints=("176.97.70.58",),
+        )
+        insecure_app = create_app(
+            settings=insecure_settings,
+            session_factory=self.session_factory,
+            artifact_store=self.artifact_store,
+            model_provider_resolver=lambda _host, _port: ("93.184.216.34",),
+        )
+        with TestClient(insecure_app) as client:
+            login = client.post(
+                "/api/v1/auth/login",
+                json={"username": "admin", "password": "correct horse battery staple"},
+            )
+            headers = {"X-CSRF-Token": login.json()["csrf_token"]}
+            created = client.post(
+                "/api/v1/models",
+                json={
+                    "name": "sol proxy",
+                    "provider": "openai-compatible",
+                    "endpoint": "http://176.97.70.58:8080/v1",
+                    "model": "gpt-5.6-sol",
+                    "parameters": {"max_output_tokens": 512, "timeout_seconds": 120},
+                    "pricing": {"input_per_million": "0", "output_per_million": "0"},
+                },
+                headers={**headers, "X-Model-API-Key": "encrypted-test-key"},
+            )
+            self.assertEqual(created.status_code, 201, created.text)
+
+        strict_app = create_app(
+            settings=Settings(
+                data_dir=Path(self.directory.name),
+                master_key="00" * 32,
+                session_secret="s" * 32,
+                model_provider_allowlist=("176.97.70.58",),
+            ),
+            session_factory=self.session_factory,
+            artifact_store=self.artifact_store,
+            model_provider_resolver=lambda _host, _port: ("93.184.216.34",),
+        )
+        with TestClient(strict_app) as client:
+            login = client.post(
+                "/api/v1/auth/login",
+                json={"username": "admin", "password": "correct horse battery staple"},
+            )
+            headers = {"X-CSRF-Token": login.json()["csrf_token"]}
+            rejected = client.post(
+                "/api/v1/models",
+                json={
+                    "name": "sol proxy strict",
+                    "provider": "openai-compatible",
+                    "endpoint": "http://176.97.70.58:8080/v1",
+                    "model": "gpt-5.6-sol",
+                },
+                headers={**headers, "X-Model-API-Key": "encrypted-test-key"},
+            )
+            self.assertEqual(rejected.status_code, 422, rejected.text)
+
     def test_model_revision_stores_configured_request_timeout(self):
         self.login()
         headers = {"X-CSRF-Token": self.csrf_token}
