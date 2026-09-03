@@ -149,13 +149,16 @@ class OpenAICompatibleProvider:
         client: httpx.AsyncClient | None = None,
         allowed_hosts: tuple[str, ...],
         resolver: Callable[[str, int], object] | None = None,
+        insecure_hosts: tuple[str, ...] = (),
     ) -> None:
         self._resolver = resolver or _resolve_host
         self._allowed_hosts = allowed_hosts
+        self._insecure_hosts = tuple(insecure_hosts)
         self._base_url, addresses = _validated_model_endpoint(
             base_url,
             allowed_hosts=allowed_hosts,
             resolver=self._resolver,
+            insecure_hosts=self._insecure_hosts,
         )
         self._base_url = self._base_url.rstrip("/")
         self._pinned_address = addresses[0]
@@ -167,6 +170,7 @@ class OpenAICompatibleProvider:
             self._base_url,
             allowed_hosts=self._allowed_hosts,
             resolver=self._resolver,
+            insecure_hosts=self._insecure_hosts,
         )
         payload = provider_payload(request)
         headers = {"Authorization": f"Bearer {self._api_key}"}

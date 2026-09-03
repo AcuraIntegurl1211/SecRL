@@ -107,5 +107,30 @@ class InsecureEndpointAllowlistTest(unittest.TestCase):
         self.assertIn("query or fragment", str(ctx.exception))
 
 
+class OpenAICompatibleProviderInsecureTest(unittest.TestCase):
+    def test_provider_accepts_approved_http_endpoint(self):
+        from secrl_platform.models.providers import OpenAICompatibleProvider
+
+        provider = OpenAICompatibleProvider(
+            base_url="http://176.97.70.58:8080/v1",
+            api_key="test-key",
+            allowed_hosts=("176.97.70.58",),
+            resolver=lambda _host, _port: ("93.184.216.34",),
+            insecure_hosts=("176.97.70.58",),
+        )
+        self.assertEqual(provider._base_url, "http://176.97.70.58:8080/v1")
+
+    def test_provider_rejects_http_endpoint_without_approval(self):
+        from secrl_platform.models.providers import OpenAICompatibleProvider
+
+        with self.assertRaises(ValueError):
+            OpenAICompatibleProvider(
+                base_url="http://176.97.70.58:8080/v1",
+                api_key="test-key",
+                allowed_hosts=("176.97.70.58",),
+                resolver=lambda _host, _port: ("93.184.216.34",),
+            )
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
