@@ -449,6 +449,7 @@ def _resolve_model_provider(
             api_key=api_key,
             allowed_hosts=settings.model_provider_allowlist,
             resolver=resolver,
+            insecure_hosts=settings.allow_insecure_model_endpoints,
         ),
     )
     return provider, model.model, parameters, pricing
