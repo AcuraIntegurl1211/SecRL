@@ -17,6 +17,20 @@ class BenchmarkManifest(ProtocolModel):
     protocol_version: str = "1"
 
 
+class AdapterCapabilities(ProtocolModel):
+    """Explicit behavioral switches a platform gate reads from the adapter.
+
+    These fields replace benchmark-id equality checks in tasks, preflight and
+    analysis; every consumer of a switch must assert on it in tests.  They are
+    kept out of BenchmarkManifest because the manifest is pinned into
+    BenchmarkRevision hashes.
+    """
+
+    needs_llm_evaluator: bool
+    requires_incident_services: bool
+    supports_failure_analysis: bool
+
+
 class DatasetManifest(ProtocolModel):
     dataset_id: str
     version: str
@@ -124,6 +138,8 @@ class MetricDefinition(ProtocolModel):
 
 class BenchmarkAdapterProtocol(Protocol):
     def manifest(self) -> BenchmarkManifest: ...
+
+    def capabilities(self) -> AdapterCapabilities: ...
 
     def validate_dataset(self, source: Path) -> ValidationReport: ...
 

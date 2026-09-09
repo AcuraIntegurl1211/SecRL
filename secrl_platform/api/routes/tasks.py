@@ -29,9 +29,8 @@ from secrl_platform.api.scope import (
     canonical_scope_mode,
     task_scope_summary,
 )
-from secrl_platform.benchmarks.smoke import ProtocolSmokeAdapter
 from secrl_platform.benchmarks.protocol import Scope
-from secrl_platform.benchmarks.secrl import SecRLAdapter, SecRLRunSpec
+from secrl_platform.benchmarks.registry import UnknownBenchmarkError
 from secrl_platform.runner.recovery import RunnerRepository
 from secrl_platform.storage.orm import (
     AgentRevisionORM,
@@ -82,25 +81,25 @@ def create_task(
     _user: LocalUserORM = Depends(require_csrf_user),
     context: ApiContext = Depends(get_context),
 ) -> TaskCreateResponse:
-    if payload.benchmark_id == "protocol-smoke":
-        adapter = ProtocolSmokeAdapter.load_default()
-    elif payload.benchmark_id == "secrl":
-        adapter = SecRLAdapter(
-            run_spec=SecRLRunSpec(
-                max_steps=payload.max_steps,
-                max_str_len=payload.max_str_len,
-                max_entry_return=payload.max_entry_return,
-            )
+    try:
+        adapter = context.benchmarks.create(
+            payload.benchmark_id,
+            {
+                "max_steps": payload.max_steps,
+                "max_str_len": payload.max_str_len,
+                "max_entry_return": payload.max_entry_return,
+            },
         )
-    else:
-        raise ApiError(422, "INVALID_TASK_SPEC", "Unknown benchmark revision")
+    except UnknownBenchmarkError as exc:
+        raise ApiError(422, "INVALID_TASK_SPEC", "Unknown benchmark revision") from exc
+    capabilities = context.benchmarks.capabilities(payload.benchmark_id)
     try:
         scope_mode = canonical_scope_mode(
             scope_mode=payload.scope_mode,
             case_ids=payload.case_ids,
             incident_ids=payload.incident_ids,
             all_cases=payload.all_cases,
-            allow_empty_all_benchmark=payload.benchmark_id != "secrl",
+            allow_empty_all_benchmark=not capabilities.requires_incident_services,
         )
     except AmbiguousScopeError as exc:
         raise ApiError(
@@ -120,7 +119,7 @@ def create_task(
             details={"next_step": "Select a Scope mode and matching Case, Incident, or Benchmark selection."},
         ) from exc
     try:
-        if payload.benchmark_id == "secrl":
+        if capabilities.requires_incident_services:
             selected_case_ids = adapter.resolve_case_ids(
                 case_ids=payload.case_ids if scope_mode == "CASES" else (),
                 incident_ids=payload.incident_ids if scope_mode == "INCIDENTS" else (),
@@ -143,10 +142,10 @@ def create_task(
         ) from exc
     resolved_incident_ids = (
         adapter.incident_ids_for_case_ids(selected_case_ids)
-        if payload.benchmark_id == "secrl"
+        if capabilities.requires_incident_services
         else ()
     )
-    if payload.benchmark_id == "secrl":
+    if capabilities.requires_incident_services:
         if not context.secrl_runtime_enabled:
             raise ApiError(
                 503,
@@ -183,7 +182,7 @@ def create_task(
     model_id, model_sha256 = _resolve_model_revision(
         context, payload.model_config_revision_id
     )
-    if payload.benchmark_id == "secrl" and model_id is None:
+    if capabilities.needs_llm_evaluator and model_id is None:
         raise ApiError(
             422,
             "INVALID_TASK_SPEC",
@@ -191,7 +190,7 @@ def create_task(
         )
     evaluator_model_id, evaluator_model_sha256 = None, None
     if payload.evaluator_model_config_revision_id is not None:
-        if payload.benchmark_id != "secrl":
+        if not capabilities.needs_llm_evaluator:
             raise ApiError(
                 422,
                 "INVALID_TASK_SPEC",

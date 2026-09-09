@@ -120,12 +120,13 @@ class RunnerRepository:
         if any(not isinstance(value, int) or value < 1 for value in frozen_limits.values()):
             raise ValueError("run limits must be positive integers")
         manifest = adapter.manifest()
+        capabilities = adapter.capabilities()
         if evaluator_model_config_revision_id is not None:
             if evaluator_model_config_revision_id == model_config_revision_id:
                 raise ValueError(
                     "split evaluator config must differ from the agent model config"
                 )
-            if manifest.benchmark_id != "secrl":
+            if not capabilities.needs_llm_evaluator:
                 raise ValueError(
                     "split evaluator config is only supported for SecRL tasks"
                 )
@@ -256,7 +257,7 @@ class RunnerRepository:
             evaluator_binding_sha256 = (
                 evaluator_model_config_sha256 or model_config_sha256
             )
-            if manifest.benchmark_id == "secrl":
+            if capabilities.needs_llm_evaluator:
                 task_spec["evaluator_profile"] = official_secrl_profile(
                     formal=True,
                     model_revision=evaluator_binding_sha256 or "static-evaluator-v1",

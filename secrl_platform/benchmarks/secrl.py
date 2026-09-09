@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Any, Callable, Mapping
 from pydantic import Field
 
 from secrl_platform.benchmarks.protocol import (
+    AdapterCapabilities,
     AgentAction,
     BenchmarkManifest,
     CaseRef,
@@ -309,6 +310,13 @@ class SecRLAdapter:
             dataset_sha256=self._source_sha256,
             dataset_schema_version="secrl-question-v1",
             case_count=SECRL_EXPECTED_CASE_COUNT,
+        )
+
+    def capabilities(self) -> AdapterCapabilities:
+        return AdapterCapabilities(
+            needs_llm_evaluator=True,
+            requires_incident_services=True,
+            supports_failure_analysis=True,
         )
 
     def dataset_ref(self) -> DatasetRef:

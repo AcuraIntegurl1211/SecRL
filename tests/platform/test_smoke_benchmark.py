@@ -6,6 +6,7 @@ import uuid
 from pydantic import ValidationError
 
 from secrl_platform.benchmarks.protocol import (
+    AdapterCapabilities,
     BenchmarkManifest,
     Observation,
     Scope,
@@ -56,6 +57,13 @@ class BenchmarkRegistryTest(unittest.TestCase):
                 benchmark_id="stub",
                 name="Stub",
                 version="1",
+            )
+
+        def capabilities(self):
+            return AdapterCapabilities(
+                needs_llm_evaluator=False,
+                requires_incident_services=False,
+                supports_failure_analysis=False,
             )
 
     def test_duplicate_and_unknown_benchmarks_are_rejected(self):

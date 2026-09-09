@@ -15,8 +15,7 @@ from secrl_platform.api.scope import (
     canonical_scope_mode,
 )
 from secrl_platform.benchmarks.protocol import Scope
-from secrl_platform.benchmarks.secrl import SecRLAdapter
-from secrl_platform.benchmarks.smoke import ProtocolSmokeAdapter
+from secrl_platform.benchmarks.registry import UnknownBenchmarkError
 from secrl_platform.storage.orm import (
     AgentRevisionORM,
     LocalUserORM,
@@ -41,6 +40,13 @@ def preflight(
     _user: LocalUserORM = Depends(require_user),
     context: ApiContext = Depends(get_context),
 ) -> dict:
+    try:
+        adapter = context.benchmarks.create(benchmark_id)
+    except UnknownBenchmarkError as exc:
+        raise ApiError(
+            422, "INVALID_TASK_SPEC", "Unknown benchmark revision"
+        ) from exc
+    capabilities = context.benchmarks.capabilities(benchmark_id)
     checks: list[dict[str, str]] = []
     scope_summary: dict[str, object] | None = None
     with context.session_factory() as session:
@@ -70,35 +76,28 @@ def preflight(
         except InvalidScopeError as exc:
             raise _invalid_scope_error() from exc
 
-        if benchmark_id in {"secrl", "protocol-smoke"}:
-            try:
-                selected_scope = _selected_scope(
-                    benchmark_id=benchmark_id,
-                    scope_mode=scope_mode,
-                    case_ids=case_ids,
-                    incident_ids=incident_ids,
-                    all_cases=all_cases,
-                )
-                selected_incidents = selected_scope[2]
-                scope_summary = {
-                    "mode": selected_scope[0],
-                    "case_count": len(selected_scope[1]),
-                    "incident_count": len(selected_incidents),
-                    "incident_ids": list(selected_incidents),
-                }
-            except AmbiguousScopeError as exc:
-                raise _ambiguous_scope_error() from exc
-            except (InvalidScopeError, KeyError, TypeError, ValueError) as exc:
-                raise _invalid_scope_error() from exc
-            if benchmark_id != "secrl":
-                checks.append(
-                    _check(
-                        "environment",
-                        "not_applicable",
-                        "The selected benchmark does not require the SecRL Incident environment.",
-                    )
-                )
-            elif context.secrl_runtime_enabled:
+        try:
+            selected_scope = _selected_scope(
+                adapter=adapter,
+                capabilities=capabilities,
+                scope_mode=scope_mode,
+                case_ids=case_ids,
+                incident_ids=incident_ids,
+                all_cases=all_cases,
+            )
+            selected_incidents = selected_scope[2]
+            scope_summary = {
+                "mode": selected_scope[0],
+                "case_count": len(selected_scope[1]),
+                "incident_count": len(selected_incidents),
+                "incident_ids": list(selected_incidents),
+            }
+        except AmbiguousScopeError as exc:
+            raise _ambiguous_scope_error() from exc
+        except (InvalidScopeError, KeyError, TypeError, ValueError) as exc:
+            raise _invalid_scope_error() from exc
+        if capabilities.requires_incident_services:
+            if context.secrl_runtime_enabled:
                 environment_status = {incident_id: False for incident_id in selected_incidents}
                 if context.secrl_environment_probe is not None:
                     try:
@@ -161,7 +160,7 @@ def preflight(
             else None
         )
         secret = session.get(SecretRefORM, model.secret_ref_id) if model and model.secret_ref_id else None
-        if model_config_revision_id is None and benchmark_id != "secrl":
+        if model_config_revision_id is None and not capabilities.needs_llm_evaluator:
             checks.append(_check("model_secret", "not_applicable", "The selected deterministic run does not require a model credential."))
         elif secret is not None and secret.status != "INVALID":
             model_check = _check("model_secret", "ready", "Model credential is configured (value withheld).")
@@ -170,14 +169,14 @@ def preflight(
         else:
             model_message = (
                 "SecRL runs require a model revision with an encrypted credential; select a model before queuing."
-                if benchmark_id == "secrl" and model_config_revision_id is None
+                if capabilities.needs_llm_evaluator and model_config_revision_id is None
                 else "The selected model credential is marked invalid; save a new API key before queuing a run."
                 if secret is not None and secret.status == "INVALID"
                 else "The selected model has no configured credential; save an API key before queuing a run."
             )
             model_code = (
                 "MODEL_CONFIG_MISSING"
-                if benchmark_id == "secrl" and model_config_revision_id is None
+                if capabilities.needs_llm_evaluator and model_config_revision_id is None
                 else "MODEL_CREDENTIAL_INVALID"
                 if secret is not None and secret.status == "INVALID"
                 else "MODEL_CREDENTIAL_MISSING"
@@ -273,8 +272,11 @@ def preflight(
         "checks": checks,
         "scope": scope_summary,
         "dataset": (
-            {"revision": SecRLAdapter().dataset_ref().version, "sha256": SecRLAdapter().dataset_ref().sha256}
-            if benchmark_id == "secrl"
+            {
+                "revision": adapter.dataset_ref().version,
+                "sha256": adapter.dataset_ref().sha256,
+            }
+            if capabilities.requires_incident_services
             else None
         ),
     }
@@ -282,13 +284,13 @@ def preflight(
 
 def _selected_scope(
     *,
-    benchmark_id: str,
+    adapter,
+    capabilities,
     scope_mode: ScopeMode | None,
     case_ids: tuple[str, ...],
     incident_ids: tuple[str, ...],
     all_cases: bool,
 ) -> tuple[ScopeMode, tuple[str, ...], tuple[str, ...]]:
-    adapter = SecRLAdapter() if benchmark_id == "secrl" else ProtocolSmokeAdapter.load_default()
     mode = canonical_scope_mode(
         scope_mode=scope_mode,
         case_ids=case_ids,
@@ -297,25 +299,25 @@ def _selected_scope(
         allow_empty_all_benchmark=True,
     )
     if mode == "INCIDENTS":
-        if benchmark_id != "secrl":
+        if not capabilities.requires_incident_services:
             raise InvalidScopeError(
                 "Incident selection is only supported by the SecRL benchmark"
             )
         resolved = adapter.resolve_case_ids(incident_ids=incident_ids)
         selected = incident_ids
-    elif benchmark_id == "secrl":
+    elif capabilities.requires_incident_services:
         resolved = adapter.resolve_case_ids(
             case_ids=case_ids if mode == "CASES" else (),
             all_cases=mode == "ALL_BENCHMARK",
         )
         selected = adapter.incident_ids_for_case_ids(resolved)
     else:
-        smoke_scope = Scope(
+        scope = Scope(
             case_ids=case_ids if mode == "CASES" else None,
         )
         resolved = tuple(
             case.id
-            for case in adapter.enumerate_cases(adapter.dataset_ref(), smoke_scope)
+            for case in adapter.enumerate_cases(adapter.dataset_ref(), scope)
         )
         selected = ()
     return mode, resolved, tuple(dict.fromkeys(selected))
