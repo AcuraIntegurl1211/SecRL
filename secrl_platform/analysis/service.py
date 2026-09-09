@@ -396,8 +396,20 @@ def analyze_completed_run(
     python_executable: str | None = None,
 ) -> RegisteredAnalysisRun:
     """Materialize one completed SecRL run into the frozen analyzer and register it."""
+    from secrl_platform.benchmarks.registry import (
+        UnknownBenchmarkError,
+        builtin_benchmarks,
+    )
     from secrl_platform.benchmarks.secrl import SecRLAdapter
     from secrl_platform.storage.artifacts import ArtifactRef as StoredArtifactRef
+
+    def _supports_failure_analysis(adapter_name: str | None) -> bool:
+        if adapter_name is None:
+            return False
+        try:
+            return builtin_benchmarks().capabilities(adapter_name).supports_failure_analysis
+        except UnknownBenchmarkError:
+            return False
 
     with session_factory() as session:
         run = session.get(RunORM, run_id)
@@ -411,7 +423,7 @@ def analyze_completed_run(
         )
         if task is None or task.status != "SUCCEEDED":
             raise ValueError("analysis requires a completed run")
-        if benchmark is None or benchmark.adapter_name != "secrl":
+        if benchmark is None or not _supports_failure_analysis(benchmark.adapter_name):
             raise ValueError("failure analysis supports SecRL runs only")
         rows = session.execute(
             select(CaseRecordORM, CaseAttemptORM, ArtifactORM)
@@ -432,6 +444,10 @@ def analyze_completed_run(
         run_spec = json.loads(run.run_spec_json)
     if not rows:
         raise ValueError("completed run has no final attempts")
+    # The gate above is capability-driven; the materialization below is the
+    # SecRL frozen-analyzer pipeline (restricted gold access + SQL retrieval).
+    # A future benchmark with supports_failure_analysis=True needs its own
+    # analyzer wiring here.
     adapter = SecRLAdapter()
     access = adapter.restricted_access()
     incident = rows[0][0].external_id.split(":", 1)[0]

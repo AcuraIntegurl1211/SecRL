@@ -12,6 +12,7 @@ from jsonschema import ValidationError as JsonSchemaValidationError
 from jsonschema import validate
 
 from secrl_platform.benchmarks.protocol import (
+    AdapterCapabilities,
     AgentAction,
     BenchmarkManifest,
     CaseRef,
@@ -162,6 +163,13 @@ class ProtocolSmokeAdapter:
             version="1.0.0",
             dataset_version=self._payload["version"],
             dataset_sha256=self._dataset_sha256,
+        )
+
+    def capabilities(self) -> AdapterCapabilities:
+        return AdapterCapabilities(
+            needs_llm_evaluator=False,
+            requires_incident_services=False,
+            supports_failure_analysis=False,
         )
 
     def dataset_ref(self) -> DatasetRef:

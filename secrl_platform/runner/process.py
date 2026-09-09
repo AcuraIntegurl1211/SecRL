@@ -32,6 +32,10 @@ from secrl_platform.agents.service import (
     HttpxAgentServiceTransport,
     ServiceConfig,
 )
+from secrl_platform.benchmarks.registry import (
+    UnknownBenchmarkError,
+    builtin_benchmarks,
+)
 from secrl_platform.benchmarks.smoke import ProtocolSmokeAdapter
 from secrl_platform.benchmarks.secrl import (
     SecRLAdapter,
@@ -551,7 +555,11 @@ def _resolve_adapter(
     benchmark_id = task_spec.get("benchmark_id")
     if benchmark_id == "protocol-smoke":
         return ProtocolSmokeAdapter.load_default()
-    if benchmark_id != "secrl":
+    try:
+        capabilities = builtin_benchmarks().capabilities(benchmark_id)
+    except UnknownBenchmarkError:
+        capabilities = None
+    if capabilities is None or not capabilities.needs_llm_evaluator:
         raise RunnerConfigurationError("task benchmark is not allowlisted")
     if model_bundle is None:
         raise RunnerConfigurationError("SecRL evaluator model config is missing")

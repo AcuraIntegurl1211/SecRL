@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from collections.abc import Callable, Mapping
 
 from fastapi import Depends, Request
@@ -15,6 +15,7 @@ from secrl_platform.auth.sessions import (
     SessionStore,
     password_change_key,
 )
+from secrl_platform.benchmarks.registry import BenchmarkRegistry, builtin_benchmarks
 from secrl_platform.models.secrets import SecretStore
 from secrl_platform.storage.artifacts import LocalArtifactStore
 from secrl_platform.storage.orm import AppSettingORM, LocalUserORM
@@ -36,6 +37,7 @@ class ApiContext:
     secrl_environment_probe: Callable[[tuple[str, ...]], Mapping[str, bool] | bool] | None = None
     runner_configured: bool = False
     dev_autoauth: bool = False
+    benchmarks: BenchmarkRegistry = field(default_factory=builtin_benchmarks)
 
 
 def get_context(request: Request) -> ApiContext:

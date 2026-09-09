@@ -29,9 +29,8 @@ from secrl_platform.api.dependencies import (
 )
 from secrl_platform.api.errors import ApiError
 from secrl_platform.api.schemas import AgentCreateRequest, ModelCreateRequest
-from secrl_platform.benchmarks.smoke import ProtocolSmokeAdapter
-from secrl_platform.benchmarks.secrl import SecRLAdapter
 from secrl_platform.benchmarks.protocol import Scope
+from secrl_platform.benchmarks.registry import UnknownBenchmarkError
 from secrl_platform.models.providers import validate_model_endpoint
 from secrl_platform.models.secrets import encrypted_secret_to_json
 from secrl_platform.storage.orm import (
@@ -322,8 +321,11 @@ async def check_agent(
 
 
 @router.get("/benchmarks", tags=["benchmarks"])
-def list_benchmarks(_user: LocalUserORM = Depends(require_user)) -> list[dict]:
-    return [_benchmark_payload(adapter) for adapter in _benchmark_adapters()]
+def list_benchmarks(
+    _user: LocalUserORM = Depends(require_user),
+    context: ApiContext = Depends(get_context),
+) -> list[dict]:
+    return [_benchmark_payload(adapter) for adapter in context.benchmarks.samples()]
 
 
 @router.get("/benchmarks/{benchmark_id}/cases", tags=["benchmarks"])
@@ -333,17 +335,14 @@ def list_benchmark_cases(
     limit: int = Query(25, ge=1, le=100),
     scenario: str | None = Query(None, min_length=1, max_length=256),
     _user: LocalUserORM = Depends(require_user),
+    context: ApiContext = Depends(get_context),
 ) -> dict:
-    adapter = next(
-        (
-            candidate
-            for candidate in _benchmark_adapters()
-            if candidate.manifest().benchmark_id == benchmark_id
-        ),
-        None,
-    )
-    if adapter is None:
-        raise ApiError(404, "BENCHMARK_NOT_FOUND", "Benchmark revision was not found")
+    try:
+        adapter = context.benchmarks.get(benchmark_id)
+    except UnknownBenchmarkError as exc:
+        raise ApiError(
+            404, "BENCHMARK_NOT_FOUND", "Benchmark revision was not found"
+        ) from exc
     cases = adapter.enumerate_cases(adapter.dataset_ref(), Scope.all())
     if scenario is not None:
         cases = [case for case in cases if case.scenario.id == scenario]
@@ -369,10 +368,6 @@ def list_benchmark_cases(
         "limit": limit,
         "items": items,
     }
-
-
-def _benchmark_adapters():
-    return (ProtocolSmokeAdapter.load_default(), SecRLAdapter())
 
 
 def _benchmark_payload(adapter) -> dict:
