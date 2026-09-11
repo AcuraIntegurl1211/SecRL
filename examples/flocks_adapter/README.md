@@ -21,7 +21,7 @@ SecRL runner ──Agent Service v1──▶ this adapter ──Flocks native─
    incident context + question; `tool_result` becomes a JSON dump) and posts it
    to Flocks with the **dedicated** `FLOCKS_EVAL_AGENT` and the **explicit**
    `MODEL_PROVIDER_ID`/`MODEL_ID`.
-3. It polls `/status` until `idle`, then reads the last assistant message.
+3. It polls `/status` until idle, accepting both shipped Flocks shapes (`{"status": "idle"}` and `{"isProcessing": false}`), then reads the last assistant message.
 4. The message must match the strict grammar:
    - `SQL: <one read-only statement>` -> `tool_call` on the episode's query tool
    - `SUBMIT: <answer>` -> `submit`

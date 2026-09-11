@@ -186,10 +186,15 @@ class FlocksClient:
                 "GET", f"/api/session/{session_id}/status"
             )
             status = payload.get("status")
-            if status == "idle":
-                return
             if status == "error":
                 raise FlocksUpstreamError("Flocks session reported error")
+            # Flocks has shipped both shapes across versions:
+            # {"status": "idle"|"error"|...} and {"isProcessing": bool}.
+            if isinstance(payload.get("isProcessing"), bool):
+                if not payload["isProcessing"]:
+                    return
+            elif status == "idle":
+                return
             if elapsed >= deadline:
                 raise FlocksTimeout(
                     f"Flocks session did not become idle within {deadline}s"

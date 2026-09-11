@@ -131,7 +131,10 @@ class FakeFlocks:
                 if session_id not in fake.sessions:
                     status, payload = 404, {"error": "unknown session"}
                 else:
-                    payload = {"status": fake.status_mode}
+                    if fake.status_mode == "isProcessing":
+                        payload = {"isProcessing": False}
+                    else:
+                        payload = {"status": fake.status_mode}
             elif path.endswith("/message"):
                 session_id = path.removeprefix("/api/session/").removesuffix("/message")
                 payload = {"messages": fake.sessions.get(session_id, [])}
@@ -475,6 +478,22 @@ class FlocksAdapterHttpTest(unittest.IsolatedAsyncioTestCase):
             "/v1/sessions", json=session_payload(secrl_like_episode()), headers=AUTH
         )
         self.assertEqual(response.status_code, 502)
+
+    async def test_status_isProcessing_shape_is_accepted_as_idle(self):
+        self.fake.status_mode = "isProcessing"  # legacy shape: no status field
+        await _aclose(self.client, self.flocks_client)
+        self.client, self.flocks_client = make_clients(adapter_settings(), self.fake)
+        session_id = await self.open_session()
+        self.fake.script("SQL: SELECT 1")
+        response = await self.client.post(
+            f"/v1/sessions/{session_id}:act",
+            json=act_payload(Observation(type="tool_result", content={}), "req-ip", 1),
+            headers=AUTH,
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        body = response.json()
+        self.assertEqual(body["action"]["type"], "tool_call")
+        self.assertEqual(body["request_id"], "req-ip")
 
     async def test_flocks_never_idle_maps_to_request_timeout(self):
         self.fake.status_mode = "busy"
