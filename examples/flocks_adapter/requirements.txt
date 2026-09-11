@@ -1,0 +1,6 @@
+# The adapter runs inside the repo's platform environment; these are the only
+# imports it needs beyond the standard library, and all are already pinned in
+# requirements-platform.txt. Listed here for standalone deployment.
+fastapi>=0.110
+httpx>=0.27
+uvicorn>=0.30
