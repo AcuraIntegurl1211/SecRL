@@ -397,6 +397,28 @@ class _Session:
     episode: EpisodeContext
     sequence: int = 0
     responses: dict[tuple[str, int], dict[str, Any]] = field(default_factory=dict)
+    turn: int = 0
+
+
+def _turn_prefix(turn: int, max_steps: int) -> str:
+    """Per-turn budget banner.
+
+    Flash-class models ignore abstract "budget discipline" instructions but
+    do react to an explicit turn counter, so every prompt opens with the
+    number of turns spent and remaining, plus a hard nudge as the budget
+    runs out.  The counter is adapter-owned and immune to model drift.
+    """
+    remaining = max(0, max_steps - turn)
+    if remaining <= 2:
+        urgency = (
+            f" {remaining} turn(s) left. You MUST answer with SUBMIT now; "
+            "no more SQL."
+        )
+    elif remaining * 2 <= max_steps:
+        urgency = " At least half the budget is spent: start converging on SUBMIT."
+    else:
+        urgency = ""
+    return f"[Turn {turn}/{max_steps}, {remaining} remaining]{urgency}\n"
 
 
 def create_app(
@@ -481,7 +503,13 @@ def create_app(
         if request.sequence != session.sequence + 1:
             raise HTTPException(status_code=409, detail="invalid sequence")
 
-        await _flocks_call(flocks.prompt, session.flocks_session_id, observation_to_text(request.observation))
+        session.turn += 1
+        await _flocks_call(
+            flocks.prompt,
+            session.flocks_session_id,
+            _turn_prefix(session.turn, session.episode.max_steps)
+            + observation_to_text(request.observation),
+        )
         await _flocks_call(flocks.await_idle, session.flocks_session_id)
         text, usage = await _flocks_call(flocks.latest_turn, session.flocks_session_id)
         try:
