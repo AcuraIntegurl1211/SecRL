@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     runner_poll_seconds: float = 1.0
     agent_service_allowlist: tuple[str, ...] = DEFAULT_AGENT_SERVICE_ALLOWLIST
     agent_service_capability_secret: SecretStr | None = None
+    agent_service_timeout_seconds: float = Field(default=10.0, ge=1, le=600)
     model_provider_allowlist: tuple[str, ...] = DEFAULT_MODEL_PROVIDER_ALLOWLIST
     allow_insecure_model_endpoints: tuple[str, ...] = ()
     secrl_runtime_enabled: bool = False

@@ -55,6 +55,10 @@ class ServiceConfig(BaseModel):
     agent_revision_id: str
     capability_token: SecretStr = Field(repr=False)
     max_attempts: int = Field(default=2, ge=1, le=3)
+    # Per-request budget for every Agent Service call.  Bridges that
+    # synchronously await an upstream LLM (e.g. the Flocks adapter) need far
+    # more than the historical 10s; the runner feeds this from Settings.
+    timeout_seconds: float = Field(default=10.0, ge=1, le=600)
 
 
 class AgentServiceEndpointPolicy(BaseModel):
@@ -123,8 +127,13 @@ class AgentServiceTransport(Protocol):
 
 
 class HttpxAgentServiceTransport:
-    def __init__(self, client: httpx.AsyncClient) -> None:
+    def __init__(self, client: httpx.AsyncClient, *, timeout: float = 10.0) -> None:
         self._client = client
+        self._timeout = timeout
+
+    @property
+    def timeout(self) -> float:
+        return self._timeout
 
     async def request(
         self,
@@ -140,7 +149,7 @@ class HttpxAgentServiceTransport:
                 url,
                 json=json_body,
                 headers=headers,
-                timeout=10.0,
+                timeout=self._timeout,
                 follow_redirects=False,
             )
         except httpx.TimeoutException as exc:
