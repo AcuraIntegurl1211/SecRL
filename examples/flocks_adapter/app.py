@@ -207,11 +207,13 @@ class FlocksClient:
         payload = await self._request(
             "GET", f"/api/session/{session_id}/message"
         )
-        messages = payload.get("messages") or payload.get("info") or []
-        if not isinstance(messages, list):
-            raise FlocksUpstreamError("Flocks message response is malformed")
+        messages = _message_list(payload)
         for message in reversed(messages):
-            if not isinstance(message, dict) or message.get("role") != "assistant":
+            if not isinstance(message, dict):
+                continue
+            info = message.get("info") if isinstance(message.get("info"), dict) else {}
+            role = message.get("role") or info.get("role")
+            if role != "assistant":
                 continue
             text = _assistant_text(message)
             if text is None:
@@ -225,7 +227,7 @@ class FlocksClient:
         path: str,
         *,
         json_body: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
+    ) -> Any:
         try:
             response = await self._client.request(
                 method,
@@ -245,13 +247,36 @@ class FlocksClient:
             payload = response.json()
         except ValueError as exc:
             raise FlocksUpstreamError("Flocks returned invalid JSON") from exc
-        if not isinstance(payload, dict):
-            raise FlocksUpstreamError("Flocks response must be an object")
+        if not isinstance(payload, (dict, list)):
+            raise FlocksUpstreamError("Flocks response must be an object or array")
         return payload
+
+
+def _message_list(payload: Any) -> list[Any]:
+    """Normalize the message endpoint's shapes into a list of message dicts.
+
+    Observed on a live deployment: a bare JSON array of MessageWithParts
+    entries, each carrying ``info`` (role/tokens) and ``parts`` (text).  Older
+    shapes returned a page object instead, so both are accepted here.
+    """
+    if isinstance(payload, list):
+        return payload
+    if isinstance(payload, dict):
+        for key in ("messages", "items"):
+            if isinstance(payload.get(key), list):
+                return payload[key]
+        if isinstance(payload.get("info"), dict):
+            # Single MessageWithParts object.
+            return [payload]
+    raise FlocksUpstreamError("Flocks message response is malformed")
 
 
 def _assistant_text(message: dict[str, Any]) -> str | None:
     parts = message.get("parts")
+    if not isinstance(parts, list):
+        info = message.get("info")
+        if isinstance(info, dict):
+            parts = info.get("parts")
     if isinstance(parts, list):
         chunks = [
             str(part["text"])
@@ -269,8 +294,15 @@ def _assistant_text(message: dict[str, Any]) -> str | None:
 
 
 def _usage_from(message: dict[str, Any], *, report_usage: bool) -> UsageSnapshot:
-    tokens = message.get("tokens")
-    if not isinstance(tokens, dict) or not report_usage:
+    # Live shape: token stats live under message["info"]["tokens"]; the bare
+    # message dict is accepted for older/other Flocks shapes.
+    tokens = None
+    info = message.get("info")
+    if isinstance(info, dict) and isinstance(info.get("tokens"), dict):
+        tokens = info["tokens"]
+    elif isinstance(message.get("tokens"), dict):
+        tokens = message["tokens"]
+    if tokens is None or not report_usage:
         return UsageSnapshot()
     cache = tokens.get("cache") if isinstance(tokens.get("cache"), dict) else {}
 
