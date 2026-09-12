@@ -60,7 +60,13 @@ def adapter_settings(**overrides: Any) -> FlocksSettings:
 
 
 class FakeFlocks:
-    """Scripted stand-in for the Flocks native session API."""
+    """Scripted stand-in for the Flocks native session API.
+
+    Defaults to the wire format observed on a live deployment: ``/message``
+    returns a bare array of MessageWithParts entries whose ``info`` dict holds
+    role and token stats, and ``/status`` reports ``isProcessing``.  The
+    legacy shapes are still selectable via ``message_shape``/``status_shape``.
+    """
 
     def __init__(self) -> None:
         self.replies: list[dict[str, Any]] = []
@@ -69,7 +75,23 @@ class FakeFlocks:
         self.sessions: dict[str, list[dict[str, Any]]] = {}
         self.status_mode = "idle"
         self.fail_create = False
+        self.message_shape = "array"  # "array" | "page"
+        self.status_shape = "processing"  # "processing" | "plain"
         self._counter = 0
+
+    def messages_payload(self, session_messages: list[dict[str, Any]]) -> Any:
+        if self.message_shape == "page":
+            return {"messages": session_messages}
+        return [
+            {
+                "info": {
+                    "role": message["role"],
+                    **({"tokens": message["tokens"]} if "tokens" in message else {}),
+                },
+                "parts": message["parts"],
+            }
+            for message in session_messages
+        ]
 
     def script(self, *texts: str, tokens: dict[str, Any] | None = None) -> None:
         for text in texts:
@@ -130,14 +152,28 @@ class FakeFlocks:
                 session_id = path.removeprefix("/api/session/").removesuffix("/status")
                 if session_id not in fake.sessions:
                     status, payload = 404, {"error": "unknown session"}
-                else:
+                elif fake.status_shape == "plain":
+                    # Legacy bare shape; "isProcessing" sentinel emits
+                    # {"isProcessing": false}, any other mode emits
+                    # {"status": <mode>}.
                     if fake.status_mode == "isProcessing":
                         payload = {"isProcessing": False}
                     else:
                         payload = {"status": fake.status_mode}
+                else:
+                    # Live shape: SessionRuntimeStatusResponse with isProcessing.
+                    processing = fake.status_mode not in {"idle", "error"}
+                    payload = {
+                        "sessionID": session_id,
+                        "lifecycleStatus": "active",
+                        "status": {"type": fake.status_mode},
+                        "isProcessing": processing,
+                        "pendingPromptCount": 0,
+                        "observedAt": 0,
+                    }
             elif path.endswith("/message"):
                 session_id = path.removeprefix("/api/session/").removesuffix("/message")
-                payload = {"messages": fake.sessions.get(session_id, [])}
+                payload = fake.messages_payload(fake.sessions.get(session_id, []))
             else:
                 status, payload = 404, {"error": "no route"}
             raw = json.dumps(payload).encode()
@@ -480,7 +516,9 @@ class FlocksAdapterHttpTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 502)
 
     async def test_status_isProcessing_shape_is_accepted_as_idle(self):
-        self.fake.status_mode = "isProcessing"  # legacy shape: no status field
+        """Legacy bare {isProcessing: false} status shape still works."""
+        self.fake.status_shape = "plain"
+        self.fake.status_mode = "isProcessing"  # sentinel: not "idle", not "error"
         await _aclose(self.client, self.flocks_client)
         self.client, self.flocks_client = make_clients(adapter_settings(), self.fake)
         session_id = await self.open_session()
@@ -494,6 +532,62 @@ class FlocksAdapterHttpTest(unittest.IsolatedAsyncioTestCase):
         body = response.json()
         self.assertEqual(body["action"]["type"], "tool_call")
         self.assertEqual(body["request_id"], "req-ip")
+
+    async def test_live_message_array_shape_with_info_tokens(self):
+        """Live Flocks returns /message as a bare array with info.tokens; the
+        adapter must read role/parts/tokens through the info wrapper."""
+        session_id = await self.open_session()
+        self.fake.script("SQL: SELECT 1")
+        # The fake already emits the live array shape by default; assert the
+        # path end-to-end including usage extracted from info.tokens.
+        self.fake.replies.clear()
+        self.fake.replies.append({
+            "role": "assistant",
+            "tokens": {"input": 77, "output": 5, "reasoning": 1},
+            "parts": [{"type": "text", "text": "SQL: SELECT 2"}],
+        })
+        response = await self.client.post(
+            f"/v1/sessions/{session_id}:act",
+            json=act_payload(Observation(type="tool_result", content={}), "req-live", 1),
+            headers=AUTH,
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        body = response.json()
+        self.assertEqual(body["action"]["arguments"], {"query": "SELECT 2"})
+        self.assertEqual(body["usage"]["prompt_tokens"], 77)
+        self.assertEqual(body["usage"]["completion_tokens"], 5)
+
+    async def test_message_page_shape_still_accepted(self):
+        """Older Flocks versions return {messages: [...]}; must keep working."""
+        session_id = await self.open_session()
+        self.fake.message_shape = "page"
+        self.fake.script("SUBMIT: page-shaped")
+        response = await self.client.post(
+            f"/v1/sessions/{session_id}:act",
+            json=act_payload(Observation(type="tool_result", content={}), "req-page", 1),
+            headers=AUTH,
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["action"]["answer"], "page-shaped")
+
+    async def test_empty_text_parts_are_skipped_until_real_text(self):
+        """Live rex splits a reply into several text parts (first can be '') --
+        the adapter must join them, not treat the message as textless."""
+        session_id = await self.open_session()
+        self.fake.replies.append({
+            "role": "assistant",
+            "parts": [
+                {"type": "text", "text": ""},
+                {"type": "text", "text": "SUBMIT: joined"},
+            ],
+        })
+        response = await self.client.post(
+            f"/v1/sessions/{session_id}:act",
+            json=act_payload(Observation(type="tool_result", content={}), "req-split", 1),
+            headers=AUTH,
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["action"]["answer"], "joined")
 
     async def test_flocks_never_idle_maps_to_request_timeout(self):
         self.fake.status_mode = "busy"
