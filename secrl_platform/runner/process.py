@@ -95,6 +95,15 @@ class RunnerProcess:
         return await self._engine.run(task_id, run_id)
 
 
+def _agent_service_factory_timeout(settings: Settings) -> float:
+    """Per-request timeout the runner grants to Agent Service calls.
+
+    Single wiring point from Settings into ServiceConfig/transport so the
+    consumer test can pin it without constructing a full runtime.
+    """
+    return settings.agent_service_timeout_seconds
+
+
 def capability_signer(
     settings: Settings,
     *,
@@ -380,7 +389,9 @@ def _resolve_runtime(
     transport = agent_service_transport
     if transport is None:
         owned_client = httpx.AsyncClient(follow_redirects=False, trust_env=False)
-        transport = HttpxAgentServiceTransport(owned_client)
+        transport = HttpxAgentServiceTransport(
+            owned_client, timeout=settings.agent_service_timeout_seconds
+        )
     current_token = {"value": token}
 
     def service_factory():
@@ -390,6 +401,7 @@ def _resolve_runtime(
                 expected_manifest_sha256=service_manifest_sha256,
                 agent_revision_id=manifest.agent_id,
                 capability_token=current_token["value"],
+                timeout_seconds=settings.agent_service_timeout_seconds,
             ),
             transport=transport,
             settings=settings,
