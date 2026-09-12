@@ -118,6 +118,36 @@ are pinned-internal-HTTP only.
    `FLOCKS_USAGE_REPORTED=false` so the manifest advertises `+no-usage` rather
    than silently reporting zeros.
 
+### Both points verified on a live deployment (2026-09-12)
+
+- **Usage: PASS.** `info.tokens.{input,output,reasoning,cache}` is present on
+  every assistant message and the adapter forwards it as `ActResponse.usage`.
+- **Tool bypass: PASS with the dedicated `secl-eval` agent, FAIL with rex.**
+  The primary `rex` agent silently expands an empty `tools: []` into *all*
+  builtin tools (Flocks `resolve_agent_initial_tools` special-cases rex), so
+  it will run real `bash` tool calls when tempted — do not use it. The fix is
+  a storage-based custom agent created via Flocks' own API:
+
+```sh
+curl -s -X POST -H "Authorization: Bearer $FLOCKS_API_TOKEN" \
+  -H "Content-Type: application/json" "$FLOCKS_BASE_URL/api/agent" -d '{
+  "name": "secl-eval",
+  "prompt": "You are a read-only evaluation responder ... (see examples/flocks_adapter for the full prompt)",
+  "mode": "primary",
+  "temperature": 0,
+  "delegatable": false,
+  "tools": [],
+  "skills": [],
+  "permission": [{"permission": "*", "pattern": "*", "action": "deny"}]
+}'
+```
+
+  A non-`rex` custom agent with empty `tools` resolves to zero loaded tool
+  schemas at session time, and the `*: deny` permission ruleset is a second,
+  independent gate. Re-verified after creation: a tool-tempting prompt
+  produced grammar-clean `SQL:`/`SUBMIT:` replies across a three-turn session
+  with **zero tool spans** in the Flocks session record.
+
 ## Tests
 
 Offline only -- a fake Flocks ASGI app is injected via `httpx` transport, so no
