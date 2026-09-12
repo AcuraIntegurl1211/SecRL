@@ -21,6 +21,7 @@ from examples.flocks_adapter.app import (
     create_app,
     observation_to_text,
     parse_action,
+    _turn_prefix,
 )
 from secrl_platform.agents.protocol import EpisodeContext
 from secrl_platform.agents.service import (
@@ -361,7 +362,7 @@ class FlocksAdapterHttpTest(unittest.IsolatedAsyncioTestCase):
         prompt = self.fake.prompts[0]
         self.assertEqual(prompt["agent"], "secl-eval")
         self.assertEqual(prompt["model"], {"providerID": "openai", "modelID": "gpt-test-x"})
-        self.assertEqual(prompt["parts"], [{"type": "text", "text": "Investigate this incident.\nQuestion: q"}])
+        self.assertEqual(prompt["parts"], [{"type": "text", "text": "[Turn 1/16, 15 remaining]\nInvestigate this incident.\nQuestion: q"}])
 
     async def test_sql_maps_to_preferred_tool_in_generic_episode(self):
         session_id = await self.open_session(smoke_episode())
@@ -627,6 +628,66 @@ class ObservationRenderingTest(unittest.TestCase):
         )
         self.assertIn('"result"', text)
         self.assertIn("[truncated]", text)
+
+
+class TurnBudgetPrefixTest(unittest.TestCase):
+    """Every prompt opens with an adapter-owned turn counter; the last two
+    turns force SUBMIT (the first live run died at 15/15 tool_calls, never
+    submitting)."""
+
+    def test_prefix_counts_up_and_remaining_down(self):
+        self.assertEqual(
+            _turn_prefix(1, 15), "[Turn 1/15, 14 remaining]\n"
+        )
+        self.assertEqual(
+            _turn_prefix(15, 15), "[Turn 15/15, 0 remaining] 0 turn(s) left. You MUST answer with SUBMIT now; no more SQL.\n"
+        )
+
+    def test_urgency_kicks_in_for_last_two_turns(self):
+        self.assertIn("MUST answer with SUBMIT", _turn_prefix(14, 15))
+        self.assertIn("MUST answer with SUBMIT", _turn_prefix(15, 15))
+        self.assertIn("MUST answer with SUBMIT", _turn_prefix(13, 15))  # 2 left
+        self.assertNotIn("MUST answer", _turn_prefix(12, 15))  # 3 left
+
+    def test_halfway_nudge(self):
+        self.assertIn("converging", _turn_prefix(8, 15))
+        self.assertNotIn("converging", _turn_prefix(7, 15))
+
+    def test_zero_remaining_is_clamped(self):
+        banner = _turn_prefix(99, 15)
+        self.assertIn("0 remaining", banner)
+
+    async def test_act_prompts_carry_turn_prefix(self):
+        import asyncio
+
+        from tests.platform.test_api import ApiTest  # noqa: F401  (harness import side effects)
+
+        settings = adapter_settings()
+        fake = FakeFlocks()
+        client, flocks_client = make_clients(settings, fake)
+        try:
+            response = await client.post(
+                "/v1/sessions", json=session_payload(secrl_like_episode()), headers=AUTH
+            )
+            self.assertEqual(response.status_code, 200, response.text)
+            session_id = response.json()["session_id"]
+            fake.script("SQL: SELECT 1", "SUBMIT: done")
+            first = await client.post(
+                f"/v1/sessions/{session_id}:act",
+                json=act_payload(Observation(type="episode_start", content={"question": "q"}), "t1", 1),
+                headers=AUTH,
+            )
+            self.assertEqual(first.status_code, 200, first.text)
+            second = await client.post(
+                f"/v1/sessions/{session_id}:act",
+                json=act_payload(Observation(type="tool_result", content={}), "t2", 2),
+                headers=AUTH,
+            )
+            self.assertEqual(second.status_code, 200, second.text)
+            self.assertTrue(fake.prompt_texts[0].startswith("[Turn 1/16, 15 remaining]"))
+            self.assertTrue(fake.prompt_texts[1].startswith("[Turn 2/16, 14 remaining]"))
+        finally:
+            await _aclose(client, flocks_client)
 
 
 class ParseActionTest(unittest.TestCase):
