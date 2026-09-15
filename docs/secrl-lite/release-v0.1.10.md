@@ -17,10 +17,13 @@ audited source revision locally with Docker Compose.
 
 - The Agent Service Protocol v1 transport hardcoded a **10-second** budget for
   every request. That is too small for a service whose `:act` synchronously
-  awaits an upstream model: the first live SecRL run through the Flocks bridge
-  completed its fastest case but lost three consecutive attempts on a slower
-  one to retryable `DEADLINE_EXCEEDED` (each attempt consuming two 10s
-  transport timeouts).
+  awaits an upstream model. In an authorized live integration session against a
+  local deployment (2026-09-12, recorded on the operator side rather than in
+  this repository), a run through the Flocks bridge completed its fastest case
+  but lost three consecutive attempts on a slower one to retryable
+  `DEADLINE_EXCEEDED`. The arithmetic is structural: one failing `:act` call
+  spends its whole retry budget (`max_attempts=2`), i.e. two transport
+  requests of 10 seconds each.
 - `SECRL_AGENT_SERVICE_TIMEOUT_SECONDS` now sets the per-request budget
   (bounds 1-600, default 10). The runner threads it into both the per-run
   `ServiceConfig` and the transport it owns.
@@ -56,9 +59,10 @@ audited source revision locally with Docker Compose.
 - With `SECRL_AGENT_SERVICE_TIMEOUT_SECONDS` unset, behavior is byte-identical
   to v0.1.9: the transport budget stays at 10 seconds and no other Agent
   Service semantics change.
-- PR #28, #29 and #31 touch `examples/flocks_adapter/` and documentation only.
-  The platform never imports the adapter, so no platform behavior, schema, or
-  hash changes because of them.
+- PR #28, #29 and #31 change only `examples/flocks_adapter/`, its platform
+  test file (`tests/platform/test_flocks_adapter.py`), and documentation. The
+  platform runtime never imports the adapter, so no platform behavior, schema,
+  or hash changes follow from them.
 - No schema, API, or task-format change. Existing model revisions, tasks,
   RunSpecs, and BenchmarkRevision hashes are untouched.
 
@@ -110,9 +114,10 @@ live volume in place. Re-run health and preflight checks before resuming work.
 - Platform cost and token accounting cannot observe an external agent's own
   model spend; budgets constrain platform-gateway calls only. External-agent
   spend must be reconciled on the provider side.
-- The single live comparison case through the bridge now completes the episode
-  and submits, but scored partial credit; answer quality is bounded by the
-  configured external model, not by the bridge.
+- In the same live session, the single comparison case through the bridge
+  completed the episode and submitted, but scored partial credit; answer
+  quality is bounded by the configured external model, not by the bridge. No
+  repo-side artifact records that session.
 
 ## Verification summary
 
